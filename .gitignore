@@ -1,5 +1,9 @@
-db/
+# 数据库文件（运行时自动生成）
+db/game.db
+# 编译缓存
 *.pyc
 __pycache__/
+# 虚拟环境
 .venv/
+# 工作目录
 .sisyphus/

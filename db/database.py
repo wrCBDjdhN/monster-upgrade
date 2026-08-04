@@ -1,0 +1,164 @@
+"""SQLite 数据库初始化与 CRUD（兼容层）
+
+本文件保留所有原始函数的 re-export，确保现有 import 代码无需修改。
+实际实现已拆分到以下模块：
+- db/connection.py: 数据库连接
+- db/players.py: 玩家管理
+- db/weapons.py: 武器管理
+- db/equipment.py: 装备管理
+- db/warehouse.py: 仓库管理
+- db/potions.py: 药水管理
+"""
+
+import sqlite3
+import os
+from datetime import datetime
+
+# 数据库文件路径（与本文件同目录）
+DB_PATH = os.path.join(os.path.dirname(__file__), "game.db")
+
+
+def _conn():
+    """获取数据库连接"""
+    return sqlite3.connect(DB_PATH)
+
+
+# ── 数据库初始化（保留在此文件，因为涉及所有表的创建） ──
+
+def init_db():
+    """初始化数据库：创建所有表（如果不存在）
+
+    表结构说明：
+    1. players: 玩家基础信息
+    2. warehouse_items: 仓库物品（支持叠加数量）
+    3. weapons: 武器（含伤害、攻速、等级）
+    4. equipment: 装备（头盔/护甲/背包，含防御力、容量）
+    5. potions: 药水（含效果、数值、持续时间）
+    """
+    with _conn() as c:
+        # 玩家表
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS players (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                gold INTEGER NOT NULL DEFAULT 50,
+                created_at TEXT NOT NULL
+            )
+        """)
+        # 仓库物品表（资源和武器）
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS warehouse_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                player_id INTEGER NOT NULL,
+                item_type TEXT NOT NULL CHECK(item_type IN ('resource','weapon')),
+                item_id TEXT NOT NULL,
+                quantity INTEGER NOT NULL DEFAULT 1,
+                FOREIGN KEY(player_id) REFERENCES players(id)
+            )
+        """)
+        # 武器表（玩家拥有的武器实例）
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS weapons (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                player_id INTEGER NOT NULL,
+                item_id TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK(kind IN ('melee','ranged')),
+                name TEXT NOT NULL,
+                damage REAL NOT NULL,
+                attack_speed REAL NOT NULL,
+                level INTEGER NOT NULL DEFAULT 1,
+                FOREIGN KEY(player_id) REFERENCES players(id)
+            )
+        """)
+        # 装备表（头盔/护甲/背包）
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS equipment (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                player_id INTEGER NOT NULL,
+                slot TEXT NOT NULL CHECK(slot IN ('helmet','armor','backpack')),
+                item_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                defense INTEGER NOT NULL DEFAULT 0,
+                capacity INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY(player_id) REFERENCES players(id)
+            )
+        """)
+        # 药水表
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS potions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                player_id INTEGER NOT NULL,
+                item_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                effect TEXT NOT NULL,
+                value REAL NOT NULL,
+                duration REAL NOT NULL DEFAULT 0,
+                quantity INTEGER NOT NULL DEFAULT 1,
+                FOREIGN KEY(player_id) REFERENCES players(id)
+            )
+        """)
+        # 为 equipment 表添加 level 列（如果不存在）
+        try:
+            c.execute("ALTER TABLE equipment ADD COLUMN level INTEGER NOT NULL DEFAULT 1")
+        except Exception:
+            pass  # 列已存在
+        # 为 equipment 表添加 is_equipped 列（如果不存在）
+        try:
+            c.execute("ALTER TABLE equipment ADD COLUMN is_equipped INTEGER NOT NULL DEFAULT 1")
+        except Exception:
+            pass  # 列已存在
+
+        # 为 weapons 表添加 item_id 列（如果不存在）
+        try:
+            c.execute("ALTER TABLE weapons ADD COLUMN item_id TEXT NOT NULL DEFAULT ''")
+        except Exception:
+            pass  # 列已存在
+
+        # 为 weapons 表添加 effects 列（Lv.5+ 物品随机附加效果，逗号分隔效果id可重复）
+        try:
+            c.execute("ALTER TABLE weapons ADD COLUMN effects TEXT NOT NULL DEFAULT ''")
+        except Exception:
+            pass  # 列已存在
+        # 为 equipment 表添加 effects 列（同上）
+        try:
+            c.execute("ALTER TABLE equipment ADD COLUMN effects TEXT NOT NULL DEFAULT ''")
+        except Exception:
+            pass  # 列已存在
+
+        # 更新旧武器数据的 item_id（根据名称匹配）
+        from entities.weapon_defs import MELEE_WEAPONS, RANGED_WEAPONS
+        all_weapons = {}
+        all_weapons.update(MELEE_WEAPONS)
+        all_weapons.update(RANGED_WEAPONS)
+        # 创建名称到item_id的映射
+        name_to_item_id = {}
+        for item_id, info in all_weapons.items():
+            name_to_item_id[info["name"]] = item_id
+        # 更新item_id为空的旧数据
+        rows = c.execute("SELECT id, name FROM weapons WHERE item_id = '' OR item_id IS NULL").fetchall()
+        for wid, wname in rows:
+            new_item_id = name_to_item_id.get(wname, '')
+            if new_item_id:
+                c.execute("UPDATE weapons SET item_id = ? WHERE id = ?", (new_item_id, wid))
+
+
+# ── Re-exports（保持向后兼容） ──
+
+# 玩家管理
+from db.players import get_or_create_player, get_gold, add_gold, spend_gold  # noqa: F401, E402
+
+# 武器管理
+from db.weapons import create_weapon, add_weapon, get_weapons, upgrade_weapon, sell_weapon, delete_weapon  # noqa: F401, E402
+
+# 装备管理
+from db.equipment import (  # noqa: F401, E402
+    get_equipment, get_equipment_inventory, equip_item, equip_from_inventory,
+    unequip_slot, get_total_defense, get_backpack_capacity, add_equipment,
+    get_equipment_materials, upgrade_equipment, sell_equipment, delete_equipment,
+)
+
+# 仓库管理
+from db.warehouse import add_warehouse_item, get_warehouse, sell_warehouse_item  # noqa: F401, E402
+
+# 药水管理
+from db.potions import add_potion, get_potions, use_potion, remove_potion  # noqa: F401, E402
