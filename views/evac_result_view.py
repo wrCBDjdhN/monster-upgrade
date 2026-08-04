@@ -1,0 +1,155 @@
+"""撤离结果页面：显示撤离成功/失败和当局收益"""
+
+import arcade
+from config import WINDOW_WIDTH, WINDOW_HEIGHT
+from entities.resource_defs import RESOURCES       # 资源ID → 中文名
+from entities.weapon_defs import ALL_WEAPONS       # 武器ID → 中文名
+from entities.equipment_defs import get_item_def   # 装备(头盔/护甲)ID → 中文名
+
+
+class EvacResultView(arcade.View):
+    """撤离结果页面"""
+    
+    def __init__(self, window, success: bool, run_carried: dict = None):
+        """
+        初始化撤离结果页面
+        
+        Args:
+            window: 窗口引用
+            success: 是否撤离成功
+            run_carried: 本次携带的物品（成功时显示收益，失败时为空）
+        """
+        super().__init__()
+        self.window_ref = window
+        self.success = success
+        self.run_carried = run_carried or {}
+        self.return_rect = arcade.XYWH(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - 180, 220, 50)
+        self.return_hover = False
+        
+    def on_show_view(self):
+        self.window.background_color = arcade.color.DARK_SLATE_GRAY
+        
+    def on_draw(self):
+        self.clear()
+        
+        # 标题
+        if self.success:
+            title = "撤离成功!"
+            title_color = arcade.color.GREEN
+            subtitle = "战利品已存入仓库"
+        else:
+            title = "撤离失败!"
+            title_color = arcade.color.RED
+            subtitle = "所有携带物品已丢失"
+            
+        arcade.draw_text(
+            title,
+            WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 + 120,
+            title_color, font_size=48, anchor_x="center", bold=True,
+        )
+        arcade.draw_text(
+            subtitle,
+            WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 + 70,
+            arcade.color.LIGHT_GRAY, font_size=18, anchor_x="center",
+        )
+        
+        # 显示收益详情
+        if self.success and self.run_carried:
+            y = WINDOW_HEIGHT // 2 + 20
+            arcade.draw_text(
+                "本次收益:",
+                WINDOW_WIDTH // 2, y,
+                arcade.color.GOLD, font_size=20, anchor_x="center", bold=True,
+            )
+            y -= 35
+            
+            # 金币
+            gold = self.run_carried.get("gold", 0)
+            if gold > 0:
+                arcade.draw_text(
+                    f"金币: {gold}",
+                    WINDOW_WIDTH // 2, y,
+                    arcade.color.YELLOW, font_size=16, anchor_x="center",
+                )
+                y -= 25
+                
+            BOTTOM_Y = 230  # 资源/武器/装备列表最低绘制线，防止条目过多时超出屏幕
+            hidden = 0      # 因空间不足被省略的条目数
+
+            # 资源（显示中文名）
+            resources = self.run_carried.get("resource", {})
+            for res_id, qty in resources.items():
+                if y < BOTTOM_Y:
+                    hidden += 1
+                    continue
+                res_name = RESOURCES.get(res_id, {}).get("name", res_id)
+                arcade.draw_text(
+                    f"{res_name}: {qty}",
+                    WINDOW_WIDTH // 2, y,
+                    arcade.color.WHITE, font_size=16, anchor_x="center",
+                )
+                y -= 25
+                
+            # 武器（显示中文名）
+            weapons = self.run_carried.get("weapon", {})
+            for (wid, level), qty in weapons.items():
+                if y < BOTTOM_Y:
+                    hidden += 1
+                    continue
+                w_name = ALL_WEAPONS.get(wid, {}).get("name", wid)
+                arcade.draw_text(
+                    f"武器: {w_name} Lv{level} x{qty}",
+                    WINDOW_WIDTH // 2, y,
+                    (100, 200, 255), font_size=16, anchor_x="center",
+                )
+                y -= 25
+                
+            # 装备（显示中文名）
+            for slot in ("helmet", "armor"):
+                items = self.run_carried.get(slot, {})
+                for (iid, level), qty in items.items():
+                    if y < BOTTOM_Y:
+                        hidden += 1
+                        continue
+                    eq_def = get_item_def(slot, iid)
+                    e_name = eq_def["name"] if eq_def else iid
+                    arcade.draw_text(
+                        f"装备: {e_name} Lv{level} x{qty}",
+                        WINDOW_WIDTH // 2, y,
+                        (180, 180, 220), font_size=16, anchor_x="center",
+                    )
+                    y -= 25
+
+            # 空间不足时给出提示，避免信息被省略后用户不知去向
+            if hidden > 0:
+                arcade.draw_text(
+                    f"（另有 {hidden} 项已存入仓库）",
+                    WINDOW_WIDTH // 2, BOTTOM_Y,
+                    arcade.color.GRAY, font_size=14, anchor_x="center",
+                )
+        elif not self.success:
+            # 失败时显示提示
+            arcade.draw_text(
+                "下次加油!",
+                WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2,
+                arcade.color.ORANGE, font_size=24, anchor_x="center",
+            )
+        
+        # 返回按钮
+        btn_color = arcade.color.DARK_GREEN if self.return_hover else arcade.color.GREEN
+        arcade.draw_rect_filled(self.return_rect, btn_color)
+        arcade.draw_text(
+            "返回大厅",
+            WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - 180,
+            arcade.color.WHITE, font_size=18, anchor_x="center", anchor_y="center",
+            bold=True,
+        )
+        
+    def on_mouse_motion(self, x, y, dx, dy):
+        self.return_hover = self.return_rect.point_in_rect((x, y))
+        
+    def on_mouse_press(self, x, y, button, modifiers):
+        if button == arcade.MOUSE_BUTTON_LEFT:
+            if self.return_rect.point_in_rect((x, y)):
+                from views.start_view import StartView
+                self.window.show_view(StartView(self.window_ref))

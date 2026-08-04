@@ -1,0 +1,16 @@
+{
+  "typeCheckingMode": "off",
+  "pythonVersion": "3.14",
+  "reportMissingImports": true,
+  "reportMissingModuleSource": false,
+  "reportUnknownMemberType": "none",
+  "reportUnknownVariableType": "none",
+  "reportUnknownArgumentType": "none",
+  "reportMissingTypeArgument": "none",
+  "reportOptionalOperand": "none",
+  "reportOptionalMemberAccess": "none",
+  "extraPaths": [
+    "C:/Users/pc/AppData/Local/Programs/Python/Python314/Lib/site-packages"
+  ],
+  "exclude": ["**/node_modules", "**/__pycache__", "db/game.db"]
+}

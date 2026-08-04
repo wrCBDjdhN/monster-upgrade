@@ -1,0 +1,223 @@
+# AI 编码规范 - 打怪升级项目
+
+## 项目知识库（结构速览）
+
+> 技术栈：Python 3.14 + Arcade 2D 引擎 + SQLite（依赖仅 `arcade`）。运行：`python main.py`
+
+### 目录结构
+```
+打怪升级/
+├── main.py       # 入口：arcade.Window + GameState（各 View 共享状态，含 player_id/run_carried/当前武器/地图种子）
+├── config.py     # 全部数值常量（窗口/玩家/怪物/战斗/掉落/升级公式/宝箱），调整平衡性只改这里
+├── entities/     # 数据定义：weapon_defs / equipment_defs / resource_defs / effects_defs（见 entities/AGENTS.md）
+├── db/           # SQLite 层：connection / database(建表+CRUD re-export) / players / weapons / equipment / warehouse / potions（见 db/AGENTS.md）
+├── game/         # 核心逻辑：怪物AI / 战斗 / 地图生成 / 掉落 / 撤离 / 宝箱 / 特效 / 渲染 / 音效 / 输入 / 刷新（见 game/AGENTS.md）
+└── views/        # UI：start / map_select / game(~700行,最大) / warehouse / market / forge / backpack / scroll（见 views/AGENTS.md）
+```
+
+### 高频入口速查
+| 想做什么 | 去哪里 |
+|---------|--------|
+| 调数值/平衡 | `config.py`（禁硬编码数值） |
+| 加武器/装备/资源/效果 | `entities/*_defs.py`（effects 规则见 entities/AGENTS.md） |
+| 加怪物 | `game/monsters.py`（复制 Zombie/Skeleton 模式，已有 8 类怪物） |
+| 加怪物装备分配 | `game/monster_utils.py`（assign_monster_weapon/armor/helmet） |
+| 加 UI 界面 | `views/*_view.py`（arcade.View 子类，可滚动面板继承 scroll_view.py） |
+| 加数据库操作 | `db/`（sqlite3 stdlib，`with _conn() as c`；新函数须追加到 db/database.py re-export） |
+| 视图间传数据 | `window.game_state`（main.GameState），禁全局变量 |
+
+### 关键约定
+- 中文 docstring + 中文注释为硬性约定；汇报必须中文
+- 视图切换用 `window.show_view()`；函数内延迟 import 避免 views 循环依赖
+- 怪物护甲/头盔/武器分配集中在 `game/monster_utils.py` 的 `assign_monster_armor()`/`assign_monster_helmet()`/`assign_monster_weapon()`
+- `db/database.py` 保留全量 re-export 兼容旧 import；`db/game.db` 为 SQLite 数据文件（pyright 已排除）
+- 玩家速度 4px/帧：PhysicsEngineSimple 不乘 delta_time
+- 渲染禁空心/线框绘制（`draw_*_outline`/`draw_line` 等会导致闪烁）：一律不透明实心填充（见 game/AGENTS.md）
+- game/ 层可经 `db.database` 读数据、`input_handler.py` 反向依赖 views（TAB 开背包）属例外
+
+## 核心工作流程
+
+每次接收任务后，必须按以下顺序执行：
+
+### 第一步：理解任务
+1. **阅读相关代码**：在开始修改前，必须先阅读涉及的文件，理解当前实现
+2. **确认理解**：用自己的话复述任务目标，确保理解正确
+3. **提出疑问**：如有任何不清楚的地方，必须向用户询问，不要假设
+
+### 第二步：执行任务
+1. **最小化修改**：只修改必要的代码，不要做无关的重构
+2. **保持功能不变**：除非用户明确要求，不要改变游戏现有功能
+3. **添加注释**：修改处添加中文注释说明修改原因
+
+### 第三步：测试验证
+1. **运行测试**：本仓库**无测试套件**（无 pytest/tests/），验证手段 = 手动运行 `python main.py` + 静态检查 `pyright`（配置见 pyrightconfig.json）
+2. **检查语法**：确保代码没有语法错误（可用 `pyright` 或 `python -m py_compile <文件>`）
+3. **验证逻辑**：确认修改后的逻辑符合预期
+
+### 第四步：汇报结果
+1. **使用中文汇报**：所有汇报必须使用中文
+2. **说明修改内容**：清晰列出做了哪些修改
+3. **Bug修复说明**：如果是修复bug，必须说明：
+   - Bug产生的原因
+   - 如何发现的
+   - 如何修复的
+   - 修复后的效果
+
+---
+
+## 代码修改规范
+
+### 文件修改前
+- 先读取文件内容，理解当前实现
+- 确认修改不会破坏现有功能
+
+### 文件修改时
+- 保持代码风格一致
+- 添加必要的注释
+- 不要删除用户没有要求删除的代码
+
+### 文件修改后
+- 检查语法错误
+- 验证修改结果
+- 如有测试，运行测试
+
+---
+
+## 扩展性任务规范（重要）
+
+当需要添加新内容时（如新地图、新怪物、新武器、新装备等），**必须参考现有代码模式**，而不是自己发挥。
+
+### 必须参考的现有实现
+
+| 任务类型 | 参考文件 | 参考内容 |
+|---------|---------|---------|
+| 添加新怪物 | `game/monsters.py` | 类结构、属性定义（hp/damage/speed/armor/helmet）、AI行为 |
+| 添加新怪物生成 | `game/monster_utils.py` | `assign_monster_armor()`、`assign_monster_helmet()`、`assign_monster_weapon()` |
+| 添加新武器 | `entities/weapon_defs.py` | 武器定义格式（name/damage/attack_speed/range/price/color） |
+| 添加新装备 | `entities/equipment_defs.py` | 装备定义格式（name/defense/price/color/description） |
+| 添加新掉落物 | `game/loot.py` | 掉落表格式、掉落逻辑 |
+| 添加新资源 | `entities/resource_defs.py` | 资源定义格式（name/sell_price/color） |
+| 添加新地图元素 | `game/map_gen.py` | 生成逻辑、位置计算、碰撞处理 |
+| 添加新UI元素 | `views/game_view.py` | HUD绘制、世界坐标标签、屏幕坐标标签 |
+| 添加新效果 | `game/effects.py` | 粒子系统、浮动文字、音效播放 |
+
+### 操作步骤
+
+1. **先读取参考文件**：找到类似的现有实现
+2. **复制模式**：按照现有代码的结构和风格编写新代码
+3. **保持一致**：变量命名、注释风格、代码结构必须与现有代码一致
+4. **不要创新**：除非现有模式无法满足需求，否则不要发明新的实现方式
+
+### 示例
+
+**正确做法**（添加新怪物）：
+```python
+# 参考 game/monsters.py 中的 Zombie 类
+class NewMonster(arcade.SpriteSolidColor):
+    def __init__(self, center_x=0, center_y=0):
+        super().__init__(SIZE * 2, SIZE * 2, color=COLOR)
+        self.center_x = center_x
+        self.center_y = center_y
+        self.hp = HP
+        self.max_hp = HP
+        self.damage = DAMAGE
+        self.speed = SPEED
+        self._attack_timer = 0.0
+        self._on_death_cb = None
+        self._hit_flash = 0.0
+        self.room_bounds = None
+        self._walls = []
+        # 护甲系统
+        self.armor = None
+        self.armor_drop_id = None
+        # 头盔系统
+        self.helmet = None
+        self.helmet_drop_id = None
+```
+
+**错误做法**（自己发挥）：
+```python
+# 不参考现有代码，自己发明新的结构
+class NewMonster:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+        self.health = 100  # 变量名不一致
+        self.attack_power = 10  # 属性名不一致
+        # 缺少必要的属性和方法
+```
+
+---
+
+## 沟通规范
+
+### 任务开始前
+```
+我理解您的任务是：[复述任务]
+涉及的文件有：[列出文件]
+我的计划是：[简述步骤]
+如有疑问：[提出问题]
+```
+
+### 任务完成后
+```
+## 修改完成
+
+### 修改内容
+1. [修改1]
+2. [修改2]
+
+### Bug修复说明（如果是bug修复）
+- **Bug原因**：[原因]
+- **修复方法**：[方法]
+- **验证结果**：[结果]
+
+### 测试结果
+- [测试项1]：通过/失败
+- [测试项2]：通过/失败
+```
+
+---
+
+## 禁止事项
+
+1. **不要假设用户意图**：不清楚就问
+2. **不要过度修改**：只做必要的改动
+3. **不要删除功能**：除非用户明确要求
+4. **不要跳过测试**：修改后必须验证
+5. **不要使用英文汇报**：必须使用中文
+6. **不要自己发挥**：添加新内容时必须参考现有代码模式
+
+---
+
+## 示例
+
+### 正确做法
+```
+用户：修复宝箱和撤离点重叠的问题
+
+AI：
+我理解您的任务是：修复宝箱可能与撤离点重叠的问题
+涉及的文件有：game/map_gen.py
+我的计划是：在生成宝箱位置时检查是否与撤离点过近，如果是则重新生成
+
+[执行修改]
+
+## 修改完成
+
+### 修改内容
+1. 在 game/map_gen.py 中添加了宝箱与撤离点的最小距离检查（150像素）
+2. 如果宝箱位置与撤离点过近，会重新生成位置（最多尝试20次）
+
+### Bug修复说明
+- **Bug原因**：宝箱和撤离点是独立生成的，没有检查它们之间的距离
+- **修复方法**：生成宝箱时检查是否与任何撤离点距离小于150像素
+- **验证结果**：宝箱现在不会与撤离点重叠
+```
+
+### 错误做法
+```
+用户：修复宝箱和撤离点重叠的问题
+
+AI：[直接修改代码，没有说明理解，没有测试，用英文汇报]
+```
