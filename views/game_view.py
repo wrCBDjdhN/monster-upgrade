@@ -164,6 +164,9 @@ class GameView(arcade.View):
                         gs.equipped_helmet_id = eq["item_id"]
                     elif slot_name == "armor":
                         gs.equipped_armor_id = eq["item_id"]
+                    elif slot_name == "backpack":
+                        # 装备栏需要显示当前装备的背包，故同步记录 item_id
+                        gs.equipped_backpack_id = eq["item_id"]
                     # 处理装备被动效果（max_hp / regen / speed）
                     # 修复：效果元素为 "id:level" 格式，需先 parse_effect_item 解析出效果id与等级，
                     # 再用 effect_params 取分级后的数值（与武器效果处理逻辑保持一致），否则效果不生效
@@ -539,6 +542,44 @@ class GameView(arcade.View):
             # 获得容器即时生效：容量按背包定义设置，并同步到 GameState 供其他 View 使用
             self.player.backpack_capacity = bdef.get("capacity", 0)
             gs.backpack_capacity = self.player.backpack_capacity
+            # 记录当前装备的背包 item_id，供背包视图装备栏显示/丢弃
+            gs.equipped_backpack_id = d.item_id
+
+    def _add_equipped_to_carried(self, gs):
+        """撤离前将装备栏中的物品加入 run_carried，以便 commit_run_to_warehouse 入库
+        
+        装备栏物品原本不占 run_carried 容量（直接装备在身上），
+        但撤离时需要将它们保存到数据库，所以临时加入 run_carried。
+        """
+        carried = gs.run_carried
+        
+        # 武器：从 current_weapon_item_id 获取 item_id
+        weapon_item_id = getattr(gs, 'current_weapon_item_id', None)
+        if weapon_item_id:
+            carried.setdefault("weapon", {})
+            key = (weapon_item_id, 1)  # 免费装备的武器等级默认为1
+            carried["weapon"][key] = carried["weapon"].get(key, 0) + 1
+        
+        # 头盔
+        helmet_id = getattr(gs, 'equipped_helmet_id', None)
+        if helmet_id:
+            carried.setdefault("helmet", {})
+            key = (helmet_id, 1)
+            carried["helmet"][key] = carried["helmet"].get(key, 0) + 1
+        
+        # 护甲
+        armor_id = getattr(gs, 'equipped_armor_id', None)
+        if armor_id:
+            carried.setdefault("armor", {})
+            key = (armor_id, 1)
+            carried["armor"][key] = carried["armor"].get(key, 0) + 1
+        
+        # 背包
+        backpack_id = getattr(gs, 'equipped_backpack_id', None)
+        if backpack_id:
+            carried.setdefault("backpack", {})
+            key = (backpack_id, 1)
+            carried["backpack"][key] = carried["backpack"].get(key, 0) + 1
 
     def on_update(self, delta_time):
         self._frame += 1
@@ -722,6 +763,8 @@ class GameView(arcade.View):
                 dist = ((self.player.center_x - pad.center_x) ** 2 +
                         (self.player.center_y - pad.center_y) ** 2) ** 0.5
                 if dist < 80:  # 玩家在范围内，撤离成功
+                    # 将装备栏中的物品加入 run_carried 以便入库
+                    self._add_equipped_to_carried(gs)
                     # 修复：删除局部导入（顶部已导入），否则会让 commit_run_to_warehouse/clear_run
                     # 成为 on_update 的局部变量，未走此分支时第 814 行报 UnboundLocalError
                     commit_run_to_warehouse(gs.player_id, gs.run_carried)
@@ -856,6 +899,8 @@ class GameView(arcade.View):
 
         # 检测撤离完成
         if evac_result == "evacuated":
+            # 将装备栏中的物品加入 run_carried 以便入库
+            self._add_equipped_to_carried(gs)
             # 撤离成功：提交战利品到仓库
             commit_run_to_warehouse(gs.player_id, gs.run_carried)
             # 保存携带物品用于显示收益（先复制再清空）

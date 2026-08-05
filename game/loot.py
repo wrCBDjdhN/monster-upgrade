@@ -176,32 +176,27 @@ def try_pickup(player, drops: list[DropItem], run_carried: dict,
             continue
 
         # 判断是否可以免费装备（玩家缺少该类型装备时；无背包也可直接装备空槽位）
+        # 只检查当前装备槽位（equipped_*_id），不检查 run_carried 中的同类物品
+        # 这样：没有同类装备 → 直接装备（不占容量）；已有同类装备 → 放入背包（占容量）
         can_free_equip = False
         if d.item_type == "weapon":
-            # 如果玩家没有装备武器，且run_carried中也没有武器，可以免费装备（含无背包情况）
-            if equipped_weapon_id is None and not run_carried.get("weapon"):
+            # 如果玩家没有装备武器，可以免费装备（含无背包情况）
+            if equipped_weapon_id is None:
                 can_free_equip = True
         elif d.item_type in ("helmet", "armor"):
-            # 如果玩家没有装备该类型，且run_carried中也没有该类型，可以免费装备（含无背包情况）
+            # 如果玩家没有装备该类型，可以免费装备（含无背包情况）
             equipped_id = equipped_helmet_id if d.item_type == "helmet" else equipped_armor_id
-            if equipped_id is None and not run_carried.get(d.item_type):
+            if equipped_id is None:
                 can_free_equip = True
         elif d.item_type == "backpack":
-            # 玩家当前没有背包（无容量）且未携带背包时，可将捡到的背包直接装备（获得容器）
-            if capacity <= 0 and not run_carried.get("backpack"):
+            # 玩家当前没有背包（无容量）时，可将捡到的背包直接装备（获得容器）
+            if capacity <= 0:
                 can_free_equip = True
 
         if can_free_equip:
-            # 免费装备：直接存入 run_carried，不占容量
-            run_carried.setdefault(d.item_type, {})
-            # 武器装备/背包以 (item_id, level) 为键（支持同名不同等级并存）；资源/药水仍以 id 为键
-            if d.item_type in ("weapon", "helmet", "armor", "backpack"):
-                key = (d.item_id, d.level)
-            else:
-                key = d.item_id
-            run_carried[d.item_type][key] = run_carried[d.item_type].get(key, 0) + d.quantity
+            # 免费装备：直接装备到装备栏（不存入 run_carried，不占容量）
+            # 通过 on_free_equip 回调更新 GameState 和玩家属性
             picked.append(d)
-            # 局内即时生效回调：无背包拾取空槽位武器/装备/背包时立即穿戴/获得容量
             if on_free_equip is not None:
                 on_free_equip(d)
             continue
