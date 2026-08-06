@@ -3,12 +3,11 @@
 import math
 import random
 import copy
+import re  # 怪物类名 → snake_case 刷怪键转换
 import arcade
 from config import (
     WINDOW_WIDTH, WINDOW_HEIGHT, PLAYER_HP,
     PLAYER_SIZE, PLAYER_COLOR, TILE_SIZE,
-    ZOMBIE_SIZE, ZOMBIE_COLOR, ZOMBIE_ATTACK_DELAY,
-    SKELETON_SIZE, SKELETON_COLOR, SKELETON_ATTACK_DELAY,
     EVAC_COLOR, EVAC_RADIUS,
     WELL_HEAL, WELL_SPEED_MULT, WELL_SPEED_DURATION,
     MONSTER_WEAPON_LEVEL_RANGE, MONSTER_GEAR_LEVEL_RANGE,
@@ -16,12 +15,7 @@ from config import (
 )
 from game.map_gen import generate_map
 from game.player import Player, PlayerController
-from game.monsters import (
-    Zombie, Skeleton,
-    MummyMelee, MummyRanged, Camel,
-    BossZombie, BossSkeleton, BossMummy,
-    Sniper, Assault, Bandit, RocketTroop, BossSpace,  # 航天基地怪物（修复：缺此映射时 space 主题刷怪全落回 Zombie）
-)
+from game.monsters import Zombie, MummyMelee  # 刷怪映射兜底（未知类型回退用）
 from game.combat import CombatSystem
 from game.batch_shapes import ShapeBatch
 from game.loot import DropItem, roll_loot, try_pickup
@@ -45,6 +39,26 @@ from game.input_handler import (
     handle_key_press, handle_key_release, handle_mouse_motion,
     handle_mouse_press, handle_mouse_release,
 )
+
+# 怪物类映射自动生成：数据源 = MONSTER_CONFIGS（配置键即类名），刷怪键 = 类名转 snake_case，
+# is_boss 分流到 BOSS 表。新增怪物只需同步 monster_defs.py 与 monsters.py，无需再改本文件。
+from entities.monster_defs import MONSTER_CONFIGS
+import game.monsters as monsters
+
+
+def _spawn_key(class_name: str) -> str:
+    """怪物类名 → 刷怪类型键（CamelCase 转 snake_case，如 BossZombie → boss_zombie）"""
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", class_name).lower()
+
+
+_MONSTER_CLASSES: dict[str, type] = {
+    _spawn_key(n): getattr(monsters, n) for n in MONSTER_CONFIGS
+    if hasattr(monsters, n) and not MONSTER_CONFIGS[n].get("is_boss")
+}
+_BOSS_CLASSES: dict[str, type] = {
+    _spawn_key(n): getattr(monsters, n) for n in MONSTER_CONFIGS
+    if hasattr(monsters, n) and MONSTER_CONFIGS[n].get("is_boss")
+}
 
 
 class GameView(arcade.View):
@@ -127,6 +141,11 @@ class GameView(arcade.View):
 
     def setup(self):
         gs = self.window.game_state
+
+        # 清空上一局残留的漂浮文字（撤离成功提示等）
+        from game.effects import floating_texts
+        floating_texts.texts.clear()
+
         seed = gs.current_map_seed
         # 按所选地图主题生成（forest 森林 / desert 沙漠荒地）
         theme = getattr(gs, "map_theme", "forest")
@@ -235,26 +254,6 @@ class GameView(arcade.View):
 
         # 怪物
         walls_for_collision = self.map_data["walls"]
-
-        # 怪物类型字符串 → 类映射（与 game/respawn.py 的类型池保持一致）
-        _MONSTER_CLASSES = {
-            "zombie": Zombie,
-            "skeleton": Skeleton,
-            "mummy_melee": MummyMelee,
-            "mummy_ranged": MummyRanged,
-            "camel": Camel,
-            # 航天基地怪物（修复：缺失时 spawn_points/wild_spawns 的 space 类型全落回 Zombie）
-            "sniper": Sniper,
-            "assault": Assault,
-            "bandit": Bandit,
-            "rocket_troop": RocketTroop,
-        }
-        _BOSS_CLASSES = {
-            "boss_zombie": BossZombie,
-            "boss_skeleton": BossSkeleton,
-            "boss_mummy": BossMummy,
-            "boss_space": BossSpace,  # 修复：缺失时 space 主题的 BOSS 建筑永远空置
-        }
 
         # 房间内怪物
         for mx, my, mtype in self.map_data["spawn_points"]:
@@ -502,6 +501,8 @@ class GameView(arcade.View):
         用于同步 GameState 与玩家实体的即时状态，避免仅入包而不生效。
         """
         gs = self.window.game_state
+        # 记录局内免费拾取的物品 ID，撤离时仅将这些物品入库（避免带入仓库的装备重复入库）
+        gs.free_equipped_item_ids.add(d.item_id)
         if d.item_type == "weapon":
             # 同步武器槽位与战斗属性（伤害/攻速/距离/远程特效），参数与 setup() 加载仓库武器一致
             from entities.weapon_defs import ALL_WEAPONS
@@ -546,37 +547,38 @@ class GameView(arcade.View):
             gs.equipped_backpack_id = d.item_id
 
     def _add_equipped_to_carried(self, gs):
-        """撤离前将装备栏中的物品加入 run_carried，以便 commit_run_to_warehouse 入库
+        """撤离前将装备栏中**局内免费拾取**的物品加入 run_carried，以便 commit_run_to_warehouse 入库
         
-        装备栏物品原本不占 run_carried 容量（直接装备在身上），
-        但撤离时需要将它们保存到数据库，所以临时加入 run_carried。
+        只有通过 _apply_free_equip() 记录到 free_equipped_item_ids 中的物品才会入库，
+        避免从仓库带入的装备撤离后重复入库。
         """
         carried = gs.run_carried
+        free_ids = gs.free_equipped_item_ids  # 局内免费拾取的物品 ID 集合
         
-        # 武器：从 current_weapon_item_id 获取 item_id
+        # 武器：从 current_weapon_item_id 获取 item_id，仅免费拾取的才入库
         weapon_item_id = getattr(gs, 'current_weapon_item_id', None)
-        if weapon_item_id:
+        if weapon_item_id and weapon_item_id in free_ids:
             carried.setdefault("weapon", {})
             key = (weapon_item_id, 1)  # 免费装备的武器等级默认为1
             carried["weapon"][key] = carried["weapon"].get(key, 0) + 1
         
-        # 头盔
+        # 头盔：仅免费拾取的才入库
         helmet_id = getattr(gs, 'equipped_helmet_id', None)
-        if helmet_id:
+        if helmet_id and helmet_id in free_ids:
             carried.setdefault("helmet", {})
             key = (helmet_id, 1)
             carried["helmet"][key] = carried["helmet"].get(key, 0) + 1
         
-        # 护甲
+        # 护甲：仅免费拾取的才入库
         armor_id = getattr(gs, 'equipped_armor_id', None)
-        if armor_id:
+        if armor_id and armor_id in free_ids:
             carried.setdefault("armor", {})
             key = (armor_id, 1)
             carried["armor"][key] = carried["armor"].get(key, 0) + 1
         
-        # 背包
+        # 背包：仅免费拾取的才入库
         backpack_id = getattr(gs, 'equipped_backpack_id', None)
-        if backpack_id:
+        if backpack_id and backpack_id in free_ids:
             carried.setdefault("backpack", {})
             key = (backpack_id, 1)
             carried["backpack"][key] = carried["backpack"].get(key, 0) + 1
@@ -737,6 +739,7 @@ class GameView(arcade.View):
                 getattr(gs, 'weapon_proj_speed', 400),
                 world_mx, world_my,
                 getattr(gs, 'weapon_special', ''),
+                weapon_speed=getattr(gs, 'weapon_speed', 1.0),
             )
             self._player_attack_flash = 0.1
             self._attack_this_frame = True

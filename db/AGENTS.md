@@ -1,5 +1,7 @@
 # db/ - SQLite 数据层
 
+**Updated:** 2026-08-06 | **Files:** 11 | **Lines:** ~600
+
 ## OVERVIEW
 sqlite3 stdlib 数据访问层。**业务方只 `from db.database import ...`**（全量 re-export 兼容层），子模块间只经 `db.connection._conn` 交互。`db/game.db` 为数据文件（pyright 已排除）。
 

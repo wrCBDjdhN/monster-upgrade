@@ -28,22 +28,7 @@ PROJECTILE_SPEED = 400
 PROJECTILE_SIZE = 6
 PROJECTILE_LIFETIME = 1.5      # 秒
 
-# ── 怪物 ──
-ZOMBIE_HP = 30
-ZOMBIE_DAMAGE = 5
-ZOMBIE_SPEED = 60
-ZOMBIE_ATTACK_DELAY = 1.0      # 秒
-ZOMBIE_SIZE = 22
-ZOMBIE_COLOR = (80, 160, 60)
-ZOMBIE_AGGRO_RANGE = 250       # 索敌距离
-
-SKELETON_HP = 20
-SKELETON_DAMAGE = 4
-SKELETON_SPEED = 40
-SKELETON_ATTACK_DELAY = 1.8
-SKELETON_SIZE = 20
-SKELETON_COLOR = (220, 220, 200)
-SKELETON_AGGRO_RANGE = 300     # 索敌距离（远程更远）
+# ── 怪物数值定义（hp/damage/speed/color 等）已统一迁移到 entities/monster_defs.py ──
 
 # ── 掉落 ──
 DROP_PICKUP_RADIUS = 40
@@ -211,48 +196,6 @@ DESERT_THEME = {
     "wall": (90, 70, 40),        # 墙壁
 }
 
-# ── 木乃伊（近战型） ──
-MUMMY_HP = 45
-MUMMY_DAMAGE = 8
-MUMMY_SPEED = 50
-MUMMY_ATTACK_DELAY = 1.2        # 秒
-MUMMY_SIZE = 24
-MUMMY_COLOR = (210, 190, 120)
-MUMMY_AGGRO_RANGE = 260         # 索敌距离
-MUMMY_DEBUFF_ID = "poison"      # 近战攻击附加的中毒效果
-
-# ── 木乃伊（远程型） ──
-MUMMY_RANGED_HP = 35
-MUMMY_RANGED_DAMAGE = 6
-MUMMY_RANGED_SPEED = 45
-MUMMY_RANGED_ATTACK_DELAY = 1.8
-MUMMY_RANGED_SIZE = 24
-MUMMY_RANGED_COLOR = (225, 205, 140)
-MUMMY_RANGED_AGGRO_RANGE = 320  # 索敌距离（远程更远）
-MUMMY_RANGED_PROJECTILE_SPEED = 350
-MUMMY_RANGED_PROJECTILE_SIZE = 6
-MUMMY_RANGED_DEBUFF_ID = "poison"  # 弹丸附加的中毒效果
-
-# ── 骆驼 ──
-CAMEL_HP = 80
-CAMEL_DAMAGE = 5
-CAMEL_SPEED = 70
-CAMEL_ATTACK_DELAY = 1.5
-CAMEL_SIZE = 28
-CAMEL_COLOR = (180, 120, 60)
-CAMEL_AGGRO_RANGE = 280
-CAMEL_PROJECTILE_SPEED = 300    # 吐口水弹速（略慢，可躲）
-CAMEL_PROJECTILE_SIZE = 8
-
-# ── BOSS 倍率（僵尸/骷髅/木乃伊 BOSS 共用） ──
-BOSS_HP_MULT = 8                # HP 为普通版 8 倍
-BOSS_DAMAGE_MULT = 4            # 伤害为普通版 4 倍
-BOSS_SPEED_MULT = 0.7           # 移速为普通版 70%（行动缓慢）
-BOSS_REQUIRED_LEVEL = 5         # 需要武器/头盔/护甲 Lv5+ 才有效
-BOSS_ZOMBIE_DEBUFF_ID = "burn"      # BOSS 僵尸攻击附加燃烧
-BOSS_SKELETON_DEBUFF_ID = "freeze"  # BOSS 骷髅弹丸附加冰冻
-BOSS_MUMMY_DEBUFF_ID = "poison"     # 木乃伊 BOSS 攻击附加中毒
-
 # ── 仙人掌资源 ──
 CACTUS_HP = 50
 CACTUS_THORN_DAMAGE = 10        # 攻击者自身受到的反弹伤害（受防御减免）
@@ -299,17 +242,6 @@ SPACE_BOSS_LOOT_TABLE = [
     ("resource",  "stone",           0.50, 3, 6),  # 50%掉石头3-6
 ]
 
-# ── 市场购买限制 ──
-# 以下武器/装备无法在市场购买（仍可通过开箱/锻造/怪物掉落获得）
-MARKET_RESTRICTED_WEAPON_IDS = [
-    "pistol", "rifle", "sniper", "laser_gun", "rocket_launcher",
-    "scepter", "cursed_scimitar",
-]
-MARKET_RESTRICTED_EQUIPMENT_IDS = [
-    "mummy_helmet", "mummy_armor",
-    "space_helmet", "space_armor",
-]
-
 # ── 航天基地主题 ──
 SPACE_THEME = {
     "bg": (8, 12, 20),             # 深空背景
@@ -317,60 +249,10 @@ SPACE_THEME = {
     "wall": (50, 55, 65),          # 墙壁
 }
 
-# ── 狙击兵（远程型，高伤低血） ──
-SNIPER_HP = 20
-SNIPER_DAMAGE = 15
-SNIPER_SPEED = 35
-SNIPER_ATTACK_DELAY = 2.5         # 秒（慢速开镜）
-SNIPER_SIZE = 20
-SNIPER_COLOR = (100, 120, 160)
-SNIPER_AGGRO_RANGE = 400          # 索敌距离（超远）
-SNIPER_PROJECTILE_SPEED = 600
-SNIPER_PROJECTILE_SIZE = 4
-
-# ── 突击兵（近战型，高血高甲） ──
-ASSAULT_HP = 60
-ASSAULT_DAMAGE = 10
-ASSAULT_SPEED = 55
-ASSAULT_ATTACK_DELAY = 1.0
-ASSAULT_SIZE = 24
-ASSAULT_COLOR = (70, 80, 100)
-ASSAULT_AGGRO_RANGE = 280
-
-# ── 土匪（远程型，低血低甲，成群刷新） ──
-BANDIT_HP = 15
-BANDIT_DAMAGE = 4
-BANDIT_SPEED = 60
-BANDIT_ATTACK_DELAY = 1.2
-BANDIT_SIZE = 18
-BANDIT_COLOR = (140, 100, 80)
-BANDIT_AGGRO_RANGE = 300
-BANDIT_PROJECTILE_SPEED = 350
-BANDIT_PROJECTILE_SIZE = 5
+# ── 怪物行为参数（被 respawn.py / combat.py 直接引用） ──
 BANDIT_GROUP_COUNT_MIN = 3        # 土匪每次刷新最少数量
 BANDIT_GROUP_COUNT_MAX = 5        # 土匪每次刷新最多数量
-
-# ── 火箭兵（远程型，高血高甲，AOE 弹丸） ──
-ROCKET_TROOP_HP = 55
-ROCKET_TROOP_DAMAGE = 12
-ROCKET_TROOP_SPEED = 40
-ROCKET_TROOP_ATTACK_DELAY = 2.0
-ROCKET_TROOP_SIZE = 24
-ROCKET_TROOP_COLOR = (120, 60, 60)
-ROCKET_TROOP_AGGRO_RANGE = 350
-ROCKET_TROOP_PROJECTILE_SPEED = 300
-ROCKET_TROOP_PROJECTILE_SIZE = 8
-ROCKET_TROOP_AOE_RADIUS = 60      # AOE 爆炸半径
-
-# ── BOSS 航天兵（远程型，激光枪） ──
-BOSS_SPACE_HP = 280               # 基础 HP × BOSS_HP_MULT(8) = 2240
-BOSS_SPACE_DAMAGE = 25
-BOSS_SPACE_SPEED = 30
-BOSS_SPACE_ATTACK_DELAY = 1.8
-BOSS_SPACE_SIZE = 30
-BOSS_SPACE_COLOR = (200, 50, 50)
-BOSS_SPACE_AGGRO_RANGE = 400
-BOSS_SPACE_DEBUFF_ID = "burn"     # BOSS 攻击附加燃烧
+ROCKET_TROOP_AOE_RADIUS = 60      # 火箭兵 AOE 爆炸半径
 
 # ── 航天基地掉落表 ──
 SNIPER_LOOT_TABLE = [

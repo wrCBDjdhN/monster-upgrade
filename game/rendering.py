@@ -4,8 +4,6 @@ import math
 import arcade
 from config import (
     WINDOW_WIDTH, WINDOW_HEIGHT, PLAYER_COLOR, PLAYER_SIZE,
-    ZOMBIE_SIZE, ZOMBIE_COLOR, ZOMBIE_ATTACK_DELAY,
-    SKELETON_SIZE, SKELETON_COLOR, SKELETON_ATTACK_DELAY,
     EVAC_COLOR, EVAC_RADIUS, DESERT_THEME,
     SPACE_THEME, ACTION_TIME_SPACE, ACTION_TIME_FOREST, ACTION_TIME_DESERT,
 )
@@ -27,7 +25,9 @@ from game.render_helpers import (
     draw_player_base_equipment, draw_player_weapon, draw_drop_icon,
 )
 from entities.weapon_defs import get_weapon_visual
-from game.entity_callbacks import MONSTER_WEAPON_COLOR, get_drop_display_name
+# 怪物武器颜色从 monster_defs.py 统一读取（原 MONSTER_WEAPON_COLOR 已并入 MONSTER_METADATA）
+from entities.monster_defs import MONSTER_METADATA
+from game.entity_callbacks import get_drop_display_name
 from db.database import get_gold, get_weapons
 
 
@@ -208,10 +208,8 @@ def render_game(view):
     # 怪物
     for m in view.monsters:
         if hasattr(m, 'alive') and m.alive and view._in_view(m.center_x, m.center_y):
-            # 通用尺寸：新怪物带 self._size（半径），旧怪物按类型判断
-            m_size = getattr(m, '_size', None)
-            if not m_size:
-                m_size = ZOMBIE_SIZE if isinstance(m, Zombie) else SKELETON_SIZE
+            # 怪物尺寸：所有怪物继承基类，_size 属性已统一设置
+            m_size = getattr(m, '_size', 20)
             if hasattr(m, 'armor') and m.armor:
                 armor_color = m.armor.get("color", (150, 150, 150))
                 draw_monster_armor(m, m_size, armor_color, wb)
@@ -219,12 +217,12 @@ def render_game(view):
             draw_monster_base(m, outline_color, width=2, batch=wb)
             draw_monster_body(m, wb)
             draw_monster_face(m, m_size, wb)
-            # 武器颜色：优先取怪物实际携带武器的颜色，未携带时按类名映射兜底（默认灰）
+            # 武器颜色：优先取怪物实际携带武器的颜色，未携带时按类名从 MONSTER_METADATA 兜底（默认灰）
             m_cls = m.__class__.__name__
             if hasattr(m, 'weapon') and m.weapon:
                 w_color = m.weapon.get("color", (180, 180, 180))
             else:
-                w_color = MONSTER_WEAPON_COLOR.get(m_cls, (180, 180, 180))
+                w_color = MONSTER_METADATA.get(m_cls, {}).get("weapon_color", (180, 180, 180))
             if w_color is None:
                 w_color = (180, 180, 180)
             draw_monster_weapon(m, m_size, w_color, wb)
@@ -241,11 +239,9 @@ def render_game(view):
                 arcade.draw_rect_filled(arcade.XYWH(bx + bar_w // 2, by, bar_w, 4), arcade.color.DARK_RED)
                 arcade.draw_rect_filled(arcade.XYWH(bx + bar_w * hp_ratio // 2, by, bar_w * hp_ratio, 4), arcade.color.RED)
 
-            # 攻击冷却条（血条上方）
+            # 攻击冷却条（血条上方）：_attack_delay 已由基类统一设置
             if m._attack_timer > 0:
-                max_delay = getattr(m, '_attack_delay', None)
-                if not max_delay:
-                    max_delay = ZOMBIE_ATTACK_DELAY if isinstance(m, Zombie) else SKELETON_ATTACK_DELAY
+                max_delay = getattr(m, '_attack_delay', 1.0)
                 cd_ratio = 1.0 - (m._attack_timer / max_delay)
                 cy = by + 7
                 if wb is not None:

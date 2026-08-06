@@ -2,6 +2,7 @@
 
 import random
 from entities.equipment_defs import ARMORS, HELMETS, MONSTER_ARMOR_DROP, MONSTER_HELMET_DROP
+from entities.monster_defs import MONSTER_METADATA
 from config import (
     MONSTER_WEAPON_LEVEL_RANGE,
     MONSTER_MUMMY_ARMOR_CHANCE, MONSTER_MUMMY_HELMET_CHANCE,
@@ -21,56 +22,22 @@ def lookup_weapon_range(kind: str, name: str) -> float:
 def assign_monster_weapon(monster, level: int = None, is_desert: bool = False, is_space: bool = False):
     """按怪物类型分配主题武器（携带武器，击败后掉落自身武器）
 
-    每类怪物只携带与自身视觉表现一致的武器（与 rendering 中武器名标签对应）：
-    - 僵尸/BOSS僵尸：近战武器（木剑/铁剑/石锤，不含弯刀）→ 对应「铁剑」
-    - 骷髅/BOSS骷髅：弓类武器（短弓/长弓）→ 对应「短弓」
-    - 木乃伊近战/BOSS木乃伊：近战武器（含弯刀）→ 对应「弯刀」
-    - 木乃伊弓手：法杖/权杖 → 对应「权杖」
-    - 骆驼：无武器（吐口水），直接返回
-
-    level 为 None 时按 MONSTER_WEAPON_LEVEL_RANGE 随机；is_desert 参数保留
-    兼容调用点（分池后木乃伊系武器已由类别天然限定，不再需要额外过滤）。
-    is_space 参数为 space 主题怪物预留（目前无额外武器规则）。
+    每类怪物的可携带武器池由 MONSTER_METADATA.weapon_pool 统一定义，
+    此处直接查表获取，新增怪物无需改动本函数。
     """
     from entities.weapon_defs import MELEE_WEAPONS, RANGED_WEAPONS
     cls_name = monster.__class__.__name__
-    if cls_name in ("Zombie", "BossZombie"):
-        # 僵尸系：近战武器，排除拳头/弯刀/神器（与「铁剑」视觉一致）
-        pool = {k: v for k, v in MELEE_WEAPONS.items()
-                if k not in ("fist", "cursed_scimitar") and not v.get("artifact")}
-    elif cls_name in ("Skeleton", "BossSkeleton"):
-        # 骷髅系：弓类武器（与「短弓」视觉一致）
-        pool = {k: v for k, v in RANGED_WEAPONS.items()
-                if k in ("short_bow", "long_bow")}
-    elif cls_name in ("MummyMelee", "BossMummy"):
-        # 木乃伊近战：近战武器含弯刀（与「弯刀」视觉一致）
-        pool = {k: v for k, v in MELEE_WEAPONS.items()
-                if k != "fist" and not v.get("artifact")}
-    elif cls_name == "MummyRanged":
-        # 木乃伊弓手：法杖/权杖（与「权杖」视觉一致）
-        pool = {k: v for k, v in RANGED_WEAPONS.items()
-                if k in ("fire_staff", "scepter")}
-    elif cls_name in ("Sniper", "BossSpace"):
-        # 狙击兵/BOSS航天兵：远程武器（狙击枪/激光枪）
-        pool = {k: v for k, v in RANGED_WEAPONS.items()
-                if k in ("sniper", "laser_gun")}
-    elif cls_name == "Assault":
-        # 突击兵：近战武器（步枪近战用）
-        pool = {k: v for k, v in MELEE_WEAPONS.items()
-                if k not in ("fist", "cursed_scimitar") and not v.get("artifact")}
-    elif cls_name == "RocketTroop":
-        # 火箭兵：远程武器（火箭筒）
-        pool = {k: v for k, v in RANGED_WEAPONS.items()
-                if k in ("rocket_launcher",)}
-    elif cls_name == "Bandit":
-        # 土匪：远程武器（手枪）或近战武器（石锤）
-        import random as _rand
-        if _rand.random() < 0.5:
-            pool = {k: v for k, v in RANGED_WEAPONS.items() if k in ("pistol",)}
-        else:
-            pool = {k: v for k, v in MELEE_WEAPONS.items() if k in ("stone_mace",)}
-    else:
-        # 骆驼等无武器怪物：不分配武器
+    # 从 MONSTER_METADATA 读取该怪物的武器池（未注册的怪物直接返回）
+    meta = MONSTER_METADATA.get(cls_name)
+    if not meta:
+        return
+    weapon_ids = meta.get("weapon_pool") or []
+    if not weapon_ids:
+        return
+    # 按 weapon_pool 中登记的武器 ID 构建武器池（合并近战+远程全量武器表）
+    all_weapons = {**MELEE_WEAPONS, **RANGED_WEAPONS}
+    pool = {k: v for k, v in all_weapons.items() if k in weapon_ids}
+    if not pool:
         return
     if level is None:
         level = random.randint(*MONSTER_WEAPON_LEVEL_RANGE)

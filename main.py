@@ -36,6 +36,7 @@ class GameState:
         self.equipped_helmet_id: str | None = None  # 当前装备的头盔 ID（从数据库加载）
         self.equipped_armor_id: str | None = None   # 当前装备的护甲 ID（从数据库加载）
         self.equipped_backpack_id: str | None = None  # 当前装备的背包 item_id（从数据库加载）
+        self.free_equipped_item_ids: set[str] = set()  # 局内免费拾取并装备的物品 ID（撤离时仅将这些物品入库）
         self.backpack_capacity: int = 0             # 背包容量（从数据库加载，供各 View 共享）
         self.current_map_seed: int = 1              # 当前地图随机种子（每次进入地图随机生成）
         self.map_theme: str = "forest"              # 当前地图主题: "forest"(幽暗森林) / "desert"(沙漠荒地)

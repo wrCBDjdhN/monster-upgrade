@@ -1,5 +1,7 @@
 # entities/ - 静态数据定义
 
+**Updated:** 2026-08-06 | **Files:** 7 | **Lines:** ~700
+
 ## OVERVIEW
 数据定义层：武器/装备/资源/效果模板（3 个纯字典 + effects_defs 含规则逻辑）。**添加新条目 = 复制现有条目改值**，不发明新结构。被 db/game/views 三方引用；本层只依赖 config（weapon_defs 用 PROJECTILE_SPEED）。
 

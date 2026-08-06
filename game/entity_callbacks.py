@@ -4,52 +4,14 @@ import math
 import random
 import arcade
 from config import (
-    ZOMBIE_COLOR, SKELETON_COLOR, MUMMY_COLOR, MUMMY_RANGED_COLOR, CAMEL_COLOR,
     CACTUS_THORN_DAMAGE, WELL_HEAL, WELL_SPEED_MULT, WELL_SPEED_DURATION,
-    SNIPER_COLOR, ASSAULT_COLOR, BANDIT_COLOR, ROCKET_TROOP_COLOR, BOSS_SPACE_COLOR,
 )
-from game.monsters import Zombie, Skeleton, MummyMelee, MummyRanged, Camel, BossZombie, BossSkeleton, BossMummy
+# 怪物元数据（武器颜色/掉落表键名/死亡粒子颜色）统一从 monster_defs.py 读取
+from entities.monster_defs import MONSTER_METADATA
 from game.loot import DropItem, roll_loot
 from game.sound_manager import sound_manager
 from game.effects import particle_system, floating_texts
 from game.render_helpers import draw_drop_icon
-
-# 怪物手持武器颜色（近战=剑银色，远程=弓木色），与 weapon_defs 保持一致
-MONSTER_WEAPON_COLOR = {
-    "Zombie": (205, 205, 215),    # 剑（银）
-    "Skeleton": (155, 105, 55),   # 弓（木）
-    "MummyMelee": (140, 200, 90),     # 木乃伊近战：诅咒弯刀（毒绿）
-    "MummyRanged": (240, 200, 80),    # 木乃伊远程：权杖（金）
-    "Camel": (180, 120, 60),          # 骆驼：吐口水（土黄）
-    "BossZombie": (205, 205, 215),    # BOSS 僵尸：剑（银）
-    "BossSkeleton": (155, 105, 55),   # BOSS 骷髅：弓（木）
-    "BossMummy": (140, 200, 90),      # BOSS 木乃伊：弯刀（毒绿）
-    "Sniper": (80, 80, 120),        # 狙击枪（深蓝钢）
-    "Assault": (100, 100, 110),     # 步枪（灰钢）
-    "Bandit": (155, 105, 55),       # 弓/木
-    "RocketTroop": (140, 50, 50),   # 火箭筒（暗红）
-    "BossSpace": (200, 50, 50),     # 激光枪（亮红）
-}
-
-# 怪物类型名 → 掉落表键名映射（与 roll_loot 的 monster_type 参数对应）
-_MONSTER_TYPE_KEYS = {
-    "Zombie": "zombie", "Skeleton": "skeleton",
-    "MummyMelee": "mummy_melee", "MummyRanged": "mummy_ranged", "Camel": "camel",
-    "BossZombie": "boss_zombie", "BossSkeleton": "boss_skeleton", "BossMummy": "boss_mummy",
-    "Sniper": "sniper", "Assault": "assault", "Bandit": "bandit",
-    "RocketTroop": "rocket_troop", "BossSpace": "boss_space",
-}
-
-# 怪物死亡粒子颜色映射（新怪使用各自体色，BOSS 使用专属亮色便于识别）
-_MONSTER_DEATH_COLORS = {
-    "Zombie": ZOMBIE_COLOR, "Skeleton": SKELETON_COLOR,
-    "MummyMelee": MUMMY_COLOR, "MummyRanged": MUMMY_RANGED_COLOR, "Camel": CAMEL_COLOR,
-    "BossZombie": (255, 60, 60),      # BOSS 僵尸：深红
-    "BossSkeleton": (220, 220, 200),  # BOSS 骷髅：骨白
-    "BossMummy": (255, 220, 120),     # BOSS 木乃伊：亮金
-    "Sniper": SNIPER_COLOR, "Assault": ASSAULT_COLOR, "Bandit": BANDIT_COLOR,
-    "RocketTroop": ROCKET_TROOP_COLOR, "BossSpace": BOSS_SPACE_COLOR,
-}
 
 
 def _on_rocket_boss_defeated(view, boss, pad):
@@ -92,14 +54,15 @@ def on_monster_death(view, monster):
     # 死亡音效
     sound_manager.play_death()
 
-    # 死亡粒子爆炸（按怪物类名取色，新怪有专属配色）
+    # 死亡粒子爆炸（死亡颜色从 MONSTER_METADATA 按怪物类名读取）
     cls_name = monster.__class__.__name__
-    color = _MONSTER_DEATH_COLORS.get(cls_name, ZOMBIE_COLOR)
+    meta = MONSTER_METADATA.get(cls_name)
+    color = meta["death_color"] if meta else (255, 255, 255)
     particle_system.emit(monster.center_x, monster.center_y, 20, color, speed=150, life=0.6, size=4, gravity=100)
 
-    # 掉落物（按怪物类型选择对应掉落表）
+    # 掉落物（掉落表键名同样取自 MONSTER_METADATA）
     loot = roll_loot(
-        _MONSTER_TYPE_KEYS.get(cls_name, "zombie"),
+        meta["loot_key"] if meta else "zombie",
         monster.center_x, monster.center_y,
     )
 
@@ -107,7 +70,7 @@ def on_monster_death(view, monster):
     if monster.weapon:
         weapon_item_id = monster.weapon.get("item_id", "")
         weapon_level = monster.weapon.get("level", 1)
-        weapon_color = monster.weapon.get("color") or MONSTER_WEAPON_COLOR.get(cls_name, (150, 150, 150))
+        weapon_color = monster.weapon.get("color") or (meta["weapon_color"] if meta else (255, 255, 255))
         drop = DropItem(monster.center_x, monster.center_y, "weapon", weapon_item_id, 1, level=weapon_level)
         drop.color = weapon_color
         loot.append(drop)

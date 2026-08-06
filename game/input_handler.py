@@ -118,6 +118,7 @@ def handle_mouse_press(view, x, y, button, modifiers):
                 gs.weapon_damage,
                 weapon_range,
                 world_x, world_y,
+                getattr(gs, 'weapon_speed', 1.0),
             )
             view._player_attack_flash = 0.1
             view._attack_this_frame = True
@@ -171,6 +172,7 @@ def handle_mouse_press(view, x, y, button, modifiers):
                     world_x, world_y,
                     getattr(gs, 'weapon_special', ''),
                     debuff_id,
+                    getattr(gs, 'weapon_speed', 1.0),
                 )
             view._player_attack_flash = 0.1
             view._attack_this_frame = True

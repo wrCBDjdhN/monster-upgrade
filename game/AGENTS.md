@@ -1,5 +1,7 @@
 # game/ - 核心游戏逻辑
 
+**Updated:** 2026-08-06 | **Files:** 21 | **Lines:** ~3,500
+
 ## OVERVIEW
 游戏逻辑层：怪物 AI、战斗、随机地图生成、掉落、撤离、宝箱、可采集物、特效、渲染、音效、输入、刷新。被 views/ 层编排；本层可经 `db.database` 读数据，`input_handler.py` 反向依赖 views（TAB 开背包）属例外。
 

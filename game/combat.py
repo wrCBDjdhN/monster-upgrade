@@ -64,16 +64,13 @@ class CombatSystem:
     def can_attack(self) -> bool:
         return self._cooldown <= 0
 
-    def melee_attack(self, player, monsters: arcade.SpriteList, weapon_damage: float, weapon_range: float, mouse_x: float = 0, mouse_y: float = 0) -> list:
+    def melee_attack(self, player, monsters: arcade.SpriteList, weapon_damage: float, weapon_range: float, mouse_x: float = 0, mouse_y: float = 0, weapon_speed: float = 1.0) -> list:
         """近战攻击：扇形命中检测，返回被击中的怪物列表"""
         if not self.can_attack():
             return []
 
-        # 拳头冷却短一些（0.4秒），武器冷却基于伤害
-        if weapon_damage <= 8:
-            self._cooldown = 0.4
-        else:
-            self._cooldown = 1.0 / max(0.1, weapon_damage * 0.1)
+        # 冷却时间 = 1 / attack_speed（attack_speed 越高，冷却越短，攻击越快）
+        self._cooldown = 1.0 / max(0.1, weapon_speed)
 
         # 获取鼠标方向角度
         dx = mouse_x - player.center_x
@@ -96,12 +93,13 @@ class CombatSystem:
                 hit.append((m, actual))
         return hit
 
-    def ranged_attack(self, player, weapon_damage: float, weapon_proj_speed: float, mouse_x: float = 0, mouse_y: float = 0, weapon_special: str = "", debuff_id: str = None) -> None:
+    def ranged_attack(self, player, weapon_damage: float, weapon_proj_speed: float, mouse_x: float = 0, mouse_y: float = 0, weapon_special: str = "", debuff_id: str = None, weapon_speed: float = 1.0) -> None:
         """远程攻击：生成弹丸，支持特殊属性（穿透/爆炸）与附带 debuff"""
         if not self.can_attack():
             return
 
-        self._cooldown = 1.0 / max(0.1, weapon_damage * 0.08)
+        # 冷却时间 = 1 / attack_speed（attack_speed 越高，冷却越短，攻击越快）
+        self._cooldown = 1.0 / max(0.1, weapon_speed)
 
         dx = mouse_x - player.center_x
         dy = mouse_y - player.center_y

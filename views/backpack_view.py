@@ -17,6 +17,7 @@
 import math
 import arcade
 from config import WINDOW_WIDTH, WINDOW_HEIGHT
+from db.connection import _conn
 from entities.resource_defs import RESOURCES
 from entities.weapon_defs import ALL_WEAPONS
 from entities.equipment_defs import HELMETS, ARMORS, BACKPACKS
@@ -118,17 +119,23 @@ class BackpackView(ScrollView):
                 return
 
     def _discard_equipped(self, slot_type: str):
-        """丢弃当前装备的物品：清理 GameState 字段 + 更新游戏属性 + 生成地面掉落物
+        """丢弃当前装备的物品：清理 GameState 字段 + 删除数据库记录 + 更新游戏属性 + 生成地面掉落物
 
         注意：装备栏物品不占背包容量，丢弃按钮的可用性只取决于该槽位是否为空
         （即使背包为空/容量为0，武器/头盔/护甲的丢弃按钮仍然可用）
         """
         gs = self.window_ref.game_state
+        pid = gs.player_id
 
         if slot_type == "weapon":
             item_id = getattr(gs, 'current_weapon_item_id', None)
             if not item_id:
                 return
+            # 删除数据库中的武器记录（equipped_weapon_id 是 DB row id）
+            wid = getattr(gs, 'equipped_weapon_id', None)
+            if wid and pid:
+                from db.weapons import delete_weapon
+                delete_weapon(pid, wid)
             # 清理 GameState 武器槽位（还原为默认拳头）
             gs.equipped_weapon_id = None
             gs.current_weapon_id = None
@@ -147,6 +154,16 @@ class BackpackView(ScrollView):
             item_id = getattr(gs, 'equipped_helmet_id', None)
             if not item_id:
                 return
+            # 删除数据库中的装备记录（通过 slot 查询 equip_id）
+            if pid:
+                from db.equipment import delete_equipment
+                with _conn() as c:
+                    row = c.execute(
+                        "SELECT id FROM equipment WHERE player_id=? AND slot='helmet' AND is_equipped=1",
+                        (pid,),
+                    ).fetchone()
+                    if row:
+                        delete_equipment(pid, row[0])
             gs.equipped_helmet_id = None
             # 更新防御：减去该头盔提供的防御
             if self.game_view and self.game_view.player:
@@ -159,6 +176,16 @@ class BackpackView(ScrollView):
             item_id = getattr(gs, 'equipped_armor_id', None)
             if not item_id:
                 return
+            # 删除数据库中的装备记录（通过 slot 查询 equip_id）
+            if pid:
+                from db.equipment import delete_equipment
+                with _conn() as c:
+                    row = c.execute(
+                        "SELECT id FROM equipment WHERE player_id=? AND slot='armor' AND is_equipped=1",
+                        (pid,),
+                    ).fetchone()
+                    if row:
+                        delete_equipment(pid, row[0])
             gs.equipped_armor_id = None
             # 更新防御：减去该护甲提供的防御
             if self.game_view and self.game_view.player:
@@ -171,6 +198,16 @@ class BackpackView(ScrollView):
             item_id = getattr(gs, 'equipped_backpack_id', None)
             if not item_id:
                 return
+            # 删除数据库中的装备记录（通过 slot 查询 equip_id）
+            if pid:
+                from db.equipment import delete_equipment
+                with _conn() as c:
+                    row = c.execute(
+                        "SELECT id FROM equipment WHERE player_id=? AND slot='backpack' AND is_equipped=1",
+                        (pid,),
+                    ).fetchone()
+                    if row:
+                        delete_equipment(pid, row[0])
             gs.equipped_backpack_id = None
             # 先丢弃背包中的所有物品（run_carried 中的物品）
             self._discard_all_items()

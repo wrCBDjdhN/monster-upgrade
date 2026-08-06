@@ -61,14 +61,11 @@ def merge_forge_effects(effects_a, effects_b):
         result.append(f"{eid}:{elvl}" if elvl > 1 else eid)
     return result
 
-# 5种神器（kind: weapon → add_weapon；equipment → add_equipment）
-ARTIFACTS = [
-    {"kind": "weapon", "item_id": "wado_ichimonji", "slot": None},
-    {"kind": "weapon", "item_id": "meteor_cannon", "slot": None},
-    {"kind": "equipment", "item_id": "strong_force_helm", "slot": "helmet"},
-    {"kind": "equipment", "item_id": "strong_force_armor", "slot": "armor"},
-    {"kind": "equipment", "item_id": "sky_swallowing_bag", "slot": "backpack"},
-]
+# 神器列表：从武器/装备定义自动筛选 artifact=True 的条目（kind/slot 按定义池推导，避免手写维护）
+ARTIFACTS = (
+    [{"kind": "weapon", "item_id": wid, "slot": None} for wid, w in {**MELEE_WEAPONS, **RANGED_WEAPONS}.items() if w.get("artifact")]
+    + [{"kind": "equipment", "item_id": eid, "slot": slot} for slot, pool in (("helmet", HELMETS), ("armor", ARMORS), ("backpack", BACKPACKS)) for eid, e in pool.items() if e.get("artifact")]
+)
 
 
 class ForgeView(ScrollView):

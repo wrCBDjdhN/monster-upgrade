@@ -1,5 +1,7 @@
 # views/ - UI 视图层
 
+**Updated:** 2026-08-06 | **Files:** 12 | **Lines:** ~3,200
+
 ## OVERVIEW
 全部界面，均为 `arcade.View` 子类。切换用 `window.show_view()`；共享状态一律走 `window.game_state`（main.GameState）。
 
