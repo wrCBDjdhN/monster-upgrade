@@ -17,6 +17,7 @@ from config import (
     BOSS_WEAPON_LEVEL_RANGE, BOSS_GEAR_LEVEL_RANGE,
     NET_SNAPSHOT_HZ,  # 状态快照广播频率（怪物快照 20Hz）
     NET_HEARTBEAT_SEC,  # 心跳间隔（客户端 RTT 测量与保活）
+    NET_ACTION_TIME_BCAST_SEC,  # 行动时间广播间隔（主机每秒广播剩余行动时间）
     PROJECTILE_SIZE,  # 标准弹丸边长（客户端远端弹丸纯表现层渲染尺寸）
     DROP_PICKUP_RADIUS,  # 掉落物拾取半径（主机拾取仲裁距离阈值，Todo 18）
 )
@@ -244,6 +245,9 @@ class GameView(arcade.View):
         self._heartbeat_seq = 0          # 心跳递增序号
         self._hb_sent_at = 0.0           # 最近一次心跳发送时刻（收到回显时算 RTT）
         self._net_rtt_ms = 0.0           # 最近一次心跳往返延迟（毫秒，状态条 E3 显示）
+        # 联机主机：行动时间广播计时器（每 NET_ACTION_TIME_BCAST_SEC 广播剩余行动时间，
+        # 客户端 HUD 显示以广播值为准——修复客户端行动时间卡死不动）
+        self._action_time_bcast_timer = 0.0
         # 联机：房间结束已广播/已处理标记（主机撤离/死亡/超时广播 ROOM_ENDED 防重复；
         # 客户端收到后回大厅，避免后续帧再次触发同一路径）
         self._room_ended_handled = False
@@ -2140,6 +2144,15 @@ class GameView(arcade.View):
                 # 玩家快照同节拍广播（Todo 15，HP 主机权威）：客户端校准本地/幽灵 HP 防漂移；
                 # 完整玩家实体同步（位置插值渲染）是 todo 23，此处仅同步 HP 字段
                 gs.net_server.broadcast(MsgType.PLAYER_SNAPSHOT, {"players": self._serialize_players()})
+            # 行动时间周期广播（NET_ACTION_TIME_BCAST_SEC=1.0，独立于 20Hz 快照节拍）：
+            # 倒计时只在主机递减，客户端显示以广播值为准——此前从未广播导致客户端
+            # HUD 卡死在开局值（4:59/7:59），收到本消息的客户端据此更新剩余时间。
+            self._action_time_bcast_timer += dt
+            if self._action_time_bcast_timer >= NET_ACTION_TIME_BCAST_SEC:
+                self._action_time_bcast_timer = 0.0
+                gs.net_server.broadcast(MsgType.ACTION_TIME, {
+                    "action_time_left": self._action_time_remaining or 0.0,
+                })
 
         # 客户端：每帧排空入站消息，按 MONSTER_SNAPSHOT 增/改/删维护 remote_monsters；
         # DAMAGE_RESULT 由主机伤害判定广播（Todo 14），客户端按 net_id 应用扣血显示。
@@ -2168,6 +2181,13 @@ class GameView(arcade.View):
                 elif msg_type == MsgType.FULL_STATE:
                     # 晚期加入全量状态：初始化远端世界（怪物/掉落/宝箱/环境物/倒计时）
                     self._apply_full_state(payload)
+                elif msg_type == MsgType.ACTION_TIME:
+                    # 主机行动时间周期广播：客户端显示以广播值为准（本地不递减），
+                    # 更新 HUD 剩余时间——修复客户端行动时间卡死不动（4:59/7:59）
+                    t = payload.get("action_time_left")
+                    if t is not None:
+                        self._action_time_remaining = t
+                        self.window.game_state.action_time_remaining = t
                 elif msg_type == MsgType.MAP_CHANGE:
                     # 主机运行期改动广播：掉落物生成同步（drop_spawn）→ 本地建视觉掉落物
                     self._apply_map_change(payload)

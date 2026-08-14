@@ -55,6 +55,7 @@ class MsgType(Enum):
     EVAC_RESULT = "EVAC_RESULT"        # 主机→各端：撤离结算清单（各端据此本地入库）
     # ── 运行期同步 ──
     MAP_CHANGE = "MAP_CHANGE"          # 主机→全部：运行期地图改动（宝箱/环境物/水井/火箭台）
+    ACTION_TIME = "ACTION_TIME"        # 主机→全部：剩余行动时间周期广播（客户端 HUD 显示）
     FULL_STATE = "FULL_STATE"          # 主机→晚期加入客户端：全量状态快照
     # ── 保活 / 断线 ──
     HEARTBEAT = "HEARTBEAT"            # 双向：心跳保活 + 延迟测量
@@ -290,7 +291,13 @@ MESSAGE_SCHEMAS: dict[MsgType, str] = {
         "  'env_objects': list[dict],  环境物状态（水井/火箭台/可破坏物）\n"
         "  'well_opened': bool,        水井是否已首次开启（晚加入客户端镜像）\n"
         "  'action_time_left': float}  剩余行动时间（秒）\n"
-        "}"
+    ),
+    MsgType.ACTION_TIME: (
+        "主机周期广播剩余行动时间（NET_ACTION_TIME_BCAST_SEC 间隔），客户端据此更新 HUD。\n"
+        "倒计时递减只在主机（主机权威），客户端本地不递减、只以广播值为准——\n"
+        "修复「客户端行动时间卡死不动」：此前只靠 FULL_STATE 初始化一次，之后从不更新。\n"
+        "payload: {\n"
+        "  'action_time_left': float}  剩余行动时间（秒）\n"
     ),
     MsgType.HEARTBEAT: (
         "双向心跳保活与延迟测量（NET_HEARTBEAT_SEC=1.0 间隔发送）。\n"
