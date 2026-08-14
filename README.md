@@ -1,190 +1,145 @@
 # Monster Upgrade - 打怪升级
 
-A 2D action RPG built with Python 3.14 + Arcade 2D engine + SQLite. Battle monsters across three distinct maps, loot weapons and gear, upgrade your equipment at the forge, and extract before time runs out.
-
-## Screenshot
+一个基于 **Python 3.14 + Arcade 2D 引擎 + SQLite** 的 2D 动作 RPG。支持 **局域网联机（最多 4 人）**：在随机生成的三张主题地图上打怪升级、拾取武器装备、锻造强化，并在倒计时结束前撤离带走战利品。
 
 ```
 ┌─────────────────────────────────────────────┐
 │  ▓▓▓  Monster Upgrade  ▓▓▓                 │
-│  "2D Action RPG"                           │
+│  "2D Action RPG · 局域网联机"               │
 │                                             │
-│  [ 开始游戏 ]                               │
-│  [ 仓  库  ]                                │
-│  [ 市  场  ]                                │
-│  [ 锻造坊  ]                               │
+│  [ 开始游戏 ]   [ 局域网联机 ]              │
+│  [ 仓  库  ]   [ 市  场  ]                  │
+│  [ 锻造坊  ]                                │
 └─────────────────────────────────────────────┘
 ```
 
-## Features
+## ✨ 核心特性
 
-### 3 Maps with Unique Themes
+### 🌐 局域网联机（最多 4 人）
+- **建房 / 加入**：主机创建房间（选主题），其他玩家输入 IP 加入，全员就绪后开局
+- **主机权威同步**：怪物/弹丸/掉落/玩家位置 20Hz 快照，伤害/拾取/撤离由主机裁决广播，客户端确定性重建同一地图
+- **观战模式**：主机或客户端撤离/阵亡后自动进入观战（V 键切换视角），房间保留等待全员结束后回房再战
+- **每局新地图**：同一房间多次开局自动重新随机种子，地图布局每次不同
 
-| Map | Theme | Monsters | Difficulty | Timer |
-|-----|-------|----------|------------|-------|
-| **Dark Forest** (幽暗森林) | `forest` | Zombies, Skeletons | Normal | 10 min |
-| **Desert Wasteland** (沙漠荒地) | `desert` | Mummies, Camels + Forest mobs | Hard | 10 min |
-| **Space Base** (航天基地) | `space` | Snipers, Assault, Bandits, Rocket Troops | Extreme | 8 min |
+### 🗺️ 3 张主题地图（程序化生成）
 
-### 13 Monster Types + 4 Bosses
+| 地图 | Theme | 怪物 | 难度 | 时限 |
+|------|-------|------|------|------|
+| 幽暗森林 | `forest` | 僵尸、骷髅 | 普通 | 10 min |
+| 沙漠荒地 | `desert` | 木乃伊、骆驼 + 森林怪 | 困难 | 10 min |
+| 航天基地 | `space` | 狙击兵、突击兵、土匪、火箭兵 | 极难 | 8 min |
 
-- **Forest**: Zombie (melee), Skeleton (ranged)
-- **Desert**: Mummy Melee, Mummy Ranged, Camel (ranged)
-- **Space Base**: Sniper, Assault, Bandit, Rocket Troop
-- **Bosses**: Boss Zombie, Boss Skeleton, Boss Mummy, Boss Space (each with unique debuffs, require Lv5+ gear)
+### 👾 13 种怪物 + 4 个 BOSS
+- **森林**：僵尸（近战）、骷髅（远程）
+- **沙漠**：近战/远程木乃伊、骆驼（远程）
+- **航天基地**：狙击兵、突击兵、土匪（成群）、火箭兵
+- **BOSS**：BOSS 僵尸 / BOSS 骷髅 / BOSS 木乃伊 / BOSS 航天（各有专属 debuff，需 Lv5+ 装备挑战；航天基地 BOSS 镇守火箭发射台，击败可炸台夺宝或启用撤离）
 
-### Combat System
+### ⚔️ 战斗系统
+- **近战**：120° 扇形挥砍 + 击退；**远程**：弹丸穿透/爆炸变体；**激光**：陨星炮路径持续伤害
+- **Debuff**：灼烧 / 冰冻 / 中毒 / 眩晕——武器与 BOSS 均可施加，按装备等级缩放
+- **怪物 AI**：仇恨距离探测、追击、远程风筝、墙体碰撞
 
-- **Melee**: 120° arc slash with knockback
-- **Ranged**: Projectile-based with penetration and explosion variants
-- **Debuffs**: Burn, Freeze, Poison, Stun — each boss applies a unique debuff
-- **Monster AI**: Aggro range detection, pursuit, ranged kiting, wall collision
+### 🎒 装备与成长
+- **16 种武器**：拳套、木/铁剑、石锤、短/长弓、火杖、手枪、步枪、狙击、激光枪、火箭筒等
+- **头盔/护甲**：皮革→铁→金→木乃伊→航天→神器（各 6 阶），背包扩展容量
+- **药水**：治疗 / 加速 / 增伤 / 护盾；**资源**：木材、石材、矿石（锻造用）
+- **升级曲线**：平方根次线性（Lv5≈1.9x，Lv50≈4.2x，Lv100≈5.5x）
+- **锻造坊**：装备升阶 + 神器合成；**市场**：买卖 + 神秘宝箱；**仓库**：局间存取
 
-### Loot & Equipment
+### 🏃 撤离玩法
+找到撤离点读条 3 秒撤离，把本局战利品带出；死亡/超时则丢失全部装备（局内携带物 + 已装备物品）。
 
-- **Weapons** (16 types): Fist, Wood/Iron Sword, Stone Mace, Short/Long Bow, Fire Staff, Pistol, Rifle, Sniper, Laser Gun, Rocket Launcher + more
-- **Helmets** (5 tiers): Leather → Iron → Golden → Mummy → Space → Artifact (Strong Force)
-- **Armor** (5 tiers): Cloth → Iron → Golden → Mummy → Space → Artifact (Nanotech)
-- **Backpacks**: Expand inventory capacity
-- **Potions**: Healing, Speed, Damage Boost, Shield
-- **Resources**: Wood, Stone, Ore — used for crafting
-
-### Progression Systems
-
-- **Level Up**: Square-root sublinear scaling (Lv5 ≈ 1.9x, Lv50 ≈ 4.2x, Lv100 ≈ 5.5x)
-- **Forge**: Upgrade weapons/armor to higher tiers, craft artifact gear
-- **Market**: Buy gear and potions, open mystery chests
-- **Warehouse**: Store loot between runs
-- **Evacuation**: Reach the extraction point, channel for 3 seconds, and escape with your loot
-
-### Procedural Generation
-
-- Random room-and-corridor map layouts per seed
-- Theme-specific wall colors, floor textures, and decorative elements
-- Chest placement, harvestable resources (trees, ores, stones, cacti), and boss rooms
-
-## Project Structure
+## 项目结构
 
 ```
 monster-upgrade/
-├── main.py              # Entry point: arcade.Window + GameState
-├── config.py            # All game constants (window, player, monsters, combat, loot, upgrade formulas)
-├── entities/            # Static data definitions
-│   ├── weapon_defs.py   # 16 weapon templates (melee + ranged)
-│   ├── equipment_defs.py# Helmets, armor, backpacks, potions
-│   ├── resource_defs.py # Wood, stone, ore
-│   └── effects_defs.py  # Debuff/effect rules and scaling
-├── game/                # Core game logic
-│   ├── monsters.py      # 13 monster types + 4 bosses
-│   ├── combat.py        # Melee/ranged combat, debuff resolution
-│   ├── map_gen.py       # Procedural room+corridor generation
-│   ├── player.py        # Player sprite and movement
-│   ├── loot.py          # Drop tables and loot logic
-│   ├── evac.py          # Extraction point and evacuation
-│   ├── effects.py       # Particles, floating text, sound triggers
-│   ├── rendering.py     # Main render orchestration
-│   ├── sound_manager.py # Procedural sound synthesis
-│   ├── input_handler.py # Keyboard/mouse input mapping
-│   └── respawn.py       # Monster respawn system
-├── views/               # UI screens (all arcade.View subclasses)
-│   ├── start_view.py    # Main menu with equipment display
-│   ├── map_select_view.py # Map selection (3 maps)
-│   ├── game_view.py     # Main gameplay HUD (~700 lines)
-│   ├── warehouse_view.py# Item management and selling
-│   ├── market_view.py   # Buy/sell/chest opening (~500 lines)
-│   ├── forge_view.py    # Weapon/armor upgrading and artifact crafting
-│   ├── backpack_view.py # Current run inventory
-│   └── scroll_view.py   # Scrollable panel base class
-└── db/                  # SQLite persistence layer
-    ├── database.py      # Schema setup + CRUD re-exports
-    ├── players.py       # Player data
-    ├── weapons.py       # Weapon storage
-    ├── equipment.py     # Equipment storage
-    ├── warehouse.py     # Warehouse storage
-    └── potions.py       # Potion storage
+├── main.py              # 入口：arcade.Window + GameState（各 View 共享状态）
+├── config.py            # 全部数值常量（窗口/玩家/怪物/战斗/掉落/升级公式/宝箱）
+├── requirements.txt     # 依赖清单（arcade + websockets）
+├── entities/            # 静态数据定义（武器/装备/怪物/资源/效果，数据驱动）
+├── game/                # 核心逻辑（怪物AI/战斗/地图生成/掉落/撤离/刷新/渲染/输入）
+├── views/               # UI 界面（start/map_select/lobby/game/warehouse/market/forge/backpack 等）
+├── net/                 # 局域网联机网络层（protocol/server/client/thread_bridge）
+├── db/                  # SQLite 持久化层（schema + CRUD）
+└── docs/                # 项目文档（联机模式矩阵等）
 ```
 
-## Tech Stack
+## 技术栈
 
 - **Python 3.14**
-- **Arcade 2.7** — 2D game engine (rendering, physics, input)
-- **SQLite** — Local database for persistence
-- **No external dependencies** beyond `arcade`
+- **Arcade** — 2D 游戏引擎（渲染、物理、输入）
+- **websockets** — 局域网联机（异步 WebSocket 服务端/客户端，线程桥接不阻塞主循环）
+- **SQLite** — 本地持久化（玩家/武器/装备/仓库/药水）
 
-## Getting Started
-
-### Prerequisites
-
-- Python 3.14+
-- pip
-
-### Installation
+## 快速开始
 
 ```bash
-# Clone the repository
+# 克隆
 git clone https://github.com/wrCBDjdhN/monster-upgrade.git
 cd monster-upgrade
 
-# Install dependencies
-pip install arcade
+# 安装依赖
+pip install -r requirements.txt
 
-# Run the game
+# 运行（单机）
 python main.py
+
+# 局域网联机：主机选「局域网联机」建房 → 其他电脑输入主机 IP 加入
 ```
 
-### Controls
+## 操作
 
-| Key | Action |
-|-----|--------|
-| WASD / Arrow Keys | Move |
-| Mouse | Aim (ranged weapons) |
-| Left Click | Attack |
-| TAB | Open/close backpack |
-| F11 | Toggle fullscreen |
+| 按键 | 功能 |
+|------|------|
+| WASD / 方向键 | 移动 |
+| 鼠标 | 瞄准（远程武器） |
+| 鼠标左键 | 攻击 |
+| E | 交互（宝箱/水井/发射台） |
+| V | 观战模式切换视角（联机） |
+| TAB | 打开/关闭背包 |
+| F11 | 全屏切换 |
 
-## Game Flow
+## 游戏流程
 
 ```
-Start Menu
-  ├── Select weapon to carry into battle
-  ├── Warehouse (store/manage loot)
-  ├── Market (buy gear, open chests)
-  └── Forge (upgrade weapons/armor)
+开始界面
+  ├── 选择携带武器
+  ├── 仓库（存取战利品）
+  ├── 市场（买卖、开宝箱）
+  └── 锻造坊（升级/合成神器）
         │
         ▼
-  Map Selection
-  ├── Dark Forest (Normal)
-  ├── Desert Wasteland (Hard)
-  └── Space Base (Extreme)
+  地图选择（或局域网建房）
+  ├── 幽暗森林（普通）
+  ├── 沙漠荒地（困难）
+  └── 航天基地（极难）
         │
         ▼
-  Gameplay (timed)
-  ├── Explore procedural maps
-  ├── Kill monsters → collect loot
-  ├── Open chests → find gear
-  ├── Harvest resources (trees, ores)
-  ├── Fight bosses for rare equipment
-  └── Reach extraction point → Evacuate
+  战斗（倒计时）
+  ├── 探索程序化地图
+  ├── 击杀怪物 → 收集掉落
+  ├── 开宝箱 / 采集资源
+  ├── 挑战 BOSS 获取稀有装备
+  └── 到达撤离点读条撤离
         │
         ▼
-  Evacuation Result
-  ├── Loot saved to warehouse
-  ├── Gold deposited
-  └── Return to Start Menu
+  撤离结算
+  ├── 战利品存入仓库
+  ├── 金币入库
+  └── 返回开始界面（联机：回房等待下一局）
 ```
 
-## Architecture
+## 架构
 
-The codebase follows a strict layered architecture:
+严格分层，数据流经 `window.game_state`（main.GameState）共享，禁止全局变量：
 
-- **`entities/`** — Pure data definitions (weapon/equipment/resource templates)
-- **`db/`** — SQLite persistence layer (schema + CRUD)
-- **`game/`** — Core logic (monsters, combat, map gen, effects, rendering)
-- **`views/`** — UI screens (arcade.View subclasses)
-- **`config.py`** — All tunable constants (no hardcoded values in game code)
-
-Cross-layer data flow goes through `window.game_state` (main.GameState) — no global variables.
+- **`entities/`** — 纯数据定义（武器/装备/怪物/资源模板），怪物数值/元数据集中管理
+- **`db/`** — SQLite 持久化层
+- **`game/`** — 核心逻辑（怪物/战斗/地图/掉落/撤离/刷新/渲染/输入）
+- **`views/`** — UI 界面（arcade.View 子类，可滚动面板复用）
+- **`net/`** — 联机网络层（主机权威快照 + 事件广播，线程桥接）
 
 ## License
 
-This project is open source. See the repository for license details.
+开源项目，详见仓库 LICENSE。
