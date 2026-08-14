@@ -24,6 +24,7 @@ from entities.effects_defs import (
     effects_label, parse_effect_item, EFFECT_LEVEL_MAX,
 )
 from views.scroll_view import ScrollView
+from views.text_cache import TextCache
 
 # 材料最低等级
 FORGE_MIN_LEVEL = 5
@@ -71,6 +72,8 @@ ARTIFACTS = (
 class ForgeView(ScrollView):
     def __init__(self, window):
         super().__init__(window)
+        # 持久文本缓存（消除 draw_text 每帧重建纹理的 PerformanceWarning）
+        self._tc = TextCache()
         self.forge_btn = arcade.XYWH(WINDOW_WIDTH - 120, 40, 200, 40)
         self.selected = []  # 选中的材料 [(type, id)]，type: "weapon" / "equipment"
         # 锻造动画状态（仿市场开箱动画）
@@ -82,6 +85,8 @@ class ForgeView(ScrollView):
 
     def _build_content(self):
         """构建材料列表（Lv.5+ 的未装备武器/装备）"""
+        # 内容重建：先清空文本缓存，避免旧 key 残留
+        self._tc.clear()
         self.content_items = []  # [(type, y, data)]
         pid = self.window.game_state.player_id
         gs = self.window.game_state
@@ -181,33 +186,40 @@ class ForgeView(ScrollView):
         offset = self.scroll_offset
 
         # === 固定头部 ===
-        arcade.draw_text("锻 造 坊", WINDOW_WIDTH // 2, WINDOW_HEIGHT - 30,
-                         arcade.color.GOLD, 30, anchor_x="center")
-        arcade.draw_text(f"金币: {gold}", WINDOW_WIDTH // 2, WINDOW_HEIGHT - 60,
-                         arcade.color.YELLOW, 18, anchor_x="center")
+        # 持久文本：标题
+        self._tc.text("header_title", "锻 造 坊", WINDOW_WIDTH // 2, WINDOW_HEIGHT - 30,
+                      arcade.color.GOLD, 30, anchor_x="center")
+        # 持久文本：金币数
+        self._tc.text("header_gold", f"金币: {gold}", WINDOW_WIDTH // 2, WINDOW_HEIGHT - 60,
+                      arcade.color.YELLOW, 18, anchor_x="center")
         forge_cost = self._forge_cost()
-        arcade.draw_text(
+        # 持久文本：规则说明
+        self._tc.text(
+            "header_rule",
             "消耗至少2件Lv.5+材料，费用随材料等级递增；结果等级=材料等级相加±2，"
             "同名效果合并升级，20%获得神器",
             WINDOW_WIDTH // 2, WINDOW_HEIGHT - 80,
                          arcade.color.GRAY, 11, anchor_x="center")
         # 已选材料数（动态显示）
         selected_color = arcade.color.YELLOW if len(self.selected) >= 2 else arcade.color.GRAY
-        arcade.draw_text(f"已选材料: {len(self.selected)}", 60, WINDOW_HEIGHT - 100,
-                         selected_color, 12)
+        # 持久文本：已选材料数（颜色随选中数变化，同 key 颜色变化自动重建纹理）
+        self._tc.text("header_selected", f"已选材料: {len(self.selected)}", 60, WINDOW_HEIGHT - 100,
+                      selected_color, 12)
 
         content_top = WINDOW_HEIGHT - 125
 
         # === 可滚动内容（材料列表）===
-        for item_type, item_y, data in self.content_items:
+        for i, (item_type, item_y, data) in enumerate(self.content_items):
             screen_y = content_top + item_y + offset
             if screen_y < 40 or screen_y > content_top + 20:
                 continue
 
             if item_type == "header":
-                arcade.draw_text(data, 60, screen_y, arcade.color.LIGHT_GRAY, 13)
+                # 持久文本：滚动区 header 类型（key 用索引区分）
+                self._tc.text(f"header_{i}", data, 60, screen_y, arcade.color.LIGHT_GRAY, 13)
             elif item_type == "text":
-                arcade.draw_text(data, 60, screen_y, arcade.color.GRAY, 11)
+                # 持久文本：滚动区 text 类型
+                self._tc.text(f"text_{i}", data, 60, screen_y, arcade.color.GRAY, 11)
             elif item_type == "material":
                 # 选中的材料行加高亮背景
                 if data["selected"]:
@@ -218,7 +230,8 @@ class ForgeView(ScrollView):
                     )
                 color = arcade.color.YELLOW if data["selected"] else arcade.color.CORNFLOWER_BLUE
                 mark = "✓ " if data["selected"] else "○ "
-                arcade.draw_text(f"{mark}{data['label']}", 70, screen_y, color, 12)
+                # 持久文本：滚动区 material 类型（选中态颜色变化，同 key 自动重建）
+                self._tc.text(f"material_{i}", f"{mark}{data['label']}", 70, screen_y, color, 12)
 
         # 滚动条
         if self.content_height > content_top - 60:
@@ -233,17 +246,19 @@ class ForgeView(ScrollView):
 
         # === 固定底部导航 ===
         arcade.draw_rect_filled(self.back_rect, arcade.color.DARK_RED)
-        arcade.draw_text("返回大厅", self.back_rect.center_x, self.back_rect.center_y,
-                         arcade.color.WHITE, 13, anchor_x="center", anchor_y="center")
+        # 持久文本：返回按钮
+        self._tc.text("nav_back", "返回大厅", self.back_rect.center_x, self.back_rect.center_y,
+                      arcade.color.WHITE, 13, anchor_x="center", anchor_y="center")
 
         # 锻造按钮（需至少2件材料 + 动态锻造费用）
         can_forge = len(self.selected) >= 2 and gold >= forge_cost
         forge_color = arcade.color.DARK_ORANGE if can_forge else (60, 60, 60)
         arcade.draw_rect_filled(self.forge_btn, forge_color)
         arcade.draw_rect_outline(self.forge_btn, arcade.color.WHITE, border_width=2)
-        arcade.draw_text(f"锻 造 ({forge_cost}G)",
-                         self.forge_btn.center_x, self.forge_btn.center_y,
-                         arcade.color.WHITE, 14, anchor_x="center", anchor_y="center")
+        # 持久文本：锻造按钮（动态费用文本，同 key 复用）
+        self._tc.text("forge_btn", f"锻 造 ({forge_cost}G)",
+                      self.forge_btn.center_x, self.forge_btn.center_y,
+                      arcade.color.WHITE, 14, anchor_x="center", anchor_y="center")
 
         # === 锻造动画覆盖层（仿市场开箱动画）===
         if self._forge_opening and self._forge_result:
@@ -279,8 +294,9 @@ class ForgeView(ScrollView):
                     text = f"✨ 锻造出神器: {name} ✨"
                 else:
                     text = f"锻造成功! 获得 {name} Lv.{level}"
-                arcade.draw_text(
-                    text, WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - 40,
+                # 持久文本：锻造动画结果
+                self._tc.text(
+                    "forge_result", text, WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - 40,
                     arcade.color.GOLD, 20, anchor_x="center", anchor_y="center",
                 )
 

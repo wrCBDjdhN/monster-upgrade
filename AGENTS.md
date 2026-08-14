@@ -1,23 +1,24 @@
 # PROJECT KNOWLEDGE BASE - 打怪升级项目
 
-**Generated:** 2026-08-06
-**Commit:** 5cf8143
+**Updated:** 2026-08-11
+**Commit:** d571a1d
 **Branch:** master
-**Stats:** 94 files, 44 Python files, 8,847 lines
+**Stats:** 46 Python files, ~10,400 行（怪物系统已数据驱动化重构）
 
 ## 项目知识库（结构速览）
 
-> 技术栈：Python 3.14 + Arcade 2D 引擎 + SQLite（依赖仅 `arcade`）。运行：`python main.py`
+> 技术栈：Python 3.14 + Arcade 2D 引擎 + SQLite（依赖 `arcade` + `websockets`（局域网联机））。运行：`python main.py`
 
 ### 目录结构
 ```
 打怪升级/
 ├── main.py       # 入口：arcade.Window + GameState（各 View 共享状态，含 player_id/run_carried/当前武器/地图种子）
 ├── config.py     # 全部数值常量（窗口/玩家/怪物/战斗/掉落/升级公式/宝箱），调整平衡性只改这里
-├── entities/     # 数据定义：weapon_defs / equipment_defs / resource_defs / effects_defs（见 entities/AGENTS.md）
+├── entities/     # 数据定义：weapon_defs / equipment_defs / monster_defs / resource_defs / effects_defs（见 entities/AGENTS.md）
 ├── db/           # SQLite 层：connection / database(建表+CRUD re-export) / players / weapons / equipment / warehouse / potions（见 db/AGENTS.md）
-├── game/         # 核心逻辑：怪物AI / 战斗 / 地图生成 / 掉落 / 撤离 / 宝箱 / 特效 / 渲染 / 音效 / 输入 / 刷新（见 game/AGENTS.md）
-└── views/        # UI：start / map_select / game(~700行,最大) / warehouse / market / forge / backpack / scroll（见 views/AGENTS.md）
+├── game/         # 核心逻辑：怪物AI / 战斗 / 地图生成 / 掉落 / 撤离 / 宝箱 / 特效 / 渲染 / 音效 / 输入 / 刷新 / 回调汇聚（见 game/AGENTS.md）
+├── net/          # 联机网络层：protocol / server / client / thread_bridge——局域网联机用
+└── views/        # UI：start / map_select / game(995行,最大) / warehouse / market / forge / backpack / scroll / text_cache（见 views/AGENTS.md）
 ```
 
 ### 高频入口速查
@@ -25,16 +26,31 @@
 |---------|--------|
 | 调数值/平衡 | `config.py`（禁硬编码数值） |
 | 加武器/装备/资源/效果 | `entities/*_defs.py`（effects 规则见 entities/AGENTS.md） |
-| 加怪物 | `game/monsters.py`（复制 Zombie/Skeleton 模式，已有 8 类怪物） |
+| 加怪物数据 | `entities/monster_defs.py`（MONSTER_CONFIGS + MONSTER_METADATA 各加一条，13 类含 4 BOSS） |
+| 加怪物类 | `game/monsters.py`（继承 `_MeleeMonsterBase`/`_RangedMonsterBase` 的薄类，复制 Zombie 模式） |
 | 加怪物装备分配 | `game/monster_utils.py`（assign_monster_weapon/armor/helmet） |
 | 加 UI 界面 | `views/*_view.py`（arcade.View 子类，可滚动面板继承 scroll_view.py） |
 | 加数据库操作 | `db/`（sqlite3 stdlib，`with _conn() as c`；新函数须追加到 db/database.py re-export） |
 | 视图间传数据 | `window.game_state`（main.GameState），禁全局变量 |
 
+### CODE MAP（核心符号）
+| 符号 | 类型 | 位置 | 角色 |
+|------|------|------|------|
+| `GameState` | class | main.py:22 | 各 View 共享运行时状态（player_id/run_carried/武器/地图种子） |
+| `_MONSTER_CLASSES` | dict | views/game_view.py | 怪物类型名 → 类映射（数据驱动注册） |
+| `MONSTER_CONFIGS` | dict | entities/monster_defs.py | 怪物数值配置（hp/damage/speed/弹丸参数），BOSS 条目内联倍率（hp×8/damage×4/speed×0.7） |
+| `MONSTER_METADATA` | dict | entities/monster_defs.py | 怪物渲染/掉落/武器池元数据（entity_callbacks/monster_utils/rendering 3 处消费） |
+| `assign_monster_armor/helmet/weapon` | func | game/monster_utils.py | 怪物装备分配（等级范围取 config） |
+| `_MeleeMonsterBase` / `_RangedMonsterBase` | class | game/monsters.py | 近战/远程怪物参数化基类（AI 行为唯一实现处） |
+| `entity_callbacks` | module | game/entity_callbacks.py | 怪物死亡回调汇聚 + RocketPad 陷阱注释（:428） |
+| `commit_run_to_warehouse` | func | game/evac.py | 撤离入库唯一口径（gold=本次携带金币） |
+| `TextCache` | class | views/text_cache.py | 持久 arcade.Text 缓存，避免每帧 draw_text 重建纹理 |
+
 ### 关键约定
 - 中文 docstring + 中文注释为硬性约定；汇报必须中文
 - 视图切换用 `window.show_view()`；函数内延迟 import 避免 views 循环依赖
 - 怪物护甲/头盔/武器分配集中在 `game/monster_utils.py` 的 `assign_monster_armor()`/`assign_monster_helmet()`/`assign_monster_weapon()`
+- 怪物数值/元数据集中在 `entities/monster_defs.py`（MONSTER_CONFIGS/MONSTER_METADATA），`game/monsters.py` 禁硬编码数值（数据驱动重构后 13 类，含 4 BOSS）
 - `db/database.py` 保留全量 re-export 兼容旧 import；`db/game.db` 为 SQLite 数据文件（pyright 已排除）
 - 玩家速度 4px/帧：PhysicsEngineSimple 不乘 delta_time
 - 渲染禁空心/线框绘制（`draw_*_outline`/`draw_line` 等会导致闪烁）：一律不透明实心填充（见 game/AGENTS.md）
@@ -101,7 +117,7 @@
 
 | 任务类型 | 参考文件 | 参考内容 |
 |---------|---------|---------|
-| 添加新怪物 | `game/monsters.py` | 类结构、属性定义（hp/damage/speed/armor/helmet）、AI行为 |
+| 添加新怪物 | `entities/monster_defs.py` + `game/monsters.py` | 数据驱动：先加 MONSTER_CONFIGS/MONSTER_METADATA 条目，再建继承 `_MeleeMonsterBase`/`_RangedMonsterBase` 的薄类（数值禁写进类内） |
 | 添加新怪物生成 | `game/monster_utils.py` | `assign_monster_armor()`、`assign_monster_helmet()`、`assign_monster_weapon()` |
 | 添加新武器 | `entities/weapon_defs.py` | 武器定义格式（name/damage/attack_speed/range/price/color） |
 | 添加新装备 | `entities/equipment_defs.py` | 装备定义格式（name/defense/price/color/description） |
@@ -120,41 +136,27 @@
 
 ### 示例
 
-**正确做法**（添加新怪物）：
+**正确做法**（添加新怪物，数据驱动模式）：
 ```python
-# 参考 game/monsters.py 中的 Zombie 类
-class NewMonster(arcade.SpriteSolidColor):
+# 1) entities/monster_defs.py 中 MONSTER_CONFIGS 加数值条目、MONSTER_METADATA 加渲染/掉落元数据
+# 2) game/monsters.py 建薄类（复制 Zombie 模式，数值全部来自 MONSTER_CONFIGS）
+class NewMonster(_MeleeMonsterBase):
+    """新怪物（近战）：描述其特性"""
+
     def __init__(self, center_x=0, center_y=0):
-        super().__init__(SIZE * 2, SIZE * 2, color=COLOR)
-        self.center_x = center_x
-        self.center_y = center_y
-        self.hp = HP
-        self.max_hp = HP
-        self.damage = DAMAGE
-        self.speed = SPEED
-        self._attack_timer = 0.0
-        self._on_death_cb = None
-        self._hit_flash = 0.0
-        self.room_bounds = None
-        self._walls = []
-        # 护甲系统
-        self.armor = None
-        self.armor_drop_id = None
-        # 头盔系统
-        self.helmet = None
-        self.helmet_drop_id = None
+        super().__init__(center_x=center_x, center_y=center_y, **MONSTER_CONFIGS["NewMonster"])
 ```
 
-**错误做法**（自己发挥）：
+**错误做法**（自己发挥，旧版硬编码模式）：
 ```python
-# 不参考现有代码，自己发明新的结构
+# 不参考现有代码，自己发明新的结构，且数值硬编码在类内
 class NewMonster:
     def __init__(self, x, y):
         self.x = x
         self.y = y
         self.health = 100  # 变量名不一致
         self.attack_power = 10  # 属性名不一致
-        # 缺少必要的属性和方法
+        # 缺少必要的属性和方法；数值未走 MONSTER_CONFIGS 数据驱动
 ```
 
 ---

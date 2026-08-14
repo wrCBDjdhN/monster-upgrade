@@ -1,21 +1,23 @@
 # views/ - UI 视图层
 
-**Updated:** 2026-08-06 | **Files:** 12 | **Lines:** ~3,200
+**Updated:** 2026-08-11 | **Files:** 11 | **Lines:** ~3,720
 
 ## OVERVIEW
-全部界面，均为 `arcade.View` 子类。切换用 `window.show_view()`；共享状态一律走 `window.game_state`（main.GameState）。
+全部界面，均为 `arcade.View` 子类（`text_cache.py` 除外，是文本缓存工具类）。切换用 `window.show_view()`；共享状态一律走 `window.game_state`（main.GameState）。
 
 ## WHERE TO LOOK
 | 视图 | 文件 | 要点 |
 |------|------|------|
-| 开始界面（携带武器显示 + 功能入口按钮） | start_view.py | 入口按钮模式样板，导航枢纽 |
-| 地图选择 | map_select_view.py | 地图种子选择（先写 seed/theme 再 gv.setup()） |
-| 主游戏视图（最大，~700 行） | game_view.py | HUD、世界/屏幕坐标标签、实体生成编排、委托 game/ 层 |
+| 开始界面（携带武器显示 + 功能入口按钮） | start_view.py | 入口按钮模式样板，导航枢纽；init_db/get_or_create_player 引导点 |
+| 地图选择（3 地图 forest/desert/space） | map_select_view.py | 地图种子选择（先写 seed/theme 再 gv.setup()） |
+| 主游戏视图（**最大,995 行**） | game_view.py | HUD、世界/屏幕坐标标签、实体生成编排、委托 game/ 层 |
 | 仓库 | warehouse_view.py | 物品管理（资源/武器/装备售卖） |
-| 市场 | market_view.py | 买卖 + 开箱动画（500 行，第二大） |
+| 市场 | market_view.py | 买卖 + 开箱动画（856 行，第二大） |
 | 锻造坊（升级） | forge_view.py | 材料合成 + 神器，含纯函数 forge_result_level/merge_forge_effects |
 | 背包 | backpack_view.py | 本次携带物；保存 game_view 引用返回不重建 |
-| 可滚动面板基类 | scroll_view.py | 滚动逻辑复用（5/8 视图继承） |
+| 撤离结果 | evac_result_view.py | 撤离成功/失败结算页（接 run_carried 副本） |
+| 可滚动面板基类 | scroll_view.py | 滚动逻辑复用（ScrollView 子类继承） |
+| 文本缓存工具（非 View） | text_cache.py | TextCache：持久 arcade.Text 缓存，避免每帧 draw_text 重建纹理 |
 
 ## CONVENTIONS
 - 类名 `XxxView(arcade.View)`；构造接收 window 存 `self.window_ref`
@@ -24,7 +26,7 @@
 - 文本用 `arcade.draw_text`（中文直写，anchor 对齐）
 - 可滚动面板：继承 `scroll_view.py`（滚轮 + clamp + world_y 逻辑坐标 + 返回按钮）
 - 怪物装备分配集中在 `game/monster_utils.py`（`assign_monster_armor/helmet/weapon`），`game_view.setup()` 调用
-- 切换流程：StartView 为枢纽 → MapSelect → GameView（先 setup 再 show_view）；GameView ↔ BackpackView（TAB）；GameView 撤离成功 → StartView；ScrollView 返回 → StartView
+- 切换流程：StartView 为枢纽 → MapSelect → GameView（先 setup 再 show_view）；GameView ↔ BackpackView（TAB）；GameView 撤离成功 → EvacResultView → StartView；ScrollView 返回 → StartView
 
 ## ANTI-PATTERNS
 - 不重复造按钮/面板：先参考 start_view.py / scroll_view.py 现有模式

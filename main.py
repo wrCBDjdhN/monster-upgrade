@@ -13,6 +13,7 @@ GameState 是各 View 共享的运行时状态，包含：
 - current_weapon_kind/id: 当前装备的武器
 - equipped_weapon_id: 从仓库选择携带的武器 ID
 - current_map_seed: 当前地图随机种子
+- net_mode: 联机模式(solo=单机 / host=主机 / client=客户端)
 """
 
 import arcade
@@ -40,6 +41,25 @@ class GameState:
         self.backpack_capacity: int = 0             # 背包容量（从数据库加载，供各 View 共享）
         self.current_map_seed: int = 1              # 当前地图随机种子（每次进入地图随机生成）
         self.map_theme: str = "forest"              # 当前地图主题: "forest"(幽暗森林) / "desert"(沙漠荒地)
+        # 联机模式: solo=单机 / host=主机(权威模拟) / client=客户端(只渲染+上报+收快照)
+        # 由 LAN 大厅/房间流程设置（B1 双模式分支的依据）；solo 为默认值，单机行为完全不变
+        self.net_mode: str = "solo"
+        # 联机网络对象（默认 None，由 LAN 大厅/房间流程在 todo 21 注入，本层不创建不持有）：
+        # - net_server: host 模式持有的 NetServer 实例（主线程可线程安全调用 broadcast/send_to）
+        # - net_client: client 模式持有的 NetClient 实例（主线程每帧 poll 排空入站消息）
+        # solo/单机模式下均为 None，网络相关代码一律以「net_mode + 对象非 None」双重闸门跳过
+        self.net_server = None
+        self.net_client = None
+        # 联机运行时身份（由 LAN 大厅派发，todo 21 落地后设置；solo 模式不接触）：
+        self.net_player_id: int | None = None   # 本端玩家 id（host=0 固定；client=JOIN_ACCEPT 下发）
+        self.net_slot: int = 0                  # 本端槽位号（host=0；client=JOIN_ACCEPT 下发，出生点偏移用）
+        self.net_spawn: tuple[int, int] | None = None   # 本端出生点（ROOM_START 下发，联机出生用）
+        self.net_max_players: int = 4           # 房间容量（建房者选择，ROOM_START 一致）
+        self.net_room_id: str = ""              # 房间号（状态条/日志显示）
+        self.net_roster: dict = {}              # 玩家名册 {player_id: {"name": str, "slot": int}}，状态条与幽灵名称用
+        self.net_spawns: dict[int, tuple[int, int]] = {}  # 全房出生点 {player_id: (x, y)}，幽灵出生用
+        self.net_ready: bool = False            # 本端是否已准备（开始游戏前全员就绪判定；host 恒为 True）
+        self.net_wait_reason: str = ""          # 客户端撤离/死亡后回房等待的原因（evac/dead），大厅提示用
 
 
 def main():

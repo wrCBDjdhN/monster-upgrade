@@ -28,7 +28,11 @@ MUMMY_ONLY_DROP_IDS = {"cursed_scimitar", "scepter", "mummy_helmet", "mummy_armo
 class DropItem(arcade.SpriteSolidColor):
     """地面掉落物精灵"""
     def __init__(self, x, y, item_type: str, item_id: str, quantity: int = 1,
-                 lifetime: float | None = DROP_LIFETIME, level: int = 1):
+                 lifetime: float | None = DROP_LIFETIME, level: int = 1,
+                 net_id: str | None = None):
+        # 联机网络 id（Todo 18）：主机分配的唯一标识，客户端拾取请求/掉落物生成同步以此定位；
+        # solo 模式恒为 None，不影响单机逻辑
+        self.net_id = net_id
         if item_type == "gold":
             color = (255, 215, 0)
         elif item_type == "weapon":

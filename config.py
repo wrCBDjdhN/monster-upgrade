@@ -303,3 +303,11 @@ ACTION_TIME_DESERT = 300.0         # 沙漠行动时间（5 分钟）
 # ── 航天装备穿戴概率（怪物穿戴分配） ──
 MONSTER_SPACE_ARMOR_CHANCE = 0.30   # 航天怪穿戴航天护甲概率
 MONSTER_SPACE_HELMET_CHANCE = 0.30  # 航天怪穿戴航天头盔概率
+
+# ── 联机网络 ──
+NET_SNAPSHOT_HZ = 20                # 状态快照广播频率（Hz）
+NET_PORT = 8765                     # 局域网联机默认端口
+NET_HEARTBEAT_SEC = 1.0             # 心跳间隔（秒）
+NET_TIMEOUT_SEC = 5.0               # 断线判定超时（秒）
+NET_SPAWN_OFFSET = 40               # 玩家出生点槽位偏移（像素）
+NET_ACTION_TIME_BCAST_SEC = 1.0     # 行动时间广播间隔（秒）

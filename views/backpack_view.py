@@ -22,6 +22,7 @@ from entities.resource_defs import RESOURCES
 from entities.weapon_defs import ALL_WEAPONS
 from entities.equipment_defs import HELMETS, ARMORS, BACKPACKS
 from views.scroll_view import ScrollView
+from views.text_cache import TextCache
 
 
 class BackpackView(ScrollView):
@@ -29,6 +30,7 @@ class BackpackView(ScrollView):
 
     def __init__(self, window, game_view=None):
         super().__init__(window)
+        self._tc = TextCache()  # 文本缓存：复用 arcade.Text 消除 PerformanceWarning
         self.game_view = game_view  # 保存当前 GameView 引用，返回时不用重建
         self.discard_buttons = []  # 两种条目，见模块 docstring
         self.back_rect = arcade.XYWH(WINDOW_WIDTH // 2, 40, 120, 36)
@@ -36,6 +38,7 @@ class BackpackView(ScrollView):
 
     def _build_content(self):
         """构建内容并计算高度"""
+        self._tc.clear()  # 内容结构变化，清空文本缓存防止旧 key 残留
         self.discard_buttons = []
         gs = self.window_ref.game_state
         carried = getattr(gs, 'run_carried', {})
@@ -355,24 +358,24 @@ class BackpackView(ScrollView):
         offset = self.scroll_offset
 
         # 固定头部
-        arcade.draw_text("背 包", WINDOW_WIDTH // 2, WINDOW_HEIGHT - 50,
-                         arcade.color.WHITE, 30, anchor_x="center")
+        self._tc.text("header_title", "背 包", WINDOW_WIDTH // 2, WINDOW_HEIGHT - 50,
+                      arcade.color.WHITE, 30, anchor_x="center")
 
         # 显示容量信息
         from game.loot import _calc_carried_capacity
         used_cap = _calc_carried_capacity(carried)
         total_cap = getattr(gs, 'backpack_capacity', 0)
-        arcade.draw_text(f"容量: {used_cap}/{total_cap}", WINDOW_WIDTH // 2, WINDOW_HEIGHT - 85,
-                         arcade.color.LIGHT_GRAY, 16, anchor_x="center")
-        arcade.draw_text("滚轮滚动查看全部物品", WINDOW_WIDTH // 2, WINDOW_HEIGHT - 105,
-                         arcade.color.GRAY, 11, anchor_x="center")
+        self._tc.text("header_cap", f"容量: {used_cap}/{total_cap}", WINDOW_WIDTH // 2,
+                      WINDOW_HEIGHT - 85, arcade.color.LIGHT_GRAY, 16, anchor_x="center")
+        self._tc.text("header_hint", "滚轮滚动查看全部物品", WINDOW_WIDTH // 2,
+                      WINDOW_HEIGHT - 105, arcade.color.GRAY, 11, anchor_x="center")
 
         # 内容起点（带滚动偏移）
         y = WINDOW_HEIGHT - 120 + offset
         self.discard_buttons = []
 
         # ── 装备栏（当前装备的物品，不占背包容量，用不同颜色标题区分）──
-        arcade.draw_text("装备栏", 50, y, arcade.color.YELLOW, 18)
+        self._tc.text("equip_title", "装备栏", 50, y, arcade.color.YELLOW, 18)
         y -= 32
 
         # 武器槽
@@ -382,12 +385,12 @@ class BackpackView(ScrollView):
             name = wdef.get("name", equip_weapon_id)
             damage = wdef.get("damage", 0)
             kind = "近战" if wdef.get("kind") == "melee" else "远程"
-            arcade.draw_text(f"武器: {name} ({kind} {damage}伤害)", 60, y,
-                             arcade.color.LIGHT_GRAY, 14)
+            self._tc.text("equip_weapon", f"武器: {name} ({kind} {damage}伤害)", 60, y,
+                          arcade.color.LIGHT_GRAY, 14)
             btn = arcade.XYWH(WINDOW_WIDTH - 80, y + 8, 80, 24)
             self.discard_buttons.append((btn, "equip", "weapon"))
         else:
-            arcade.draw_text("武器: (空)", 60, y, arcade.color.GRAY, 14)
+            self._tc.text("equip_weapon", "武器: (空)", 60, y, arcade.color.GRAY, 14)
         y -= 32
 
         # 头盔槽
@@ -396,12 +399,12 @@ class BackpackView(ScrollView):
             hdef = HELMETS.get(equip_helmet_id, {})
             name = hdef.get("name", equip_helmet_id)
             defense = hdef.get("defense", 0)
-            arcade.draw_text(f"头盔: {name} (防御+{defense})", 60, y,
-                             arcade.color.LIGHT_GRAY, 14)
+            self._tc.text("equip_helmet", f"头盔: {name} (防御+{defense})", 60, y,
+                          arcade.color.LIGHT_GRAY, 14)
             btn = arcade.XYWH(WINDOW_WIDTH - 80, y + 8, 80, 24)
             self.discard_buttons.append((btn, "equip", "helmet"))
         else:
-            arcade.draw_text("头盔: (空)", 60, y, arcade.color.GRAY, 14)
+            self._tc.text("equip_helmet", "头盔: (空)", 60, y, arcade.color.GRAY, 14)
         y -= 32
 
         # 护甲槽
@@ -410,12 +413,12 @@ class BackpackView(ScrollView):
             adef = ARMORS.get(equip_armor_id, {})
             name = adef.get("name", equip_armor_id)
             defense = adef.get("defense", 0)
-            arcade.draw_text(f"护甲: {name} (防御+{defense})", 60, y,
-                             arcade.color.LIGHT_GRAY, 14)
+            self._tc.text("equip_armor", f"护甲: {name} (防御+{defense})", 60, y,
+                          arcade.color.LIGHT_GRAY, 14)
             btn = arcade.XYWH(WINDOW_WIDTH - 80, y + 8, 80, 24)
             self.discard_buttons.append((btn, "equip", "armor"))
         else:
-            arcade.draw_text("护甲: (空)", 60, y, arcade.color.GRAY, 14)
+            self._tc.text("equip_armor", "护甲: (空)", 60, y, arcade.color.GRAY, 14)
         y -= 32
 
         # 背包槽
@@ -424,123 +427,124 @@ class BackpackView(ScrollView):
             bdef = BACKPACKS.get(equip_bag_id, {})
             name = bdef.get("name", equip_bag_id)
             capacity = bdef.get("capacity", 0)
-            arcade.draw_text(f"背包: {name} (容量+{capacity})", 60, y,
-                             arcade.color.LIGHT_GRAY, 14)
+            self._tc.text("equip_pack", f"背包: {name} (容量+{capacity})", 60, y,
+                          arcade.color.LIGHT_GRAY, 14)
             btn = arcade.XYWH(WINDOW_WIDTH - 80, y + 8, 80, 24)
             self.discard_buttons.append((btn, "equip", "backpack"))
         else:
-            arcade.draw_text("背包: (空)", 60, y, arcade.color.GRAY, 14)
+            self._tc.text("equip_pack", "背包: (空)", 60, y, arcade.color.GRAY, 14)
         y -= 32
         y -= 20  # 装备栏与下方区域间距
 
         # ── 金币 ──
         gold = carried.get("gold", 0)
-        arcade.draw_text(f"金币: {gold}", 50, y, arcade.color.GOLD, 16)
+        self._tc.text("gold", f"金币: {gold}", 50, y, arcade.color.GOLD, 16)
         y -= 40
 
         # ── 资源列表 ──
-        arcade.draw_text("资源:", 50, y, arcade.color.WHITE, 16)
+        self._tc.text("res_title", "资源:", 50, y, arcade.color.WHITE, 16)
         y -= 30
         resources = carried.get("resource", {})
         if resources:
-            for item_id, qty in resources.items():
+            for i, (item_id, qty) in enumerate(resources.items()):
                 name = RESOURCES.get(item_id, {}).get("name", item_id)
-                arcade.draw_text(f"{name} x{qty}", 60, y, arcade.color.LIGHT_GRAY, 14)
+                self._tc.text(f"res_{i}", f"{name} x{qty}", 60, y,
+                              arcade.color.LIGHT_GRAY, 14)
                 # 丢弃按钮
                 btn = arcade.XYWH(WINDOW_WIDTH - 80, y + 8, 80, 24)
                 # 资源无等级概念，level 占位传 1（_discard_item 中对资源类型会忽略 level）
                 self.discard_buttons.append((btn, "carry", "resource", item_id, 1))
                 y -= 30
         else:
-            arcade.draw_text("(空)", 60, y, arcade.color.GRAY, 12)
+            self._tc.text("res_empty", "(空)", 60, y, arcade.color.GRAY, 12)
             y -= 30
         y -= 20
 
         # ── 武器列表 ──
-        arcade.draw_text("武器:", 50, y, arcade.color.WHITE, 16)
+        self._tc.text("wep_title", "武器:", 50, y, arcade.color.WHITE, 16)
         y -= 32
         weapons = carried.get("weapon", {})
         if weapons:
-            for (item_id, level), qty in weapons.items():
+            for i, ((item_id, level), qty) in enumerate(weapons.items()):
                 wdef = ALL_WEAPONS.get(item_id, {})
                 name = wdef.get("name", item_id)
                 damage = wdef.get("damage", 0)
                 kind = "近战" if wdef.get("kind") == "melee" else "远程"
-                arcade.draw_text(f"{name} Lv.{level} ({kind} {damage}伤害) x{qty}", 60, y,
-                                 arcade.color.LIGHT_GRAY, 14)
+                self._tc.text(f"wep_{i}", f"{name} Lv.{level} ({kind} {damage}伤害) x{qty}", 60, y,
+                              arcade.color.LIGHT_GRAY, 14)
                 btn = arcade.XYWH(WINDOW_WIDTH - 80, y + 8, 80, 24)
                 self.discard_buttons.append((btn, "carry", "weapon", item_id, level))
                 y -= 32
         else:
-            arcade.draw_text("(空)", 60, y, arcade.color.GRAY, 12)
+            self._tc.text("wep_empty", "(空)", 60, y, arcade.color.GRAY, 12)
             y -= 32
         y -= 20
 
         # ── 头盔列表 ──
-        arcade.draw_text("头盔:", 50, y, arcade.color.WHITE, 16)
+        self._tc.text("helm_title", "头盔:", 50, y, arcade.color.WHITE, 16)
         y -= 32
         helmets = carried.get("helmet", {})
         if helmets:
-            for (item_id, level), qty in helmets.items():
+            for i, ((item_id, level), qty) in enumerate(helmets.items()):
                 hdef = HELMETS.get(item_id, {})
                 name = hdef.get("name", item_id)
                 defense = hdef.get("defense", 0)
-                arcade.draw_text(f"{name} Lv.{level} (防御+{defense}) x{qty}", 60, y,
-                                 arcade.color.LIGHT_GRAY, 14)
+                self._tc.text(f"helm_{i}", f"{name} Lv.{level} (防御+{defense}) x{qty}", 60, y,
+                              arcade.color.LIGHT_GRAY, 14)
                 btn = arcade.XYWH(WINDOW_WIDTH - 80, y + 8, 80, 24)
                 self.discard_buttons.append((btn, "carry", "helmet", item_id, level))
                 y -= 32
         else:
-            arcade.draw_text("(空)", 60, y, arcade.color.GRAY, 12)
+            self._tc.text("helm_empty", "(空)", 60, y, arcade.color.GRAY, 12)
             y -= 32
         y -= 20
 
         # ── 护甲列表 ──
-        arcade.draw_text("护甲:", 50, y, arcade.color.WHITE, 16)
+        self._tc.text("armor_title", "护甲:", 50, y, arcade.color.WHITE, 16)
         y -= 32
         armors = carried.get("armor", {})
         if armors:
-            for (item_id, level), qty in armors.items():
+            for i, ((item_id, level), qty) in enumerate(armors.items()):
                 adef = ARMORS.get(item_id, {})
                 name = adef.get("name", item_id)
                 defense = adef.get("defense", 0)
-                arcade.draw_text(f"{name} Lv.{level} (防御+{defense}) x{qty}", 60, y,
-                                 arcade.color.LIGHT_GRAY, 14)
+                self._tc.text(f"armor_{i}", f"{name} Lv.{level} (防御+{defense}) x{qty}", 60, y,
+                              arcade.color.LIGHT_GRAY, 14)
                 btn = arcade.XYWH(WINDOW_WIDTH - 80, y + 8, 80, 24)
                 self.discard_buttons.append((btn, "carry", "armor", item_id, level))
                 y -= 32
         else:
-            arcade.draw_text("(空)", 60, y, arcade.color.GRAY, 12)
+            self._tc.text("armor_empty", "(空)", 60, y, arcade.color.GRAY, 12)
             y -= 32
         y -= 20
 
         # ── 背包列表 ──
-        arcade.draw_text("背包:", 50, y, arcade.color.WHITE, 16)
+        self._tc.text("pack_title", "背包:", 50, y, arcade.color.WHITE, 16)
         y -= 32
         backpacks = carried.get("backpack", {})
         if backpacks:
-            for (item_id, level), qty in backpacks.items():
+            for i, ((item_id, level), qty) in enumerate(backpacks.items()):
                 bdef = BACKPACKS.get(item_id, {})
                 name = bdef.get("name", item_id)
                 capacity = bdef.get("capacity", 0)
-                arcade.draw_text(f"{name} Lv.{level} (容量+{capacity}) x{qty}", 60, y,
-                                 arcade.color.LIGHT_GRAY, 14)
+                self._tc.text(f"pack_{i}", f"{name} Lv.{level} (容量+{capacity}) x{qty}", 60, y,
+                              arcade.color.LIGHT_GRAY, 14)
                 btn = arcade.XYWH(WINDOW_WIDTH - 80, y + 8, 80, 24)
                 self.discard_buttons.append((btn, "carry", "backpack", item_id, level))
                 y -= 32
         else:
-            arcade.draw_text("(空)", 60, y, arcade.color.GRAY, 12)
+            self._tc.text("pack_empty", "(空)", 60, y, arcade.color.GRAY, 12)
             y -= 32
 
         # 绘制丢弃按钮（rect 坐标已含 scroll_offset，直接使用即可）
-        for btn in self.discard_buttons:
+        for i, btn in enumerate(self.discard_buttons):
             rect = btn[0]
             draw_rect = arcade.XYWH(rect.center_x, rect.center_y, rect.width, rect.height)
             arcade.draw_rect_filled(draw_rect, arcade.color.DARK_RED)
-            arcade.draw_text("丢弃", draw_rect.center_x, draw_rect.center_y,
-                             arcade.color.WHITE, 11, anchor_x="center", anchor_y="center")
+            self._tc.text(f"discard_{i}", "丢弃", draw_rect.center_x, draw_rect.center_y,
+                          arcade.color.WHITE, 11, anchor_x="center", anchor_y="center")
 
         # 返回按钮
         arcade.draw_rect_filled(self.back_rect, arcade.color.DARK_BLUE)
-        arcade.draw_text("返回游戏", self.back_rect.center_x, self.back_rect.center_y,
-                         arcade.color.WHITE, 14, anchor_x="center", anchor_y="center")
+        self._tc.text("nav_back", "返回游戏", self.back_rect.center_x, self.back_rect.center_y,
+                      arcade.color.WHITE, 14, anchor_x="center", anchor_y="center")

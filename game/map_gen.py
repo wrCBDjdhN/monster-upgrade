@@ -224,6 +224,34 @@ def generate_map(seed: int, num_rooms: int = 6, theme: str = "forest") -> dict:
                     break
             if too_close:
                 continue
+            # 修复：检查 BOSS 建筑（含墙体）是否堵住出生房（rooms[0]）门洞出口走廊。
+            # 房间门洞选择阶段只避让邻近房间（rooms），BOSS 建筑是后生成的，未参与门洞避让；
+            # 若 BOSS 墙正对门洞且间距过近（仅 2 瓦片），玩家出门即被 BOSS 墙挡住，被困出生房间。
+            boss_rect = (bx - tw, by - tw, bx + boss_w + tw, by + boss_h + tw)
+            door_blocked = False
+            spawn_room = rooms[0]
+            # 门洞出口走廊：以门洞为中心、向门外延伸 ROOM_SPACING 的矩形（宽 = 门宽*2）
+            half = door_width  # 门宽 128px，走廊每侧留一扇门宽余量
+            if spawn_room.door_side == 0:  # 上
+                door_exit = (spawn_room.door_pos - half, spawn_room.y - ROOM_SPACING,
+                             spawn_room.door_pos + half, spawn_room.y)
+            elif spawn_room.door_side == 1:  # 下
+                door_exit = (spawn_room.door_pos - half, spawn_room.y + spawn_room.h,
+                             spawn_room.door_pos + half, spawn_room.y + spawn_room.h + ROOM_SPACING)
+            elif spawn_room.door_side == 2:  # 左
+                door_exit = (spawn_room.x - ROOM_SPACING, spawn_room.door_pos - half,
+                             spawn_room.x, spawn_room.door_pos + half)
+            else:  # 右
+                door_exit = (spawn_room.x + spawn_room.w, spawn_room.door_pos - half,
+                             spawn_room.x + spawn_room.w + ROOM_SPACING, spawn_room.door_pos + half)
+            # AABB 相交判定（含边界重叠视为堵门）
+            if not (
+                boss_rect[0] + boss_rect[2] <= door_exit[0] or boss_rect[0] >= door_exit[0] + door_exit[2] or
+                boss_rect[1] + boss_rect[3] <= door_exit[1] or boss_rect[1] >= door_exit[1] + door_exit[3]
+            ):
+                door_blocked = True
+            if door_blocked:
+                continue
             # 门洞开在朝向地图中心的一侧
             center_x, center_y = MAP_WIDTH // 2, MAP_HEIGHT // 2
             b_center_x = bx + boss_w // 2

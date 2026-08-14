@@ -48,6 +48,11 @@ class Player(arcade.SpriteSolidColor):
         self._debuff_tick = 0.0     # 持续伤害 tick 计时（每0.5秒结算一次）
         self._debuff_speed_mult = 1.0  # 减速倍率（冰冻/减速效果叠乘）
         self._stunned = False       # 眩晕状态（无法移动和攻击）
+        # 联机主机伤害广播钩子（默认 None，单机完全不受影响）：
+        # 主机在本地玩家/客户端幽灵上注册为「扣血后回调实际伤害值」的闭包，
+        # 用于广播 PLAYER_HURT（HP 主机权威，见 views/game_view.py _record_hurt）。
+        # 仅当主机模式且已注入网络对象时才被设置，其余模式恒为 None。
+        self.on_take_damage = None  # Callable[[float], None] | None
 
     def clamp_to_map(self):
         """将玩家位置限制在地图边界内"""
@@ -60,6 +65,10 @@ class Player(arcade.SpriteSolidColor):
         actual = max(1, amount - self.defense)
         # round 到 2 位小数：regen 回复使 hp 成为浮点，直接相减会产生二进制长小数（如 87.13-10=77.129999...）
         self.hp = max(0, round(self.hp - actual, 2))
+        # 联机主机伤害广播钩子：扣血完成后以「实际伤害」回调一次（恰好一次/次伤害事件）。
+        # 单机/客户端模式为 None 直接跳过，零开销，行为与旧版完全一致。
+        if self.on_take_damage is not None:
+            self.on_take_damage(actual)
 
     def heal(self, amount: int):
         """回复生命（不超过最大生命值）"""
@@ -70,23 +79,27 @@ class Player(arcade.SpriteSolidColor):
         self.heal_per_sec = heal_per_sec
         self.heal_duration = duration
 
-    def apply_debuff(self, effect_id: str):
+    def apply_debuff(self, effect_id: str, level: int = 1):
         """施加附加效果（中毒/燃烧/冰冻/减速/眩晕），同类刷新持续时间
 
         与怪物侧实现一致：中毒/燃烧按 tick 掉血（直接扣 hp，不受防御减免），
         冰冻/减速降速、眩晕无法行动。
+        level：效果等级（联机同步修复：客户端装备附加效果按上报等级生效，
+        不再固定 1 级），经 effect_params 计算等级缩放后的数值/时长。
         """
-        from entities.effects_defs import EFFECTS
-        effect = EFFECTS.get(effect_id)
+        from entities.effects_defs import EFFECTS, effect_params
+        effect = effect_params(effect_id, level)
         if not effect or effect.get("type") != "debuff":
             return
-        # 同类效果刷新时长
+        # 同类效果刷新时长，并同步效果等级（取较高者）
         for d in self.debuffs:
             if d["id"] == effect_id:
                 d["duration"] = effect.get("duration", 1.0)
+                d["level"] = max(d.get("level", 1), level)
                 return
         self.debuffs.append({
             "id": effect_id,
+            "level": level,
             "duration": effect.get("duration", 1.0),
         })
         # 立即重算减速/眩晕，确保施加瞬间即生效（而非等下一帧结算）
@@ -94,11 +107,11 @@ class Player(arcade.SpriteSolidColor):
 
     def _recalc_debuffs(self):
         """重新计算减速倍率与眩晕状态（施加瞬间与每帧结算时调用）"""
-        from entities.effects_defs import EFFECTS
+        from entities.effects_defs import EFFECTS, effect_params
         self._debuff_speed_mult = 1.0
         self._stunned = False
         for d in self.debuffs:
-            effect = EFFECTS.get(d["id"], {})
+            effect = effect_params(d["id"], d.get("level", 1))
             if effect.get("slow"):
                 self._debuff_speed_mult *= (1.0 - effect["slow"])
             if effect.get("stun"):
@@ -108,12 +121,12 @@ class Player(arcade.SpriteSolidColor):
         """每帧结算附加效果：中毒/燃烧按tick掉血，冰冻/减速降速，眩晕无法行动"""
         if not self.debuffs:
             return
-        from entities.effects_defs import EFFECTS
+        from entities.effects_defs import EFFECTS, effect_params
         self._debuff_tick -= delta_time
         if self._debuff_tick <= 0:
             self._debuff_tick = 0.5  # 每0.5秒结算一次持续伤害
             for d in list(self.debuffs):
-                effect = EFFECTS.get(d["id"], {})
+                effect = effect_params(d["id"], d.get("level", 1))
                 dmg = effect.get("value", 0)
                 if dmg > 0:
                     # 中毒/燃烧：持续掉血。玩家侧直接扣 hp（绕防御，与计划一致），
@@ -156,6 +169,9 @@ class PlayerController:
         self.camera = arcade.Camera2D()
         # Camera2D.position 是视口中心的世界坐标，直接设为玩家中心即可居中
         self.camera.position = (player.center_x, player.center_y)
+        # 相机是否跟随玩家（观战模式置 False：相机改由 game_view 观战段控制，
+        # 否则 update() 每帧把相机拉回已撤离/阵亡的静止玩家，观战视角卡死）
+        self.follow_player = True
         # 追踪当前按下的键，解决对侧键冲突（如同时按 A 和 D）
         self._pressed = set()
 
@@ -205,8 +221,11 @@ class PlayerController:
         self.player._update_debuffs(delta_time)
         # 地图边界
         self.player.clamp_to_map()
-        # 相机直接跟随玩家（居中：position 即视口中心）
-        self.camera.position = (self.player.center_x, self.player.center_y)
+        # 相机直接跟随玩家（居中：position 即视口中心）。
+        # 观战模式（follow_player=False）不跟随：相机已由 game_view 观战段
+        # 控制跟随幽灵，此处再拉回玩家会使观战视角卡死在撤离点（修复场景2）
+        if self.follow_player:
+            self.camera.position = (self.player.center_x, self.player.center_y)
 
     def use_camera(self):
         """激活相机（设置视口变换）"""

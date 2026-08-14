@@ -11,11 +11,14 @@ from entities.equipment_defs import HELMETS, ARMORS, BACKPACKS, POTIONS
 from entities.weapon_defs import MELEE_WEAPONS, RANGED_WEAPONS
 from entities.effects_defs import effects_label
 from views.scroll_view import ScrollView
+from views.text_cache import TextCache
 
 
 class MarketView(ScrollView):
     def __init__(self, window):
         super().__init__(window)
+        # 文本缓存：持久 arcade.Text 对象，复用纹理避免每帧重建文本（消除 PerformanceWarning）
+        self._tc = TextCache()
         self.wh_rect = arcade.XYWH(WINDOW_WIDTH - 100, 40, 120, 36)
         # 开箱动画状态（支持批量：_box_results 为本次批量开出的结果队列）
         self._box_opening = False
@@ -31,6 +34,7 @@ class MarketView(ScrollView):
 
     def _build_content(self):
         """构建完整内容列表，每项记录类型和逻辑Y坐标"""
+        self._tc.clear()  # 内容结构重建，清空文本缓存避免旧 key 残留
         self.content_items = []  # [(type, y, data)]
         pid = self.window.game_state.player_id
         weapons = get_weapons(pid)
@@ -325,12 +329,12 @@ class MarketView(ScrollView):
         offset = self.scroll_offset
 
         # === 固定头部 ===
-        arcade.draw_text("市 场", WINDOW_WIDTH // 2, WINDOW_HEIGHT - 30,
-                         arcade.color.GOLD, 30, anchor_x="center")
-        arcade.draw_text(f"金币: {gold}", WINDOW_WIDTH // 2, WINDOW_HEIGHT - 60,
-                         arcade.color.YELLOW, 18, anchor_x="center")
-        arcade.draw_text("滚轮滚动查看全部商品", WINDOW_WIDTH // 2, WINDOW_HEIGHT - 80,
-                         arcade.color.GRAY, 11, anchor_x="center")
+        self._tc.text("header_title", "市 场", WINDOW_WIDTH // 2, WINDOW_HEIGHT - 30,
+                      arcade.color.GOLD, 30, anchor_x="center")
+        self._tc.text("header_gold", f"金币: {gold}", WINDOW_WIDTH // 2, WINDOW_HEIGHT - 60,
+                      arcade.color.YELLOW, 18, anchor_x="center")
+        self._tc.text("header_hint", "滚轮滚动查看全部商品", WINDOW_WIDTH // 2, WINDOW_HEIGHT - 80,
+                      arcade.color.GRAY, 11, anchor_x="center")
 
         # 当前装备
         equip_text = ""
@@ -341,34 +345,35 @@ class MarketView(ScrollView):
         if "backpack" in equip:
             equip_text += f"背包:{equip['backpack']['name']}(容量:{equip['backpack']['capacity']})"
         if equip_text:
-            arcade.draw_text(f"当前装备: {equip_text}", 60, WINDOW_HEIGHT - 100,
-                             arcade.color.CORNFLOWER_BLUE, 11)
+            self._tc.text("equip_now", f"当前装备: {equip_text}", 60, WINDOW_HEIGHT - 100,
+                          arcade.color.CORNFLOWER_BLUE, 11)
             content_top = WINDOW_HEIGHT - 125
         else:
-            arcade.draw_text("当前装备: 无", 60, WINDOW_HEIGHT - 100,
-                             arcade.color.GRAY, 11)
+            self._tc.text("equip_now", "当前装备: 无", 60, WINDOW_HEIGHT - 100,
+                          arcade.color.GRAY, 11)
             content_top = WINDOW_HEIGHT - 125
 
         # === 可滚动内容 ===
-        for item_type, item_y, data in self.content_items:
+        for i, (item_type, item_y, data) in enumerate(self.content_items):
             screen_y = content_top + item_y + offset
             # 跳过不在视口内的项
             if screen_y < 40 or screen_y > content_top + 20:
                 continue
 
             if item_type == "header":
-                arcade.draw_text(data, 60, screen_y, arcade.color.LIGHT_GRAY, 13)
+                self._tc.text(f"header_{i}", data, 60, screen_y, arcade.color.LIGHT_GRAY, 13)
             elif item_type == "subheader":
-                arcade.draw_text(data, 60, screen_y, arcade.color.GRAY, 10)
+                self._tc.text(f"subheader_{i}", data, 60, screen_y, arcade.color.GRAY, 10)
             elif item_type == "text":
-                arcade.draw_text(data, 60, screen_y, arcade.color.GRAY, 12)
+                self._tc.text(f"text_{i}", data, 60, screen_y, arcade.color.GRAY, 12)
 
             elif item_type == "weapon_upgrade":
                 # 武器信息（含附加效果显示）
                 eff_txt = ""
                 if data.get("effects"):
                     eff_txt = f"  效果:{effects_label(data['effects'])}"
-                arcade.draw_text(
+                self._tc.text(
+                    f"weapon_upgrade_{i}",
                     f"[{data['kind']}] {data['name']}  Lv.{data['level']}  伤害:{data['damage']:.0f}{eff_txt}",
                     60, screen_y, arcade.color.CORNFLOWER_BLUE, 12,
                 )
@@ -377,15 +382,16 @@ class MarketView(ScrollView):
                 btn = arcade.XYWH(WINDOW_WIDTH - 100, screen_y + 5, 90, 26)
                 arcade.draw_rect_filled(btn, btn_color)
                 label = f"升级({data['cost']}G)" if data["has_material"] else "缺材料"
-                arcade.draw_text(label, btn.center_x, btn.center_y,
-                                 arcade.color.WHITE, 10, anchor_x="center", anchor_y="center")
+                self._tc.text(f"weapon_upgrade_btn_{i}", label, btn.center_x, btn.center_y,
+                              arcade.color.WHITE, 10, anchor_x="center", anchor_y="center")
 
             elif item_type in ("upgrade_helmet", "upgrade_armor"):
                 status = data.get("status", "")
                 eff_txt = ""
                 if data.get("effects"):
                     eff_txt = f"  效果:{effects_label(data['effects'])}"
-                arcade.draw_text(
+                self._tc.text(
+                    f"{item_type}_{i}",
                     f"Lv{data['level']} {data['name']}  防+{data['defense']}  {status}{eff_txt}",
                     60, screen_y, arcade.color.CORNFLOWER_BLUE, 12,
                 )
@@ -393,8 +399,8 @@ class MarketView(ScrollView):
                 btn = arcade.XYWH(WINDOW_WIDTH - 100, screen_y + 5, 90, 26)
                 arcade.draw_rect_filled(btn, btn_color)
                 label = f"升级({data['cost']}G)" if data["has_material"] else "缺材料"
-                arcade.draw_text(label, btn.center_x, btn.center_y,
-                                 arcade.color.WHITE, 10, anchor_x="center", anchor_y="center")
+                self._tc.text(f"{item_type}_btn_{i}", label, btn.center_x, btn.center_y,
+                              arcade.color.WHITE, 10, anchor_x="center", anchor_y="center")
 
             elif item_type in ("buy_helmet", "buy_armor", "buy_backpack"):
                 label = f"{data['name']}  "
@@ -402,45 +408,47 @@ class MarketView(ScrollView):
                     label += f"防+{data['defense']}"
                 elif "capacity" in data:
                     label += f"容量:{data['capacity']}"
-                arcade.draw_text(label, 60, screen_y, arcade.color.GREEN, 12)
+                self._tc.text(f"{item_type}_{i}", label, 60, screen_y, arcade.color.GREEN, 12)
                 # 购买按钮
                 btn_color = arcade.color.DARK_GREEN if data["can_buy"] else (60, 60, 60)
                 btn = arcade.XYWH(WINDOW_WIDTH - 100, screen_y + 5, 90, 26)
                 arcade.draw_rect_filled(btn, btn_color)
-                arcade.draw_text(f"购买({data['cost']}G)", btn.center_x, btn.center_y,
-                                 arcade.color.WHITE, 10, anchor_x="center", anchor_y="center")
+                self._tc.text(f"{item_type}_btn_{i}", f"购买({data['cost']}G)", btn.center_x, btn.center_y,
+                              arcade.color.WHITE, 10, anchor_x="center", anchor_y="center")
 
             elif item_type == "buy_potion":
-                arcade.draw_text(f"{data['name']}  {data['desc']}", 60, screen_y,
-                                 arcade.color.GREEN, 12)
+                self._tc.text(f"buy_potion_{i}", f"{data['name']}  {data['desc']}", 60, screen_y,
+                              arcade.color.GREEN, 12)
                 btn_color = arcade.color.DARK_GREEN if data["can_buy"] else (60, 60, 60)
                 btn = arcade.XYWH(WINDOW_WIDTH - 100, screen_y + 5, 90, 26)
                 arcade.draw_rect_filled(btn, btn_color)
-                arcade.draw_text(f"购买({data['cost']}G)", btn.center_x, btn.center_y,
-                                 arcade.color.WHITE, 10, anchor_x="center", anchor_y="center")
+                self._tc.text(f"buy_potion_btn_{i}", f"购买({data['cost']}G)", btn.center_x, btn.center_y,
+                              arcade.color.WHITE, 10, anchor_x="center", anchor_y="center")
 
             elif item_type == "buy_weapon":
-                arcade.draw_text(
+                self._tc.text(
+                    f"buy_weapon_{i}",
                     f"[{data['kind_label']}] {data['name']}  伤害:{data['damage']}  距离:{data['range']}",
                     60, screen_y, arcade.color.CORNFLOWER_BLUE, 12,
                 )
                 btn_color = arcade.color.DARK_GREEN if data["can_buy"] else (60, 60, 60)
                 btn = arcade.XYWH(WINDOW_WIDTH - 100, screen_y + 5, 90, 26)
                 arcade.draw_rect_filled(btn, btn_color)
-                arcade.draw_text(f"购买({data['cost']}G)", btn.center_x, btn.center_y,
-                                 arcade.color.WHITE, 10, anchor_x="center", anchor_y="center")
+                self._tc.text(f"buy_weapon_btn_{i}", f"购买({data['cost']}G)", btn.center_x, btn.center_y,
+                              arcade.color.WHITE, 10, anchor_x="center", anchor_y="center")
 
             elif item_type == "buy_box":
                 color = data.get("color", (200, 150, 50))
-                arcade.draw_text(
+                self._tc.text(
+                    f"buy_box_{i}",
                     f"📦 {data['name']}  {data['desc']}",
                     60, screen_y, color, 12,
                 )
                 btn_color = arcade.color.DARK_GREEN if data["can_buy"] else (60, 60, 60)
                 btn = arcade.XYWH(WINDOW_WIDTH - 100, screen_y + 5, 90, 26)
                 arcade.draw_rect_filled(btn, btn_color)
-                arcade.draw_text(f"购买({data['cost']}G)", btn.center_x, btn.center_y,
-                                 arcade.color.WHITE, 10, anchor_x="center", anchor_y="center")
+                self._tc.text(f"buy_box_btn_{i}", f"购买({data['cost']}G)", btn.center_x, btn.center_y,
+                              arcade.color.WHITE, 10, anchor_x="center", anchor_y="center")
 
         # 滚动条
         if self.content_height > content_top - 60:
@@ -456,11 +464,11 @@ class MarketView(ScrollView):
 
         # === 固定底部导航 ===
         arcade.draw_rect_filled(self.back_rect, arcade.color.DARK_RED)
-        arcade.draw_text("返回大厅", self.back_rect.center_x, self.back_rect.center_y,
-                         arcade.color.WHITE, 13, anchor_x="center", anchor_y="center")
+        self._tc.text("nav_back", "返回大厅", self.back_rect.center_x, self.back_rect.center_y,
+                      arcade.color.WHITE, 13, anchor_x="center", anchor_y="center")
         arcade.draw_rect_filled(self.wh_rect, arcade.color.DARK_BLUE)
-        arcade.draw_text("仓库", self.wh_rect.center_x, self.wh_rect.center_y,
-                         arcade.color.WHITE, 13, anchor_x="center", anchor_y="center")
+        self._tc.text("nav_wh", "仓库", self.wh_rect.center_x, self.wh_rect.center_y,
+                      arcade.color.WHITE, 13, anchor_x="center", anchor_y="center")
 
         # === 开箱动画覆盖层（支持批量：逐个播放 _box_results 队列）===
         if self._box_opening and self._box_results:
@@ -494,14 +502,14 @@ class MarketView(ScrollView):
                 name = result.get("name", "")
                 level = result.get("level", 1)
                 text = f"获得 {name} Lv.{level}!"
-                arcade.draw_text(
-                    text, WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - 40,
+                self._tc.text(
+                    "box_result", text, WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - 40,
                     arcade.color.GOLD, 22, anchor_x="center", anchor_y="center",
                 )
             # 批量进度（仅一次购买多个宝箱时显示）
             if self._box_total > 1:
-                arcade.draw_text(
-                    f"宝箱 {self._box_index + 1} / {self._box_total}",
+                self._tc.text(
+                    "box_progress", f"宝箱 {self._box_index + 1} / {self._box_total}",
                     WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 + 150,
                     arcade.color.LIGHT_GRAY, 14, anchor_x="center", anchor_y="center",
                 )
@@ -804,19 +812,19 @@ class MarketView(ScrollView):
         # 面板
         arcade.draw_rect_filled(arcade.XYWH(640, 360, 540, 360), (30, 35, 50))
         # 标题与单价
-        arcade.draw_text(f"批量购买 - {data['name']}", 640, 520,
-                         arcade.color.GOLD, 20, anchor_x="center", anchor_y="center")
-        arcade.draw_text(f"单价: {st['cost']} 金币", 640, 488,
-                         arcade.color.LIGHT_GRAY, 12, anchor_x="center", anchor_y="center")
+        self._tc.text("bulk_title", f"批量购买 - {data['name']}", 640, 520,
+                      arcade.color.GOLD, 20, anchor_x="center", anchor_y="center")
+        self._tc.text("bulk_price", f"单价: {st['cost']} 金币", 640, 488,
+                      arcade.color.LIGHT_GRAY, 12, anchor_x="center", anchor_y="center")
         # 数量大数字
-        arcade.draw_text(f"{qty}", 640, 430, arcade.color.WHITE, 42,
-                         anchor_x="center", anchor_y="center")
+        self._tc.text("bulk_qty", f"{qty}", 640, 430, arcade.color.WHITE, 42,
+                      anchor_x="center", anchor_y="center")
         # 滑块轨道与手柄
         arcade.draw_rect_filled(arcade.XYWH(640, 390, 430, 8), (70, 70, 82))
         handle_x = self._slider_handle_x()
         arcade.draw_rect_filled(arcade.XYWH(handle_x, 390, 26, 36), (220, 220, 230))
-        arcade.draw_text(f"可购买 1 ~ {st['max_qty']} 个（拖动滑块或输入数量）", 640, 352,
-                         arcade.color.GRAY, 10, anchor_x="center", anchor_y="center")
+        self._tc.text("bulk_hint", f"可购买 1 ~ {st['max_qty']} 个（拖动滑块或输入数量）", 640, 352,
+                      arcade.color.GRAY, 10, anchor_x="center", anchor_y="center")
         # 输入框（点击进入编辑态，编辑时用实心矩形叠加模拟高亮边框，避免线框绘制闪烁）
         box = arcade.XYWH(640, 300, 180, 36)
         if st["input_active"]:
@@ -824,25 +832,25 @@ class MarketView(ScrollView):
         arcade.draw_rect_filled(box, (20, 24, 32))
         # 输入框文本：编辑态且光标亮起时末尾追加 "|" 模拟光标
         if st["input_active"] and int(self._input_cursor_timer * 2) % 2 == 0:
-            arcade.draw_text(str(qty) + "|", 640, 300, arcade.color.WHITE, 20,
-                             anchor_x="center", anchor_y="center")
+            self._tc.text("bulk_input", str(qty) + "|", 640, 300, arcade.color.WHITE, 20,
+                          anchor_x="center", anchor_y="center")
         else:
-            arcade.draw_text(str(qty), 640, 300, arcade.color.WHITE, 20,
-                             anchor_x="center", anchor_y="center")
+            self._tc.text("bulk_input", str(qty), 640, 300, arcade.color.WHITE, 20,
+                          anchor_x="center", anchor_y="center")
         # 减号 / 加号按钮
         arcade.draw_rect_filled(arcade.XYWH(528, 300, 34, 36), (70, 70, 82))
-        arcade.draw_text("-", 528, 300, arcade.color.WHITE, 24,
-                         anchor_x="center", anchor_y="center")
+        self._tc.text("bulk_minus", "-", 528, 300, arcade.color.WHITE, 24,
+                      anchor_x="center", anchor_y="center")
         arcade.draw_rect_filled(arcade.XYWH(752, 300, 34, 36), (70, 70, 82))
-        arcade.draw_text("+", 752, 300, arcade.color.WHITE, 22,
-                         anchor_x="center", anchor_y="center")
+        self._tc.text("bulk_plus", "+", 752, 300, arcade.color.WHITE, 22,
+                      anchor_x="center", anchor_y="center")
         # 总价
-        arcade.draw_text(f"总价: {st['cost']} × {qty} = {st['cost'] * qty} 金币", 640, 250,
-                         arcade.color.YELLOW, 15, anchor_x="center", anchor_y="center")
+        self._tc.text("bulk_total", f"总价: {st['cost']} × {qty} = {st['cost'] * qty} 金币", 640, 250,
+                      arcade.color.YELLOW, 15, anchor_x="center", anchor_y="center")
         # 确认 / 取消按钮
         arcade.draw_rect_filled(arcade.XYWH(560, 195, 170, 42), arcade.color.DARK_GREEN)
-        arcade.draw_text("确认购买", 560, 195, arcade.color.WHITE, 14,
-                         anchor_x="center", anchor_y="center")
+        self._tc.text("bulk_confirm", "确认购买", 560, 195, arcade.color.WHITE, 14,
+                      anchor_x="center", anchor_y="center")
         arcade.draw_rect_filled(arcade.XYWH(720, 195, 170, 42), arcade.color.DARK_RED)
-        arcade.draw_text("取消", 720, 195, arcade.color.WHITE, 14,
-                         anchor_x="center", anchor_y="center")
+        self._tc.text("bulk_cancel", "取消", 720, 195, arcade.color.WHITE, 14,
+                      anchor_x="center", anchor_y="center")

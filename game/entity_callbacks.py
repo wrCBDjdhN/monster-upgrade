@@ -119,7 +119,7 @@ def handle_harvestable_combat(view, dt):
         cam = view.controller.camera.position
         world_mx = view._mouse_x + cam[0] - view.window.width / 2
         world_my = view._mouse_y + cam[1] - view.window.height / 2
-        for h in view.harvestables:
+        for i, h in enumerate(view.harvestables):
             if not h.alive:
                 continue
             dist = math.hypot(h.center_x - px, h.center_y - py)
@@ -133,6 +133,10 @@ def handle_harvestable_combat(view, dt):
                 if diff <= 60:  # 在攻击扇形内
                     dmg = int(getattr(view.window.game_state, 'weapon_damage', 8))
                     h.take_damage(dmg)
+                    # 联机主机：广播环境物单次受击（Bug2 修复：主机对资源的伤害同步到客户端）
+                    _broadcast_env_damage = getattr(view, "_broadcast_env_damage", None)
+                    if _broadcast_env_damage is not None:
+                        _broadcast_env_damage(i, dmg)
                     floating_texts.add_damage(h.center_x, h.center_y + 20, dmg)
                     particle_system.emit(h.center_x, h.center_y, 5, (150, 150, 150), speed=60, life=0.3, size=3)
                     # 仙人掌反伤：攻击者自身受到伤害（受防御减免）
@@ -145,10 +149,14 @@ def handle_harvestable_combat(view, dt):
 
     # 弹丸命中环境物（每帧检测，近战/远程通用，仅当弹丸真正碰撞到才造成伤害）
     for proj in list(view.combat.projectiles):
-        for h in view.harvestables:
+        for i, h in enumerate(view.harvestables):
             if h.alive and arcade.check_for_collision(proj, h):
                 dmg = proj.damage
                 h.take_damage(dmg)
+                # 联机主机：广播环境物单次受击（Bug2 修复：主机对资源的伤害同步到客户端）
+                _broadcast_env_damage = getattr(view, "_broadcast_env_damage", None)
+                if _broadcast_env_damage is not None:
+                    _broadcast_env_damage(i, dmg)
                 floating_texts.add_damage(h.center_x, h.center_y + 20, dmg)
                 particle_system.emit(h.center_x, h.center_y, 5, (150, 150, 150), speed=60, life=0.3, size=3)
                 # 仙人掌反伤：攻击者自身受到伤害（受防御减免）
@@ -163,6 +171,10 @@ def handle_harvestable_combat(view, dt):
     # 激光命中环境物（陨星炮：路径上的矿石/树木/石头持续受到完整伤害）
     for beam in view.combat.lasers:
         for h, dmg in beam.hit_harvestables(view.harvestables):
+            # 联机主机：广播环境物单次受击（Bug2 修复：主机对资源的伤害同步到客户端）
+            _broadcast_env_damage = getattr(view, "_broadcast_env_damage", None)
+            if _broadcast_env_damage is not None:
+                _broadcast_env_damage(view.harvestables.index(h), dmg)
             floating_texts.add_damage(h.center_x, h.center_y + 20, dmg)
             particle_system.emit(h.center_x, h.center_y, 5, (150, 150, 150), speed=60, life=0.3, size=3)
             # 仙人掌反伤：攻击者自身受到伤害（受防御减免）

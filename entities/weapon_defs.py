@@ -164,7 +164,7 @@ RANGED_WEAPONS = {
         "item_id": "rifle",
         "name": "步枪",
         "damage": 8,
-        "attack_speed": 1.5,
+        "attack_speed": 6.0,  # 全自动武器，高射速（冷却 ≈ 0.17s）
         "projectile_speed": PROJECTILE_SPEED + 100,
         "range": 280,
         "price": 180,

@@ -49,10 +49,19 @@ class ScrollView(arcade.View):
     # ── 点击 ─────────────────────────────────────────────────
 
     def handle_back_click(self, x, y) -> bool:
-        """检测返回按钮点击，命中则跳转 StartView 并返回 True。"""
+        """检测返回按钮点击，命中则跳转 StartView 并返回 True。
+
+        联机模式（net_mode != solo）下返回 LobbyView 复用连接（房间保持），
+        单机保持原 StartView 行为。
+        """
         if self.back_rect.point_in_rect((x, y)):
-            from views.start_view import StartView
-            self.window.show_view(StartView(self.window_ref))
+            gs = self.window.game_state
+            if getattr(gs, "net_mode", "solo") != "solo":
+                from views.lobby_view import LobbyView
+                self.window.show_view(LobbyView(self.window_ref))
+            else:
+                from views.start_view import StartView
+                self.window.show_view(StartView(self.window_ref))
             return True
         return False
 

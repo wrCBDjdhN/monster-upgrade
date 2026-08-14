@@ -7,3 +7,5 @@ __pycache__/
 .venv/
 # 工作目录
 .sisyphus/
+# 工作目录（opencode 工具）
+.omo/

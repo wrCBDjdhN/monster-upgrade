@@ -47,6 +47,37 @@ def _can_move_to(new_x, new_y, size, walls):
     return True
 
 
+def _select_target(players, center_x, center_y):
+    """从玩家列表中选取最近的存活玩家作为怪物目标
+
+    规则：遍历所有存活玩家，返回与怪物坐标（center_x, center_y）欧氏距离
+    最近的一个；没有存活玩家时返回 None（怪物保持待机，不追击不攻击）。
+    players 可为玩家列表/任意可迭代对象，也可为单个玩家对象（自动包装为列表）；
+    存活判断优先使用 alive 属性（Player.alive 返回 hp>0），无 alive 属性的
+    对象回退到 hp>0，两者皆缺失时视为存活（联机远端幽灵兼容）。
+    """
+    # 兼容传入单个玩家对象（而非列表）：包装为列表统一处理
+    if hasattr(players, "center_x"):
+        players = [players]
+    best = None
+    best_dist_sq = None
+    for p in players:
+        # 存活判断：优先 alive 属性，回退 hp>0，均缺失视为存活
+        alive = getattr(p, "alive", None)
+        if alive is None:
+            alive = getattr(p, "hp", 1) > 0
+        if not alive:
+            continue
+        dx = p.center_x - center_x
+        dy = p.center_y - center_y
+        # 用平方距离比较，避免每个玩家都开根号
+        d_sq = dx * dx + dy * dy
+        if best_dist_sq is None or d_sq < best_dist_sq:
+            best_dist_sq = d_sq
+            best = p
+    return best
+
+
 class Projectile(arcade.SpriteSolidColor):
     """远程弹丸"""
     def __init__(self, center_x, center_y, target_x, target_y, speed, damage, color=(255, 100, 50), debuff_id=None, size=PROJECTILE_SIZE, special=None):
@@ -124,7 +155,16 @@ class _MeleeMonsterBase(arcade.SpriteSolidColor):
     def set_on_death(self, cb):
         self._on_death_cb = cb
 
-    def update(self, player_x: float, player_y: float, delta_time: float):
+    def update(self, player_x: float = 0.0, player_y: float = 0.0,
+               delta_time: float = 0.0, players=None):
+        """更新怪物 AI（单目标或多目标模式）
+
+        - 单目标（players=None，单机默认）：沿用原有逻辑，以传入的
+          player_x/player_y 为追击目标，行为与之前完全一致。
+        - 多目标（players 为玩家列表，联机主机模式）：每帧选取最近存活玩家
+          作为当前目标；当前目标死亡/离开后，下一帧自动切换到下一个最近玩家，
+          不会原地空转。
+        """
         if not self.alive:
             return
         if self._hit_flash > 0:
@@ -135,6 +175,14 @@ class _MeleeMonsterBase(arcade.SpriteSolidColor):
             # 眩晕：无法移动和攻击
             self._attack_timer = max(0, self._attack_timer - delta_time)
             return
+        if players is not None:
+            # 多目标模式：选取最近存活玩家作为当前目标，无存活玩家则待机
+            target = _select_target(players, self.center_x, self.center_y)
+            if target is None:
+                self._attack_timer = max(0, self._attack_timer - delta_time)
+                return
+            player_x = target.center_x
+            player_y = target.center_y
         dx = player_x - self.center_x
         dy = player_y - self.center_y
         dist = math.hypot(dx, dy)
@@ -152,15 +200,30 @@ class _MeleeMonsterBase(arcade.SpriteSolidColor):
             self.center_y = new_y
         self._attack_timer = max(0, self._attack_timer - delta_time)
 
-    def try_attack(self, player) -> bool:
+    def try_attack(self, player=None, players=None) -> bool:
+        """近战攻击：命中当前目标并结算伤害
+
+        单目标模式传 player（单机路径）；多目标模式传 players 列表，
+        自动选取最近存活玩家作为攻击目标（目标切换即时生效）。
+        """
         if not self.alive:
             return False
         if self._stunned:
             # 眩晕状态下无法攻击
             return False
+        if players is not None:
+            # 多目标模式：重新选取最近存活玩家作为攻击目标
+            player = _select_target(players, self.center_x, self.center_y)
+        if player is None:
+            # 无目标（多目标模式下无存活玩家，或单目标未传入玩家）无法攻击
+            return False
         dist = math.hypot(player.center_x - self.center_x, player.center_y - self.center_y)
         if dist < self._size + 20 and self._attack_timer <= 0:
             self._attack_timer = self._attack_delay
+            # 记录本次攻击附带效果：受击钩子（联机 PLAYER_HURT 广播）据此把 debuff+等级
+            # 一并下发客户端（修复客户端玩家被怪物攻击时特殊效果未生效）
+            player._pending_debuff = self.debuff_id
+            player._pending_debuff_level = 1
             player.take_damage(self.damage)
             # 附加效果（如木乃伊攻击附加中毒）
             if self.debuff_id and hasattr(player, "apply_debuff"):
@@ -281,7 +344,16 @@ class _RangedMonsterBase(arcade.SpriteSolidColor):
     def set_on_death(self, cb):
         self._on_death_cb = cb
 
-    def update(self, player_x: float, player_y: float, delta_time: float):
+    def update(self, player_x: float = 0.0, player_y: float = 0.0,
+               delta_time: float = 0.0, players=None):
+        """更新怪物 AI（单目标或多目标模式）
+
+        - 单目标（players=None，单机默认）：沿用原有逻辑，以传入的
+          player_x/player_y 为追击目标，行为与之前完全一致。
+        - 多目标（players 为玩家列表，联机主机模式）：每帧选取最近存活玩家
+          作为当前目标；当前目标死亡/离开后，下一帧自动切换到下一个最近玩家，
+          不会原地空转。
+        """
         if not self.alive:
             return
         if self._hit_flash > 0:
@@ -291,6 +363,14 @@ class _RangedMonsterBase(arcade.SpriteSolidColor):
         if self._stunned:
             self._attack_timer = max(0, self._attack_timer - delta_time)
             return
+        if players is not None:
+            # 多目标模式：选取最近存活玩家作为当前目标，无存活玩家则待机
+            target = _select_target(players, self.center_x, self.center_y)
+            if target is None:
+                self._attack_timer = max(0, self._attack_timer - delta_time)
+                return
+            player_x = target.center_x
+            player_y = target.center_y
         dx = player_x - self.center_x
         dy = player_y - self.center_y
         dist = math.hypot(dx, dy)
@@ -314,11 +394,22 @@ class _RangedMonsterBase(arcade.SpriteSolidColor):
                 self.center_y = new_y
         self._attack_timer = max(0, self._attack_timer - delta_time)
 
-    def try_attack(self, player) -> Projectile | None:
+    def try_attack(self, player=None, players=None) -> Projectile | None:
+        """远程攻击：朝当前目标发射弹丸
+
+        单目标模式传 player（单机路径）；多目标模式传 players 列表，
+        自动选取最近存活玩家作为攻击目标（目标切换即时生效）。
+        """
         if not self.alive:
             return None
         if self._stunned:
             # 眩晕状态下无法攻击
+            return None
+        if players is not None:
+            # 多目标模式：重新选取最近存活玩家作为攻击目标
+            player = _select_target(players, self.center_x, self.center_y)
+        if player is None:
+            # 无目标（多目标模式下无存活玩家，或单目标未传入玩家）无法攻击
             return None
         dist = math.hypot(player.center_x - self.center_x, player.center_y - self.center_y)
         if dist < self._aggro_range and self._attack_timer <= 0:
@@ -475,12 +566,22 @@ class RocketTroop(_RangedMonsterBase):
     def __init__(self, center_x=0, center_y=0):
         super().__init__(center_x=center_x, center_y=center_y, **MONSTER_CONFIGS["RocketTroop"])
 
-    def try_attack(self, player) -> Projectile | None:
-        """火箭兵攻击：发射带爆炸属性的弹丸（命中玩家时触发 AOE 范围伤害）"""
+    def try_attack(self, player=None, players=None) -> Projectile | None:
+        """火箭兵攻击：发射带爆炸属性的弹丸（命中玩家时触发 AOE 范围伤害）
+
+        单目标模式传 player（单机路径）；多目标模式传 players 列表，
+        自动选取最近存活玩家作为攻击目标。
+        """
         if not self.alive:
             return None
         if self._stunned:
             # 眩晕状态下无法攻击
+            return None
+        if players is not None:
+            # 多目标模式：重新选取最近存活玩家作为攻击目标
+            player = _select_target(players, self.center_x, self.center_y)
+        if player is None:
+            # 无目标（多目标模式下无存活玩家，或单目标未传入玩家）无法攻击
             return None
         dist = math.hypot(player.center_x - self.center_x, player.center_y - self.center_y)
         if dist < self._aggro_range and self._attack_timer <= 0:

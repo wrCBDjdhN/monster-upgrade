@@ -10,6 +10,10 @@
 - 远程攻击生成弹丸，弹丸有飞行时间限制
 - 弹丸碰墙或超时后消失
 - 特殊弹丸：穿透（laser_gun）、爆炸（rocket_launcher）
+
+冷却机制（联机支持）：
+- 冷却按攻击者 id 分别记录（_cooldowns 字典），各玩家独立计时
+- 单人模式调用方不传 attacker_id，默认使用 0 号键，行为与旧版完全一致
 """
 
 import math
@@ -24,14 +28,22 @@ from .effects import particle_system  # 爆炸粒子效果
 
 class CombatSystem:
     def __init__(self, wall_list: arcade.SpriteList = None):
-        self._cooldown = 0.0
+        # 攻击冷却字典：{攻击者 id: 剩余冷却秒}，各攻击者独立冷却
+        # 联机时主机代跑多个玩家的战斗，玩家 A 攻击不会消耗玩家 B 的冷却
+        self._cooldowns: dict[int, float] = {}
         self.projectiles: arcade.SpriteList = arcade.SpriteList()
         self.wall_list = wall_list or arcade.SpriteList()
         # 激光束列表（陨星炮神器武器用）
         self.lasers: list = []
 
     def update(self, delta_time: float):
-        self._cooldown = max(0, self._cooldown - delta_time)
+        # 各攻击者的冷却独立递减，归零后移除该键（与旧版单值递减语义一致）
+        for k in list(self._cooldowns):
+            v = self._cooldowns[k] - delta_time
+            if v <= 0:
+                del self._cooldowns[k]
+            else:
+                self._cooldowns[k] = v
         # 更新弹丸
         for p in self.projectiles:
             p.update(delta_time)
@@ -61,16 +73,23 @@ class CombatSystem:
             gravity=30, spread=360,
         )
 
-    def can_attack(self) -> bool:
-        return self._cooldown <= 0
+    def can_attack(self, attacker_id: int = 0) -> bool:
+        """指定攻击者是否可攻击（冷却已归零）
 
-    def melee_attack(self, player, monsters: arcade.SpriteList, weapon_damage: float, weapon_range: float, mouse_x: float = 0, mouse_y: float = 0, weapon_speed: float = 1.0) -> list:
-        """近战攻击：扇形命中检测，返回被击中的怪物列表"""
-        if not self.can_attack():
+        attacker_id：攻击者标识；默认 0 = 单人模式（调用方不传则使用默认键）
+        """
+        return self._cooldowns.get(attacker_id, 0.0) <= 0
+
+    def melee_attack(self, player, monsters: arcade.SpriteList, weapon_damage: float, weapon_range: float, mouse_x: float = 0, mouse_y: float = 0, weapon_speed: float = 1.0, attacker_id: int = 0) -> list:
+        """近战攻击：扇形命中检测，返回被击中的怪物列表
+
+        attacker_id：攻击者标识（联机时各玩家独立冷却），默认 0 = 单人模式
+        """
+        if not self.can_attack(attacker_id):
             return []
 
         # 冷却时间 = 1 / attack_speed（attack_speed 越高，冷却越短，攻击越快）
-        self._cooldown = 1.0 / max(0.1, weapon_speed)
+        self._cooldowns[attacker_id] = 1.0 / max(0.1, weapon_speed)
 
         # 获取鼠标方向角度
         dx = mouse_x - player.center_x
@@ -93,13 +112,18 @@ class CombatSystem:
                 hit.append((m, actual))
         return hit
 
-    def ranged_attack(self, player, weapon_damage: float, weapon_proj_speed: float, mouse_x: float = 0, mouse_y: float = 0, weapon_special: str = "", debuff_id: str = None, weapon_speed: float = 1.0) -> None:
-        """远程攻击：生成弹丸，支持特殊属性（穿透/爆炸）与附带 debuff"""
-        if not self.can_attack():
+    def ranged_attack(self, player, weapon_damage: float, weapon_proj_speed: float, mouse_x: float = 0, mouse_y: float = 0, weapon_special: str = "", debuff_id: str = None, weapon_speed: float = 1.0, attacker_id: int = 0, debuffs: list = None) -> None:
+        """远程攻击：生成弹丸，支持特殊属性（穿透/爆炸）与附带 debuff
+
+        attacker_id：攻击者标识（联机时各玩家独立冷却），默认 0 = 单人模式
+        debuffs：弹丸附带的 debuff 列表（元素为 (效果ID, 效果等级) 元组），
+                 联机客户端装备附加效果由此携带（debuff_id 保留兼容，二者合并应用）
+        """
+        if not self.can_attack(attacker_id):
             return
 
         # 冷却时间 = 1 / attack_speed（attack_speed 越高，冷却越短，攻击越快）
-        self._cooldown = 1.0 / max(0.1, weapon_speed)
+        self._cooldowns[attacker_id] = 1.0 / max(0.1, weapon_speed)
 
         dx = mouse_x - player.center_x
         dy = mouse_y - player.center_y
@@ -113,6 +137,8 @@ class CombatSystem:
             speed, round(weapon_damage),
             special=weapon_special,
             debuff_id=debuff_id,
+            debuffs=debuffs,
+            owner_net_id=attacker_id,
         )
         self.projectiles.append(proj)
 
@@ -124,9 +150,11 @@ class CombatSystem:
             if hits:
                 for m in hits:
                     if hasattr(m, 'alive') and m.alive:
-                        # 弹丸附带 debuff（如权杖随机效果）施加到被命中怪物
-                        if getattr(proj, "debuff_id", None) and hasattr(m, "apply_debuff"):
-                            m.apply_debuff(proj.debuff_id)
+                        # 弹丸附带 debuff 施加到被命中怪物（含权杖随机效果与联机客户端装备附加效果，
+                        # 兼容旧 debuff_id：已合并进 proj.debuffs）
+                        for eid, lvl in getattr(proj, "debuffs", []):
+                            if hasattr(m, "apply_debuff"):
+                                m.apply_debuff(eid, lvl)
                         # 穿透弹丸：只对未被击中的怪物造成伤害
                         if proj.special == "penetrating":
                             if m not in [h for h, _ in hit_monsters]:
@@ -175,15 +203,20 @@ class CombatSystem:
         return 0
 
     def spawn_laser(self, player, damage: float, mouse_x: float, mouse_y: float,
-                    length: float = 600, width: float = 24, duration: float = 3.0):
+                    length: float = 600, width: float = 24, duration: float = 3.0,
+                    attacker_id: int = 0, debuffs: list = None):
         """陨星炮：放出一道持续激光，实时跟随鼠标方向，可穿透墙壁
 
         冷却 = 激光持续时间 + 0.3 秒空隙，防止无缝连发
+        attacker_id：攻击者标识（联机时各玩家独立冷却），默认 0 = 单人模式
+        debuffs：激光附带 debuff 列表（元素为 (效果ID, 效果等级) 元组），
+                 联机客户端装备附加效果由此携带，命中时一并施加
         """
-        if not self.can_attack():
+        if not self.can_attack(attacker_id):
             return None
-        self._cooldown = duration + 0.3
-        beam = LaserBeam(player, damage, length, width, duration, mouse_x, mouse_y)
+        self._cooldowns[attacker_id] = duration + 0.3
+        beam = LaserBeam(player, damage, length, width, duration, mouse_x, mouse_y,
+                         debuffs=debuffs, owner_net_id=attacker_id)
         self.lasers.append(beam)
         return beam
 
@@ -221,12 +254,20 @@ class LaserBeam:
     """
 
     def __init__(self, player, damage: float, length: float = 600, width: float = 24,
-                 duration: float = 3.0, mouse_x: float = 0.0, mouse_y: float = 0.0):
+                 duration: float = 3.0, mouse_x: float = 0.0, mouse_y: float = 0.0,
+                 debuffs: list = None, owner_net_id: int = 0):
         self.player = player
         self.damage = damage  # 每秒伤害（DPS）
         self.length = length
         self.width = width
         self.duration = duration
+        # 激光附带 debuff 列表（元素为 (效果ID, 效果等级) 元组）：联机客户端装备附加效果由此携带
+        self.debuffs: list = list(debuffs or [])
+        # 联机：发射者玩家 id（主机序列化 PROJECTILE_SNAPSHOT 的 lasers 用 owner_id 标识，
+        # 客户端据此跳过自己发射的激光——本地已有纯表现激光，避免双重渲染）
+        self.owner_net_id = owner_net_id
+        # 联机：激光网络 id（主机首次序列化时惰性分配，存活期不变）
+        self.proj_id = None
         self._target_cooldowns = {}  # {id(目标): 剩余冷却秒}，每个目标独立冷却，命中即结算
         self._hit_interval = 1.0  # 每个目标每1秒最多受到一次完整伤害（单次伤害与武器面板一致）
         self.expired = False
@@ -287,6 +328,10 @@ class LaserBeam:
             if self._point_segment_distance(m.center_x, m.center_y, sx, sy, ex, ey) <= self.width / 2 + radius:
                 self._target_cooldowns[id(m)] = self._hit_interval
                 actual = m.take_damage(dmg)
+                # 激光附带 debuff 施加到被命中怪物（联机客户端装备附加效果，命中即生效）
+                for eid, lvl in self.debuffs:
+                    if hasattr(m, "apply_debuff"):
+                        m.apply_debuff(eid, lvl)
                 hits.append((m, actual))
         return hits
 
@@ -327,14 +372,24 @@ class LaserBeam:
 
 
 class _PlayerProjectile(arcade.SpriteSolidColor):
-    def __init__(self, cx, cy, tx, ty, speed, damage, special=None, debuff_id=None):
+    def __init__(self, cx, cy, tx, ty, speed, damage, special=None, debuff_id=None, debuffs=None, owner_net_id: int = 0):
         super().__init__(PROJECTILE_SIZE, PROJECTILE_SIZE, color=(255, 255, 100))
         self.center_x = cx
         self.center_y = cy
         self.damage = damage
         self.special = special  # 穿透/爆炸属性
         self.debuff_id = debuff_id  # 弹丸附带 debuff（如权杖随机效果）
+        # 弹丸附带 debuff 列表（元素为 (效果ID, 效果等级)）：联机客户端装备附加效果由此携带，
+        # 命中时全部施加（与 debuff_id 兼容：二者合并后统一应用）
+        self.debuffs: list = list(debuffs or [])
+        if debuff_id and debuff_id not in [d[0] for d in self.debuffs]:
+            self.debuffs.append((debuff_id, 1))
         self._lifetime = PROJECTILE_LIFETIME
+        # 联机：发射者玩家 id（主机序列化 PROJECTILE_SNAPSHOT 用 owner_id 标识，
+        # 客户端据此跳过自己发射的弹丸——本地已有纯表现弹丸，避免双重渲染）
+        self.owner_net_id = owner_net_id
+        # 联机：弹丸网络 id（主机首次序列化时惰性分配，存活期不变）
+        self.proj_id = None
         dx = tx - cx
         dy = ty - cy
         dist = math.hypot(dx, dy)

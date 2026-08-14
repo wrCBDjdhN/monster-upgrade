@@ -1,0 +1,5 @@
+# 项目依赖清单（Python 3.14）
+# arcade：2D 游戏引擎（渲染/物理/输入）
+# websockets：局域网联机功能（2026-08-11 新增，Wave 1 联机计划）
+arcade>=2.6
+websockets>=13,<16

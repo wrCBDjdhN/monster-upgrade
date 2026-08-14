@@ -2,6 +2,7 @@
 
 import arcade
 from config import WINDOW_WIDTH, WINDOW_HEIGHT
+from views.text_cache import TextCache  # 持久 Text 对象缓存，替代 draw_text
 
 
 # 地图数据定义
@@ -40,6 +41,7 @@ class MapSelectView(arcade.View):
     def __init__(self, window):
         super().__init__()
         self.window_ref = window
+        self._tc = TextCache()  # 持久 Text 对象缓存，避免 draw_text 每帧重建纹理
         self.hovered_map = -1
         # 计算卡片位置（多张卡片整体居中）
         self.cards = []
@@ -58,10 +60,12 @@ class MapSelectView(arcade.View):
     def on_draw(self):
         self.clear()
         # 标题
-        arcade.draw_text(
+        # 持久 Text 对象，避免 draw_text 每帧重建纹理
+        self._tc.text(
+            "title",
             "选 择 地 图",
             WINDOW_WIDTH // 2, WINDOW_HEIGHT - 80,
-            arcade.color.WHITE, font_size=36, anchor_x="center",
+            arcade.color.WHITE, size=36, anchor_x="center",
         )
         # 地图卡片
         for i, m in enumerate(MAPS):
@@ -73,40 +77,47 @@ class MapSelectView(arcade.View):
             border_color = arcade.color.GOLD if is_hover else arcade.color.WHITE
             arcade.draw_rect_outline(rect, border_color, border_width=2)
             # 地图名
-            arcade.draw_text(
-                m["name"], rect.center_x, rect.top - 30,
-                arcade.color.WHITE, font_size=22, anchor_x="center", bold=True,
+            # 持久 Text 对象，避免 draw_text 每帧重建纹理
+            self._tc.text(
+                f"card_name_{i}", m["name"], rect.center_x, rect.top - 30,
+                arcade.color.WHITE, size=22, anchor_x="center", bold=True,
             )
             # 怪物信息
-            arcade.draw_text(
-                m["monsters"], rect.center_x, rect.center_y + 10,
-                arcade.color.LIGHT_GRAY, font_size=12, anchor_x="center",
+            # 持久 Text 对象，避免 draw_text 每帧重建纹理
+            self._tc.text(
+                f"card_monsters_{i}", m["monsters"], rect.center_x, rect.center_y + 10,
+                arcade.color.LIGHT_GRAY, size=12, anchor_x="center",
             )
             # 地图描述
-            arcade.draw_text(
-                m["desc"], rect.center_x, rect.center_y - 15,
-                arcade.color.GRAY, font_size=10, anchor_x="center",
+            # 持久 Text 对象，避免 draw_text 每帧重建纹理
+            self._tc.text(
+                f"card_desc_{i}", m["desc"], rect.center_x, rect.center_y - 15,
+                arcade.color.GRAY, size=10, anchor_x="center",
             )
             # 难度
-            arcade.draw_text(
-                "难度: " + m["difficulty"], rect.center_x, rect.bottom + 25,
-                arcade.color.YELLOW, font_size=14, anchor_x="center",
+            # 持久 Text 对象，避免 draw_text 每帧重建纹理
+            self._tc.text(
+                f"card_diff_{i}", "难度: " + m["difficulty"], rect.center_x, rect.bottom + 25,
+                arcade.color.YELLOW, size=14, anchor_x="center",
             )
             # 进入按钮
             btn = arcade.XYWH(rect.center_x, rect.bottom + 50, 100, 30)
             btn_color = arcade.color.DARK_GREEN if is_hover else (60, 120, 60)
             arcade.draw_rect_filled(btn, btn_color)
-            arcade.draw_text(
-                "进入", btn.center_x, btn.center_y,
-                arcade.color.WHITE, font_size=14, anchor_x="center", anchor_y="center",
+            # 持久 Text 对象，避免 draw_text 每帧重建纹理
+            self._tc.text(
+                f"card_btn_{i}", "进入", btn.center_x, btn.center_y,
+                arcade.color.WHITE, size=14, anchor_x="center", anchor_y="center",
             )
 
         # 返回按钮
         back_rect = arcade.XYWH(80, 40, 100, 36)
         arcade.draw_rect_filled(back_rect, arcade.color.DARK_RED)
-        arcade.draw_text(
+        # 持久 Text 对象，避免 draw_text 每帧重建纹理
+        self._tc.text(
+            "back_btn",
             "返回", back_rect.center_x, back_rect.center_y,
-            arcade.color.WHITE, font_size=14, anchor_x="center", anchor_y="center",
+            arcade.color.WHITE, size=14, anchor_x="center", anchor_y="center",
         )
 
     def on_mouse_motion(self, x, y, dx, dy):

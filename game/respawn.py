@@ -42,12 +42,12 @@ def respawn_harvestables(view, dt):
         return
     view._harvest_respawn_timer = 0.0
 
-    # 清理已被砍光（hp<=0）的资源对象，避免列表无限膨胀
-    dead = [h for h in view.harvestables if not h.alive]
-    if dead:
-        view.harvestables = [h for h in view.harvestables if h.alive]
-
-    alive_count = len(view.harvestables)
+    # 修复：不再物理移除 dead 占位对象。联机下压缩列表（列表推导剔除 hp<=0）
+    # 会导致主机/客户端 harvestables 列表长度不同、env_objects 序号漂移，
+    # 后续 env_destroyed/env_damage 的 obj_id（列表序号）两端对不上。
+    # dead 占位由渲染层（h.alive 过滤）与 sync_obstacles（只加存活）忽略，
+    # 数量上限由 alive_count（统计存活）控制，占位不会影响刷新逻辑。
+    alive_count = sum(1 for h in view.harvestables if h.alive)
     if alive_count >= view._harvest_cap:
         return
 
@@ -98,6 +98,12 @@ def respawn_harvestables(view, dt):
         h = HarvestableEntity(x, y, random.choice(types))
         view.harvestables.append(h)
         view.obstacle_list.append(h)
+        # 联机主机：广播新刷资源（修复「二次刷新资源客户端不可见」）——
+        # 客户端据此在本地追加 HarvestableEntity（obj_id=列表序号，与
+        # env_destroyed/env_damage 同口径）；solo 模式 view 无该方法，跳过。
+        _broadcast_env_spawn = getattr(view, "_broadcast_env_spawn", None)
+        if _broadcast_env_spawn is not None:
+            _broadcast_env_spawn(len(view.harvestables) - 1, h.center_x, h.center_y, h.resource_type)
         spawned += 1
 
 
