@@ -137,6 +137,8 @@ class _MeleeMonsterBase(arcade.SpriteSolidColor):
         self.helmet_drop_id = None
         # 武器系统：怪物携带武器，击败后掉落自身武器（等级由分配时决定）
         self.weapon = None          # {"item_id": str, "name": str, "color": tuple, "level": int}
+        # 最后攻击者网络 id（默认 0=单机/本端；等级经验按此归属判断击杀者）
+        self.last_attacker_id = 0
         # debuff 系统
         self.debuffs = []
         self._debuff_tick = 0.0
@@ -323,6 +325,8 @@ class _RangedMonsterBase(arcade.SpriteSolidColor):
         self.helmet_drop_id = None
         # 武器系统：怪物携带武器，击败后掉落自身武器（等级由分配时决定）
         self.weapon = None          # {"item_id": str, "name": str, "color": tuple, "level": int}
+        # 最后攻击者网络 id（默认 0=单机/本端；等级经验按此归属判断击杀者）
+        self.last_attacker_id = 0
         # debuff 系统
         self.debuffs = []
         self._debuff_tick = 0.0

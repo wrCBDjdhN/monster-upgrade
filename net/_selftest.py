@@ -5,8 +5,8 @@
    完成 HELLO+JOIN 握手（JOIN_ACCEPT 含互不相同的 player_id），随后验证：
    - 客户端→服务器：客户端发 HEARTBEAT，主线程经 bridge.poll() 收到入站封装；
    - 服务器→客户端：send_to() 单播 / broadcast() 广播 / broadcast(exclude) 排除。
-2. 场景2 · 满员拒绝：房间补满到 4 人后，第 5 个连接收到 JOIN_REJECT（原因含"满员"），
-   房间人数保持 4。
+2. 场景2 · 满员拒绝：3 个客户端入座（槽位 0 保留给主机）后，第 4 个连接
+   收到 JOIN_REJECT（原因含"满员"），房间人数保持 3。
 3. 场景3 · 断线感知：客户端主动断开后触发 on_disconnect 回调、房间人数-1；
    服务器 stop() 优雅关闭，线程退出无 hang。
 
@@ -193,19 +193,22 @@ async def _scenario_2_full_room() -> tuple[bool, str]:
     connections: list[ClientConnection] = []
     try:
         server.start(TEST_HOST, _pick_free_port())
-        # 补满到 4 人（各自分配到不同槽位）
-        for name in ("玩家A", "玩家B", "玩家C", "玩家D"):
+        # 补满到 3 个客户端（槽位 0 保留给主机，客户端容量 = max_players-1）
+        for name in ("玩家A", "玩家B", "玩家C"):
             ws, _ = await _handshake_join(server.port, name)
             connections.append(ws)
-        assert server.player_count == MAX_PLAYERS, f"满员后人数应为 {MAX_PLAYERS}"
-        # 第 5 个连接被拒：JOIN_REJECT 原因含"满员"
-        reason = await _handshake_reject(server.port, "玩家E")
+        assert server.player_count == MAX_PLAYERS - 1, (
+            f"满员后客户端人数应为 {MAX_PLAYERS - 1}"
+        )
+        # 第 4 个客户端（主机外的第 4 个）被拒：JOIN_REJECT 原因含"满员"
+        reason = await _handshake_reject(server.port, "玩家D")
         assert "满员" in reason, f"拒绝原因应含满员字样，实际: {reason}"
-        assert server.player_count == MAX_PLAYERS, "被拒后房间人数应保持 4"
+        assert server.player_count == MAX_PLAYERS - 1, "被拒后房间人数应保持 3"
 
         return True, (
-            f"房间补满 {MAX_PLAYERS} 人后，第 5 个连接收到 JOIN_REJECT"
-            f"（原因：{reason}，含「满员」字样），房间人数保持 {MAX_PLAYERS}"
+            f"房间补满 {MAX_PLAYERS - 1} 个客户端（+1 主机槽位）后，"
+            f"第 4 个客户端收到 JOIN_REJECT"
+            f"（原因：{reason}，含「满员」字样），房间人数保持 {MAX_PLAYERS - 1}"
         )
     except Exception as exc:  # noqa: BLE001
         return False, f"{type(exc).__name__}: {exc}"

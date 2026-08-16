@@ -1,9 +1,9 @@
 # PROJECT KNOWLEDGE BASE - 打怪升级项目
 
-**Updated:** 2026-08-11
-**Commit:** d571a1d
+**Updated:** 2026-08-16
+**Commit:** 3540f0d
 **Branch:** master
-**Stats:** 46 Python files, ~10,400 行（怪物系统已数据驱动化重构）
+**Stats:** 56 Python files, ~15,888 行（联机层 + 大厅 + 火箭发射台就位）
 
 ## 项目知识库（结构速览）
 
@@ -12,13 +12,14 @@
 ### 目录结构
 ```
 打怪升级/
-├── main.py       # 入口：arcade.Window + GameState（各 View 共享状态，含 player_id/run_carried/当前武器/地图种子）
-├── config.py     # 全部数值常量（窗口/玩家/怪物/战斗/掉落/升级公式/宝箱），调整平衡性只改这里
+├── main.py       # 入口：arcade.Window + GameState（各 View 共享状态，含 player_id/run_carried/当前武器/地图种子/net_mode）
+├── config.py     # 全部数值常量（窗口/玩家/怪物/战斗/掉落/升级公式/宝箱/火箭发射台），调整平衡性只改这里
 ├── entities/     # 数据定义：weapon_defs / equipment_defs / monster_defs / resource_defs / effects_defs（见 entities/AGENTS.md）
 ├── db/           # SQLite 层：connection / database(建表+CRUD re-export) / players / weapons / equipment / warehouse / potions（见 db/AGENTS.md）
 ├── game/         # 核心逻辑：怪物AI / 战斗 / 地图生成 / 掉落 / 撤离 / 宝箱 / 特效 / 渲染 / 音效 / 输入 / 刷新 / 回调汇聚（见 game/AGENTS.md）
-├── net/          # 联机网络层：protocol / server / client / thread_bridge——局域网联机用
-└── views/        # UI：start / map_select / game(995行,最大) / warehouse / market / forge / backpack / scroll / text_cache（见 views/AGENTS.md）
+├── net/          # 联机网络层：protocol / server / client / thread_bridge + 4 个 _selftest 自检脚本（见 net/AGENTS.md）
+├── docs/         # 文档：net-mode-matrix.md（联机模式矩阵）
+└── views/        # UI：start / map_select / game(3038行,最大) / lobby / warehouse / market / forge / backpack / scroll / text_cache（见 views/AGENTS.md）
 ```
 
 ### 高频入口速查
@@ -32,11 +33,15 @@
 | 加 UI 界面 | `views/*_view.py`（arcade.View 子类，可滚动面板继承 scroll_view.py） |
 | 加数据库操作 | `db/`（sqlite3 stdlib，`with _conn() as c`；新函数须追加到 db/database.py re-export） |
 | 视图间传数据 | `window.game_state`（main.GameState），禁全局变量 |
+| 加联机协议消息 | `net/protocol.py`（MsgType 枚举 + 消息 schema，见 net/AGENTS.md） |
+| 跑网络自检 | `python net/_selftest*.py`（4 个自检脚本，返回码 0=通过） |
+| 联机模式判定 | `window.game_state.net_mode`（solo/host/client），客户端禁本地仲裁 |
 
 ### CODE MAP（核心符号）
 | 符号 | 类型 | 位置 | 角色 |
 |------|------|------|------|
-| `GameState` | class | main.py:22 | 各 View 共享运行时状态（player_id/run_carried/武器/地图种子） |
+| `GameState` | class | main.py:22 | 各 View 共享运行时状态（player_id/run_carried/武器/地图种子/net_mode） |
+| `RocketPad` | class | game/rocket_pad.py | 火箭发射台状态机 IDLE→ACTIVATED→BOSS_SPAWNED→BOSS_DEFEATED→DESTROYED/EVACUATING→EVAC_SUCCESS（非 Sprite） |
 | `_MONSTER_CLASSES` | dict | views/game_view.py | 怪物类型名 → 类映射（数据驱动注册） |
 | `MONSTER_CONFIGS` | dict | entities/monster_defs.py | 怪物数值配置（hp/damage/speed/弹丸参数），BOSS 条目内联倍率（hp×8/damage×4/speed×0.7） |
 | `MONSTER_METADATA` | dict | entities/monster_defs.py | 怪物渲染/掉落/武器池元数据（entity_callbacks/monster_utils/rendering 3 处消费） |
@@ -55,6 +60,9 @@
 - 玩家速度 4px/帧：PhysicsEngineSimple 不乘 delta_time
 - 渲染禁空心/线框绘制（`draw_*_outline`/`draw_line` 等会导致闪烁）：一律不透明实心填充（见 game/AGENTS.md）
 - game/ 层可经 `db.database` 读数据、`input_handler.py` 反向依赖 views（TAB 开背包）属例外
+- net 层铁律：协议禁静默忽略未知消息、回调禁阻塞主线程、回调禁碰 arcade 对象（见 net/AGENTS.md）
+- `Player.update()` 已含移动逻辑，禁手动二次调用（否则位移翻倍，player.py:202 注释）；RocketPad 非 Sprite，勿按 Sprite 处理
+- 动画/读条期间禁滚动/点击（views 层约定，见 views/AGENTS.md）
 
 ## 核心工作流程
 
@@ -76,7 +84,7 @@
 3. **添加注释**：修改处添加中文注释说明修改原因
 
 ### 第四步：测试验证
-1. **运行测试**：本仓库**无测试套件**（无 pytest/tests/），验证手段 = 手动运行 `python main.py` + 静态检查 `pyright`（配置见 pyrightconfig.json）
+1. **运行测试**：本仓库**无 pytest 套件**，但有 4 个网络自检脚本（`python net/_selftest*.py`，返回码 0=通过）；验证手段 = 网络自检 + 手动运行 `python main.py` + 静态检查 `pyright`（配置见 pyrightconfig.json）
 2. **检查语法**：确保代码没有语法错误（可用 `pyright` 或 `python -m py_compile <文件>`）
 3. **验证逻辑**：确认修改后的逻辑符合预期
 
@@ -201,6 +209,9 @@ class NewMonster:
 5. **不要使用英文汇报**：必须使用中文
 6. **不要自己发挥**：添加新内容时必须参考现有代码模式
 7. **不要未经同意就修改**：实施任何修改前，必须先将将要进行的修改向用户陈述，得到用户明确同意后才能执行
+8. **不要静默忽略**：net 层未知消息必须显式处理或记录日志（protocol.py:358 铁律）
+9. **不要阻塞主线程**：net 回调禁 sleep/等待，经 thread_bridge 队列汇入主循环
+10. **不要改数据键名**：entities 的 item_id/资源名是跨层契约（DB/掉落/渲染共用）
 
 ---
 

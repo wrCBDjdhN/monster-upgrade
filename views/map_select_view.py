@@ -128,11 +128,11 @@ class MapSelectView(arcade.View):
                 break
 
     def on_mouse_press(self, x, y, button, modifiers):
-        # 返回按钮
+        # 返回按钮（单机流程：角色选择 → 地图选择，返回时回角色选择页）
         back_rect = arcade.XYWH(80, 40, 100, 36)
         if back_rect.point_in_rect((x, y)):
-            from views.start_view import StartView
-            self.window.show_view(StartView(self.window_ref))
+            from views.character_select_view import CharacterSelectView
+            self.window.show_view(CharacterSelectView(self.window_ref))
             return
 
         # 地图卡片点击

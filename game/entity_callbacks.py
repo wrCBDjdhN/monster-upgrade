@@ -5,6 +5,10 @@ import random
 import arcade
 from config import (
     CACTUS_THORN_DAMAGE, WELL_HEAL, WELL_SPEED_MULT, WELL_SPEED_DURATION,
+    ROCKET_PAD_DESTROY_LOOT_COUNT, ROCKET_PAD_DESTROY_NORMAL_CHANCE,
+    ROCKET_PAD_DESTROY_NORMAL_LV_MIN, ROCKET_PAD_DESTROY_NORMAL_LV_MAX,
+    ROCKET_PAD_DESTROY_ARTIFACT_LV_MIN, ROCKET_PAD_DESTROY_ARTIFACT_LV_MAX,
+    EXP_KILL_BASE, EXP_BOSS_MULT, EXP_HARVEST, EXP_CHEST,
 )
 # 怪物元数据（武器颜色/掉落表键名/死亡粒子颜色）统一从 monster_defs.py 读取
 from entities.monster_defs import MONSTER_METADATA
@@ -14,10 +18,45 @@ from game.effects import particle_system, floating_texts
 from game.render_helpers import draw_drop_icon
 
 
+def _award_exp(view, amount: int):
+    """本端玩家当前角色增加经验（等级系统：各端本地结算）
+
+    - 写库 add_exp 自动处理升级（含连升，pending_choices 逐级累加）；
+    - 同步刷新 view._level_data 缓存（HUD/升级面板读取，避免每帧查库）。
+    """
+    gs = view.window.game_state
+    if not getattr(gs, "player_id", None):
+        return
+    from db.database import add_exp
+    cid = getattr(gs, "character_id", "initial") or "initial"
+    view._level_data = add_exp(gs.player_id, cid, amount)
+
+
+def _award_kill_exp(view, monster):
+    """击杀怪物经验（各端本地结算，主机按 last_attacker_id 归属判定）
+
+    - solo：恒发本端（本地玩家击杀，攻击者 id 默认 0）；
+    - host：仅击杀者为本端玩家（last_attacker_id==0，主机本地玩家约定 net_player_id=0）
+      时发放；客户端击杀由客户端经 DAMAGE_RESULT 目标血量归零感知发放（见 game_view）；
+    - client：on_monster_death 不在客户端运行（怪物由快照驱动），不在此发放。
+    - 经验值 = EXP_KILL_BASE ×（BOSS 则 ×EXP_BOSS_MULT）。
+    """
+    gs = view.window.game_state
+    if getattr(gs, "net_mode", "solo") == "host":
+        # 主机：仅本端玩家击杀发放（客户端攻击者 id 为 1~3，非 0 时跳过）
+        if getattr(monster, "last_attacker_id", 0) != 0:
+            return
+    amount = EXP_KILL_BASE * (EXP_BOSS_MULT if getattr(monster, "is_boss", False) else 1)
+    _award_exp(view, amount)
+
+
 def _on_rocket_boss_defeated(view, boss, pad):
     """火箭发射台 BOSS 被击败回调：掉落丰厚战利品"""
     from game.loot import DropItem
     pad.on_boss_defeated()
+    # 等级经验：火箭台 BOSS 击杀经验（与普通 BOSS 同规则 EXP_BOSS_MULT；
+    # 该死亡回调不走 on_monster_death，需在此单独发放）
+    _award_kill_exp(view, boss)
     # BOSS 掉落：武器 + 护甲 + 头盔 + 金币 + 矿石
     drops = []
     # 掉落武器
@@ -97,6 +136,9 @@ def on_monster_death(view, monster):
     scatter_drops(loot, monster.center_x, monster.center_y)
     view.drops.extend(loot)
 
+    # 等级经验：击杀怪物经验（各端本地结算，归属判定见 _award_kill_exp）
+    _award_kill_exp(view, monster)
+
 
 def handle_harvestable_combat(view, dt):
     """处理玩家对环境物的攻击。
@@ -165,7 +207,8 @@ def handle_harvestable_combat(view, dt):
                     floating_texts.add_damage(view.player.center_x, view.player.center_y + 30, CACTUS_THORN_DAMAGE)
                 proj.remove_from_sprite_lists()
                 if not h.alive:
-                    on_harvestable_destroyed(view, h)
+                    # 采集经验按攻击者归属：客户端弹丸（owner_net_id!=0）不发给本端主机
+                    on_harvestable_destroyed(view, h, award_exp=(proj.owner_net_id == 0))
                 break
 
     # 激光命中环境物（陨星炮：路径上的矿石/树木/石头持续受到完整伤害）
@@ -182,12 +225,21 @@ def handle_harvestable_combat(view, dt):
                 view.player.take_damage(CACTUS_THORN_DAMAGE)
                 floating_texts.add_damage(view.player.center_x, view.player.center_y + 30, CACTUS_THORN_DAMAGE)
             if not h.alive:
-                on_harvestable_destroyed(view, h)
+                # 采集经验按攻击者归属：客户端激光（owner_net_id!=0）不发给本端主机
+                on_harvestable_destroyed(view, h, award_exp=(beam.owner_net_id == 0))
 
 
-def on_harvestable_destroyed(view, harvestable):
-    """环境物被摧毁，掉落资源"""
+def on_harvestable_destroyed(view, harvestable, award_exp: bool = True):
+    """环境物被摧毁，掉落资源
+
+    award_exp：本端玩家自己的采集才发经验。联机主机裁决客户端攻击
+    （_resolve_attack_event / 客户端弹丸激光）时须传 False，避免主机误发。
+    """
     sound_manager.play_pickup()
+    # 等级经验：采集资源经验（各端本地结算：仅本端玩家采集发放；
+    # 客户端不裁决环境物伤害，on_monster_death 类回调不在客户端运行）
+    if award_exp and getattr(view.window.game_state, "net_mode", "solo") != "client":
+        _award_exp(view, EXP_HARVEST)
     # 仙人掌：掉落果实药水（potion 类型，拾取后进入药水栏）
     if harvestable.resource_type == "cactus":
         drop = DropItem(harvestable.center_x, harvestable.center_y, "potion", "fruit_potion", 1)
@@ -217,6 +269,8 @@ def handle_chest_interaction(view):
         if dist < 40:
             loot = chest.open_chest()
             spawn_chest_loot(view, chest, loot)
+            # 等级经验：开宝箱经验（本回调仅在 solo/host 运行——客户端开箱由主机裁决广播）
+            _award_exp(view, EXP_CHEST)
             view._chest_key_pressed = False
             break
 
@@ -293,15 +347,17 @@ def handle_rocket_pad_choice(view, choice: int):
         reward = pad.destroy()
         if reward:
             from game.loot import DropItem
-            # 金币和矿石掉落
+            # 金币掉落（随机范围）
             view.drops.append(DropItem(pad.center_x, pad.center_y, "gold", "gold", reward["gold"]))
-            view.drops.append(DropItem(pad.center_x + 20, pad.center_y, "resource", "ore", reward["ore"]))
-            # 炸毁必定掉落：90% Lv10-50武器/装备，10% Lv10-20神器
+            # 随机资源掉落（总量 20-50，类型随机拆成 1~3 份）
+            view.drops.extend(_generate_pad_resource_drops(pad.center_x + 20, pad.center_y,
+                                                           reward["resources"]))
+            # 炸毁必定掉落：2 件武器/装备（每件 70% Lv20-50 普通 / 30% Lv10-20 神器）
             drops = _generate_pad_destroy_loot(pad.center_x, pad.center_y)
             view.drops.extend(drops)
             sound_manager.play_explosion()
             floating_texts.add(pad.center_x, pad.center_y + 50,
-                               f"炸毁! +{reward['gold']}金币 +{reward['ore']}矿石",
+                               f"炸毁! +{reward['gold']}金币 +{reward['resources']}资源",
                                arcade.color.YELLOW, life=2.0)
     elif choice == 2:  # 启用撤离
         pad.start_evacuation()
@@ -311,44 +367,66 @@ def handle_rocket_pad_choice(view, choice: int):
                            arcade.color.GREEN, life=3.0)
 
 
+def _generate_pad_resource_drops(cx: float, cy: float, total: int) -> list:
+    """生成火箭发射台炸毁的资源掉落：总量拆成 1~3 份，类型随机（木材/石材/矿石）"""
+    from entities.resource_defs import RESOURCES
+    res_types = list(RESOURCES.keys())
+    drops = []
+    # 随机拆成 1~3 份（每份至少 1 个，保证总和 = total）
+    parts = random.randint(1, min(3, total))
+    remaining = total
+    for i in range(parts):
+        if i == parts - 1:
+            qty = remaining
+        else:
+            qty = random.randint(1, remaining - (parts - i - 1))
+        remaining -= qty
+        res_type = random.choice(res_types)
+        # 每份错开位置，避免掉落物重叠
+        drops.append(DropItem(cx + 20 + 16 * i, cy, "resource", res_type, qty))
+    return drops
+
+
 def _generate_pad_destroy_loot(cx: float, cy: float) -> list:
-    """生成火箭发射台炸毁掉落物：90% Lv10-50武器/装备，10% Lv10-20神器"""
+    """生成火箭发射台炸毁掉落物：2 件武器/装备，每件独立 70% Lv20-50 普通 / 30% Lv10-20 神器"""
     drops = []
     from entities.weapon_defs import MELEE_WEAPONS, RANGED_WEAPONS
     from entities.equipment_defs import HELMETS, ARMORS
-    
-    if random.random() < 0.9:
-        # 90% 概率掉落 Lv10-50 武器或装备
-        level = random.randint(10, 50)
-        if random.random() < 0.5:
-            # 武器
-            all_weapons = {**MELEE_WEAPONS, **RANGED_WEAPONS}
-            wid = random.choice([k for k in all_weapons if k != "fist"])
-            drops.append(DropItem(cx, cy, "weapon", wid, 1, level=level))
+    # 武器池（排除空手拳套）与神器池
+    all_weapons = {**MELEE_WEAPONS, **RANGED_WEAPONS}
+    weapon_ids = [k for k in all_weapons if k != "fist"]
+    artifact_weapons = [k for k, v in all_weapons.items() if v.get("artifact")]
+    artifact_helmets = [k for k, v in HELMETS.items() if v.get("artifact")]
+    artifact_armors = [k for k, v in ARMORS.items() if v.get("artifact")]
+    all_artifacts = artifact_weapons + artifact_helmets + artifact_armors
+
+    for i in range(ROCKET_PAD_DESTROY_LOOT_COUNT):
+        # 每件独立掷骰：70% 普通武器/装备（Lv20-50），30% 神器（Lv10-20）
+        if random.random() < ROCKET_PAD_DESTROY_NORMAL_CHANCE:
+            level = random.randint(ROCKET_PAD_DESTROY_NORMAL_LV_MIN,
+                                   ROCKET_PAD_DESTROY_NORMAL_LV_MAX)
+            if random.random() < 0.5:
+                # 武器
+                wid = random.choice(weapon_ids)
+                drops.append(DropItem(cx + 30 * i, cy + 20, "weapon", wid, 1, level=level))
+            else:
+                # 装备（头盔/护甲）
+                slot = random.choice(["helmet", "armor"])
+                defs = HELMETS if slot == "helmet" else ARMORS
+                item_id = random.choice(list(defs.keys()))
+                drops.append(DropItem(cx + 30 * i, cy + 20, slot, item_id, 1, level=level))
         else:
-            # 装备
-            slot = random.choice(["helmet", "armor"])
-            defs = HELMETS if slot == "helmet" else ARMORS
-            item_id = random.choice(list(defs.keys()))
-            drops.append(DropItem(cx + 30, cy, slot, item_id, 1, level=level))
-    else:
-        # 10% 概率掉落 Lv10-20 神器
-        level = random.randint(10, 20)
-        # 神器池：武器神器 + 装备神器
-        artifact_weapons = [k for k, v in {**MELEE_WEAPONS, **RANGED_WEAPONS}.items() if v.get("artifact")]
-        artifact_helmets = [k for k, v in HELMETS.items() if v.get("artifact")]
-        artifact_armors = [k for k, v in ARMORS.items() if v.get("artifact")]
-        all_artifacts = artifact_weapons + artifact_helmets + artifact_armors
-        
-        if all_artifacts:
+            if not all_artifacts:
+                continue
+            level = random.randint(ROCKET_PAD_DESTROY_ARTIFACT_LV_MIN,
+                                   ROCKET_PAD_DESTROY_ARTIFACT_LV_MAX)
             item_id = random.choice(all_artifacts)
             if item_id in artifact_weapons:
-                drops.append(DropItem(cx, cy, "weapon", item_id, 1, level=level))
+                drops.append(DropItem(cx + 30 * i, cy + 20, "weapon", item_id, 1, level=level))
             elif item_id in artifact_helmets:
-                drops.append(DropItem(cx + 30, cy, "helmet", item_id, 1, level=level))
+                drops.append(DropItem(cx + 30 * i, cy + 20, "helmet", item_id, 1, level=level))
             else:
-                drops.append(DropItem(cx + 30, cy, "armor", item_id, 1, level=level))
-    
+                drops.append(DropItem(cx + 30 * i, cy + 20, "armor", item_id, 1, level=level))
     return drops
 
 

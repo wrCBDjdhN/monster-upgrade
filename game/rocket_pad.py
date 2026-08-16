@@ -1,9 +1,12 @@
 """火箭发射台状态机：IDLE → ACTIVATED → BOSS_SPAWNED → BOSS_DEFEATED → DESTROYED/EVACUATING → EVAC_SUCCESS"""
 
 import math
+import random
 from config import (
     ROCKET_PAD_SIZE, ROCKET_PAD_INTERACT_RANGE, ROCKET_PAD_BOSS_SPAWN_DELAY,
-    ROCKET_PAD_COUNTDOWN, ROCKET_PAD_DESTROY_REWARD_GOLD, ROCKET_PAD_DESTROY_REWARD_ORE,
+    ROCKET_PAD_COUNTDOWN, ROCKET_PAD_DESTROY_REWARD_GOLD_MIN,
+    ROCKET_PAD_DESTROY_REWARD_GOLD_MAX, ROCKET_PAD_DESTROY_REWARD_RESOURCE_MIN,
+    ROCKET_PAD_DESTROY_REWARD_RESOURCE_MAX,
 )
 
 
@@ -82,13 +85,15 @@ class RocketPad:
             self._boss_defeated = True
 
     def destroy(self) -> dict:
-        """炸毁发射台，返回奖励信息"""
+        """炸毁发射台，返回奖励信息（金币与资源总量均为随机范围）"""
         if self.state != self.BOSS_DEFEATED:
             return {}
         self.state = self.DESTROYED
         return {
-            "gold": ROCKET_PAD_DESTROY_REWARD_GOLD,
-            "ore": ROCKET_PAD_DESTROY_REWARD_ORE,
+            "gold": random.randint(ROCKET_PAD_DESTROY_REWARD_GOLD_MIN,
+                                   ROCKET_PAD_DESTROY_REWARD_GOLD_MAX),
+            "resources": random.randint(ROCKET_PAD_DESTROY_REWARD_RESOURCE_MIN,
+                                        ROCKET_PAD_DESTROY_REWARD_RESOURCE_MAX),
         }
 
     def start_evacuation(self):

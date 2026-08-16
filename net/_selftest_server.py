@@ -5,7 +5,8 @@
 2. 收发验证：
    - 客户端 -> 服务器：客户端发 HEARTBEAT，主线程经 bridge.poll() 收到入站封装
    - 服务器 -> 客户端：send_to() 单播 / broadcast() 广播（含 exclude 排除）
-3. 满员拒绝：房间补满到 4 人后，第 5 个连接收到 JOIN_REJECT（原因含"满员"）
+3. 满员拒绝：3 个客户端入座（槽位 0 保留给主机）后，第 4 个连接收到
+   JOIN_REJECT（原因含"满员"）
 4. 断线感知：客户端主动断开后触发 on_disconnect 回调，房间人数-1
 5. stop() 优雅关闭：服务器线程退出，无 hang
 
@@ -115,7 +116,7 @@ async def main() -> int:
         max_players=MAX_PLAYERS,
         on_disconnect=lambda pid, reason: disconnected.append((pid, reason)),
     )
-    ws_a = ws_b = ws_c = ws_d = None
+    ws_a = ws_b = ws_c = None
     try:
         # ── 1) 两个客户端成功握手入座 ──
         server.start(TEST_HOST, _pick_free_port())
@@ -163,20 +164,21 @@ async def main() -> int:
             pass  # B 确实没收到，符合预期
         print("  [2d] 广播 exclude 生效: 仅 A 收到")
 
-        # ── 3) 满员拒绝：补满到 4 人，第 5 个连接被拒 ──
+        # ── 3) 满员拒绝：3 个客户端入座后（槽位 0 保留主机），第 4 个客户端被拒 ──
         ws_c, pid_c = await _handshake_join(server.port, "玩家C")
-        ws_d, pid_d = await _handshake_join(server.port, "玩家D")
-        reason = await _handshake_reject(server.port, "玩家E")
+        reason = await _handshake_reject(server.port, "玩家D")
         assert "满员" in reason, f"拒绝原因应含满员字样，实际: {reason}"
-        assert server.player_count == MAX_PLAYERS, f"满员后人数应为 {MAX_PLAYERS}"
-        print(f"  [3] 满员拒绝: 第 5 个连接收到 JOIN_REJECT（{reason}）")
+        assert server.player_count == MAX_PLAYERS - 1, (
+            f"满员后客户端人数应为 {MAX_PLAYERS - 1}"
+        )
+        print(f"  [3] 满员拒绝: 第 4 个客户端收到 JOIN_REJECT（{reason}）")
 
         # ── 4) 断线感知 ──
         await ws_a.close()
         assert _wait_until(
             lambda: any(pid == pid_a for pid, _ in disconnected)
         ), "on_disconnect 回调未触发"
-        assert server.player_count == MAX_PLAYERS - 1, "断线后房间人数应-1"
+        assert server.player_count == MAX_PLAYERS - 2, "断线后房间人数应-1"
         print("  [4] 断线感知: A 断开后 on_disconnect 触发，房间人数-1")
 
         print("PASS: 服务器层自检全部通过")
@@ -186,7 +188,7 @@ async def main() -> int:
         return 1
     finally:
         # 清理全部客户端连接，随后优雅关闭服务器
-        for ws in (ws_a, ws_b, ws_c, ws_d):
+        for ws in (ws_a, ws_b, ws_c):
             if ws is not None:
                 try:
                     await ws.close()

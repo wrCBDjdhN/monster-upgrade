@@ -539,7 +539,7 @@ def render_game(view):
                     break
 
     # HUD 文本
-    view._hud_text("hp", f"HP: {round(view.player.hp)}/{view.player.max_hp}",
+    view._hud_text("hp", f"HP: {round(view.player.hp)}/{round(view.player.max_hp)}",
                    10, WINDOW_HEIGHT - 30, arcade.color.WHITE, 12)
     view._hud_text("gold", f"金币: {total_gold} (携带:{carried_gold})",
                    10, WINDOW_HEIGHT - 50, arcade.color.YELLOW, 12)
@@ -552,6 +552,24 @@ def render_game(view):
     view._hud_text("hint",
                    "WASD移动 | 鼠标攻击 | 靠近按E拾取物品 | 1-3药水 | E开宝箱 | TAB背包",
                    10, 10, arcade.color.GRAY, 12)
+
+    # 角色技能栏（F 键）：技能名 + 冷却/就绪状态（无技能角色如"初始"不显示）
+    # 位置：右侧右对齐（WINDOW_WIDTH-10, -85），避免夹在左侧武器/药水提示之间
+    skill_def = getattr(view.player, "character_def", {}).get("skill")
+    if skill_def:
+        skill_cd = max(0.0, getattr(view.player, "skill_cd", 0.0))
+        if skill_cd > 0:
+            skill_txt = f"技能[{skill_def['name']}] 冷却 {skill_cd:.1f}s"
+            skill_color = arcade.color.ORANGE
+        else:
+            skill_txt = f"技能[{skill_def['name']}] 就绪 (F)"
+            skill_color = arcade.color.GOLD
+        view._hud_text("skill", skill_txt, WINDOW_WIDTH - 10, WINDOW_HEIGHT - 85,
+                       skill_color, 11, anchor_x="right")
+    else:
+        # 空串也会重绘，保证切换角色后旧文本被清除
+        view._hud_text("skill", "", WINDOW_WIDTH - 10, WINDOW_HEIGHT - 85,
+                       arcade.color.GOLD, 11, anchor_x="right")
 
     # 药水显示
     if potions:
@@ -576,6 +594,9 @@ def render_game(view):
 
     # ── 行动倒计时（space 主题）──
     draw_action_timer(view)
+
+    # ── 角色等级 HUD（等级/经验条/待选升级提示）──
+    draw_level_hud(view)
 
     # ── 联机状态条 E3（host/client 显示；solo 不绘制）──
     # 位置：右上角，显示房间号/玩家数/RTT；solo 模式零开销（不进入分支）
@@ -694,3 +715,53 @@ def draw_action_timer(view):
                    f"行动时间: {minutes}:{seconds:02d}",
                    WINDOW_WIDTH // 2, WINDOW_HEIGHT - 30,
                    time_color, 14, anchor_x="center", bold=True)
+
+
+def draw_level_hud(view):
+    """绘制角色等级 HUD：等级文本 + 经验条 + 待选升级闪烁提示
+
+    - 位置：右上角（联机状态条 E3 下方），等级/经验随 _level_data 缓存刷新
+      （经验发放时同步更新，见 game/entity_callbacks.py _award_exp）；
+    - 待选升级（pending_choices>0）时在屏幕上方居中闪烁提示「按 TAB 选择加成」，
+      升级面板（views/level_up_view.py）由 input_handler TAB 打开；
+    - 无 player_id / 无等级数据时零开销跳过（客户端未初始化前安全）。
+    """
+    gs = view.window.game_state
+    if not getattr(gs, "player_id", None):
+        return
+    ld = getattr(view, "_level_data", None)
+    if not ld:
+        return
+    from config import exp_needed_for_level
+    level = ld.get("level", 1)
+    exp = ld.get("exp", 0)
+    need = exp_needed_for_level(level)
+
+    # 等级 + 经验文本（右上角，右对齐；位于联机状态条 E3 下方）
+    if need == 0:
+        lvl_txt = f"Lv.{level}（已满级）"
+    else:
+        lvl_txt = f"Lv.{level}  经验 {exp}/{need}"
+    view._hud_text("lvl", lvl_txt, WINDOW_WIDTH - 10, WINDOW_HEIGHT - 50,
+                   arcade.color.GOLD, 12, anchor_x="right", bold=True)
+
+    # 经验条（未满级时绘制，右对齐紧贴文本下方）
+    if need > 0:
+        bar_w, bar_h = 170, 8
+        bx = WINDOW_WIDTH - 10 - bar_w
+        by = WINDOW_HEIGHT - 62
+        arcade.draw_rect_filled(arcade.XYWH(bx + bar_w // 2, by + bar_h // 2, bar_w, bar_h),
+                                (50, 55, 65))
+        fill = min(1.0, exp / need)
+        if fill > 0:
+            arcade.draw_rect_filled(
+                arcade.XYWH(bx + bar_w * fill // 2, by + bar_h // 2, bar_w * fill, bar_h),
+                (110, 210, 130))
+
+    # 待选升级提示（闪烁；按 TAB 打开升级面板）
+    if ld.get("pending_choices", 0) > 0:
+        blink = (getattr(view, "_frame", 0) // 25) % 2 == 0
+        hint_color = arcade.color.GOLD if blink else arcade.color.YELLOW
+        view._hud_text("lvl_pending", "升级！按 TAB 选择加成",
+                       WINDOW_WIDTH // 2, WINDOW_HEIGHT - 120,
+                       hint_color, 16, anchor_x="center", bold=True)

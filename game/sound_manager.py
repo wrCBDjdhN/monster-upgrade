@@ -135,6 +135,11 @@ class SoundManager:
         self._emit('pickup1', 523, 0.05, 0.22, 'sine')   # C5
         self._emit('pickup2', 784, 0.08, 0.22, 'sine')   # G5
 
+    def play_heal(self):
+        """治疗/护盾音效 - 柔和上升双音（骑士圣盾庇护开启）"""
+        self._emit('heal1', 523, 0.08, 0.2, 'sine', sweep_to=784)    # C5 → G5 柔滑上扬
+        self._emit('heal2', 784, 0.16, 0.2, 'sine', sweep_to=1047)   # G5 → C6 余韵
+
     def play_resource_pickup(self, kind=None):
         """资源拾取音效 - 木材/石头/矿石各有不同音色
 

@@ -20,6 +20,7 @@
 import arcade
 import random
 from config import WINDOW_WIDTH, WINDOW_HEIGHT, NET_PORT, NET_SPAWN_OFFSET
+from entities.character_defs import CHARACTERS, CHARACTER_ORDER  # 房间内选角（联机开局前必选）
 from views.text_cache import TextCache  # 持久 Text 对象缓存，替代 draw_text
 
 
@@ -68,6 +69,15 @@ class LobbyView(arcade.View):
         self.ready_hover = False
         self.warehouse_hover = False
         self.market_hover = False
+        # 房间内角色选择（host_wait/client_wait 共用）：4 个角色按钮横排
+        self.char_rects = {}
+        self.char_hover = ""
+        char_w, char_gap = 130, 12
+        char_total = 4 * char_w + 3 * char_gap
+        for i, cid in enumerate(CHARACTER_ORDER):
+            self.char_rects[cid] = arcade.XYWH(
+                cx - char_total // 2 + i * (char_w + char_gap),
+                WINDOW_HEIGHT - 240, char_w, 40)
         # 联机对象（host/client 各自非 None）
         self.server = None
         self.bridge = None
@@ -181,7 +191,42 @@ class LobbyView(arcade.View):
         self._ready_display = []
         gs.net_ready = False
         gs.net_wait_reason = ""
+        # 新房间：角色映射重置（全员需重新选角，开局前必选，见 _host_start_game 校验）
+        gs.net_characters = {}
         self.mode = "host_wait"
+
+    def _select_character(self, cid: str):
+        """房间内选角（host_wait/client_wait 共用）：
+        - 校验角色已解锁（与 character_select_view 同口径，未解锁禁选）
+        - 主机：本地权威映射 net_characters[0]=cid（ROOM_START 打包下发）
+        - 客户端：上报 SET_CHARACTER 给主机（主机权威映射）+ 本地即时更新显示
+        """
+        from db.database import get_unlocked_characters
+        gs = self.window.game_state
+        # 解锁校验：仅"已解锁"角色可选（初始角色恒解锁）
+        if gs.player_id:
+            unlocked = set(get_unlocked_characters(gs.player_id))
+            if cid not in unlocked:
+                self._status = f"{CHARACTERS[cid]['name']} 未解锁（需 {CHARACTERS[cid]['price']} 金币），请先在单机市场购买"
+                return
+        gs.character_id = cid
+        if self.mode == "host_wait":
+            # 主机：本地权威角色映射（player_id=0）
+            gs.net_characters[0] = cid
+            self._status = f"已选择角色：{CHARACTERS[cid]['name']}（就绪后可开始游戏）"
+        elif self.mode == "client_wait" and self.client is not None:
+            # 客户端：上报主机权威映射 + 本地同步显示（主机 ROOM_START 最终下发）
+            my_id = getattr(gs, "net_player_id", None)
+            if my_id is not None:
+                from net.protocol import MsgType
+                self.client.send((MsgType.SET_CHARACTER,
+                                  {"player_id": my_id, "character_id": cid}))
+                gs.net_characters[my_id] = cid
+                self._status = f"已选择角色：{CHARACTERS[cid]['name']}（等待主机开始游戏）"
+            else:
+                self._status = "正在连接主机，连接完成后即可选择角色"
+        else:
+            self._status = f"已选择角色：{CHARACTERS[cid]['name']}"
 
     def _host_start_game(self):
         """主机开始游戏：全员就绪检查 → 计算全房出生点 → 广播 ROOM_START → 本地进入 GameView"""
@@ -196,16 +241,25 @@ class LobbyView(arcade.View):
         if unready:
             self._status = f"还有 {len(unready)} 名玩家未准备，无法开始游戏"
             return
+        # 全员角色检查：主机(0) + 所有已入座客户端都必须已选角色（联机开局前必选）
+        all_pids = [0] + [pid for pid, _, _ in server.player_info()]
+        no_char = [pid for pid in all_pids if gs.net_characters.get(pid) is None]
+        if no_char:
+            self._status = f"还有 {len(no_char)} 名玩家未选择角色，无法开始游戏"
+            return
         # 开局后重置准备状态（新一局全员重新准备，避免直接继承上一局就绪态）
         self._ready_state = {0: True}
         # 修复「同房间每局地图不变」：建房时定的种子（server.room.seed）只应约束首局，
         # 之后每局重新随机种子并写回，保证同一房间多次开局地图布局各不相同。
         # 服务器线程不读写 seed（仅主线程开局时使用），主线程直接更新无并发风险。
         server.room.seed = random.randint(1, 999999)
-        # 玩家列表 = 主机(slot=0) + 已入座客户端（server 权威数据）
-        players = [{"player_id": 0, "name": gs.player_name, "slot": 0}]
+        # 玩家列表 = 主机(slot=0) + 已入座客户端（server 权威数据）；每项携带角色 id
+        # （客户端 SET_CHARACTER 上报 + 主机本地选角，ROOM_START 下发后各端按角色建玩家）
+        players = [{"player_id": 0, "name": gs.player_name, "slot": 0,
+                    "character_id": gs.net_characters.get(0, "initial")}]
         for pid, name, slot in server.player_info():
-            players.append({"player_id": pid, "name": name, "slot": slot})
+            players.append({"player_id": pid, "name": name, "slot": slot,
+                            "character_id": gs.net_characters.get(pid, "initial")})
         # 出生点：以首个房间中心为基准，按槽位对称展开（slot 0..max_players-1）
         map_data = generate_map(server.room.seed, theme=server.room.theme)
         cx, cy = map_data["rooms"][0].center if map_data["rooms"] else (400, 400)
@@ -269,7 +323,8 @@ class LobbyView(arcade.View):
         gs = self.window.game_state
         players = payload.get("players", [])
         gs.net_roster = {
-            p["player_id"]: {"name": p.get("name", ""), "slot": p.get("slot", 0)}
+            p["player_id"]: {"name": p.get("name", ""), "slot": p.get("slot", 0),
+                             "character_id": p.get("character_id", "initial")}
             for p in players
         }
         gs.net_spawns = {
@@ -280,6 +335,8 @@ class LobbyView(arcade.View):
         my = next((p for p in players if p["player_id"] == gs.net_player_id), None)
         if my is not None:
             gs.net_spawn = (my.get("x", 0), my.get("y", 0))
+            # 角色 id 由主机 ROOM_START 权威下发（客户端在房间内选角，见 _select_character）
+            gs.character_id = my.get("character_id", "initial")
         gs.net_max_players = len(players)
         # 地图种子/主题与主机一致（客户端确定性重建同图）
         gs.current_map_seed = payload.get("seed", 1)
@@ -312,6 +369,7 @@ class LobbyView(arcade.View):
         gs.net_room_id = ""
         gs.net_roster = {}
         gs.net_spawns = {}
+        gs.net_characters = {}  # 离开房间：清空角色映射
         from views.start_view import StartView
         self.window.show_view(StartView(self.window_ref))
 
@@ -345,6 +403,13 @@ class LobbyView(arcade.View):
                         self._ready_state[pid] = ready
                         self._broadcast_ready_state()
                         print(f"[LobbyView] 玩家 {pid} 准备状态: {ready}")
+                elif inbound.get("msg_type") == "SET_CHARACTER":
+                    # 客户端选角上报：更新主机权威角色映射（ROOM_START 打包下发全房）
+                    pid = (inbound.get("payload") or {}).get("player_id")
+                    cid = (inbound.get("payload") or {}).get("character_id")
+                    if pid is not None and cid:
+                        gs.net_characters[pid] = cid
+                        print(f"[LobbyView] 玩家 {pid} 选择角色: {cid}")
         # 加入等待：轮询连接状态推进握手 + poll 握手/房间消息
         if self.mode == "client_wait" and self.client is not None:
             st = self.client.state
@@ -423,6 +488,7 @@ class LobbyView(arcade.View):
         self._handshake_sent = False  # 复位握手标志，下次连接重新握手
         gs.net_client = None
         gs.net_mode = "solo"
+        gs.net_characters = {}  # 断开连接：清空角色映射（重新加入需重新选角）
 
     # ─────────────────────────── 绘制 ───────────────────────────
 
@@ -477,7 +543,7 @@ class LobbyView(arcade.View):
                           arcade.color.ORANGE_RED, size=14, anchor_x="center", bold=True)
 
     def _draw_host_wait(self, cx):
-        """host_wait：房间信息 / 玩家列表（含准备状态）/ 开始游戏 / 关闭房间 / 市场仓库"""
+        """host_wait：房间信息 / 角色选择 / 玩家列表（含准备状态）/ 开始游戏 / 关闭房间 / 市场仓库"""
         gs = self.window.game_state
         # 房间信息
         self._tc.text("room_info", f"房间: {gs.net_room_id}  |  主题: {self.selected_theme}",
@@ -485,6 +551,8 @@ class LobbyView(arcade.View):
                       anchor_x="center")
         self._tc.text("room_status", self._status, cx, WINDOW_HEIGHT - 180,
                       arcade.color.CYAN, size=13, anchor_x="center")
+        # 角色选择区（开局前必选，主机本人在此选角）
+        self._draw_char_select(cx)
         # 玩家列表（主机 + 已加入客户端，含准备状态）
         players = [("(主机) " + gs.player_name, 0, True)] + [
             (f"玩家{pid}: {name}", slot, self._ready_state.get(pid, False))
@@ -559,6 +627,40 @@ class LobbyView(arcade.View):
             self._tc.text("err", self._error, cx, WINDOW_HEIGHT - 140,
                           arcade.color.RED, size=14, anchor_x="center")
 
+    def _draw_char_select(self, cx):
+        """房间内角色选择区（host_wait/client_wait 共用）：
+        - 4 角色按钮横排（CHARACTER_ORDER 顺序，位置见 __init__ char_rects）
+        - 已选中：金色边框 + 原色高亮；未解锁：灰显 + 价格；hover：提亮
+        - 标题提示"开局前必选"（主机 _host_start_game 全员角色校验）
+        """
+        gs = self.window.game_state
+        # 解锁集合：仅已解锁角色可选（联机房间内禁选未购买角色，与单机选角同口径）
+        from db.database import get_unlocked_characters
+        unlocked = set(get_unlocked_characters(gs.player_id)) if gs.player_id else {"initial"}
+        self._tc.text("char_title", "选择角色（开局前必选）", cx, WINDOW_HEIGHT - 205,
+                      arcade.color.LIGHT_GRAY, size=13, anchor_x="center")
+        for cid, rect in self.char_rects.items():
+            char = CHARACTERS[cid]
+            selected = gs.character_id == cid
+            locked = cid not in unlocked
+            hover = self.char_hover == cid
+            if locked:
+                base = (70, 70, 70)  # 未解锁：灰显
+            elif selected:
+                base = char["color"]  # 已选中：原色 + 金色边框
+            elif hover:
+                base = (min(255, char["color"][0] + 40), min(255, char["color"][1] + 40),
+                        min(255, char["color"][2] + 40))
+            else:
+                base = (max(30, char["color"][0] - 40), max(30, char["color"][1] - 40),
+                        max(30, char["color"][2] - 40))
+            arcade.draw_rect_filled(rect, base)
+            arcade.draw_rect_outline(rect, arcade.color.GOLD if selected else arcade.color.WHITE,
+                                     border_width=2 if selected else 1)
+            label = char["name"] + (f"({char.get('price', 0)}金)" if locked else "")
+            self._tc.text(f"char_{cid}", label, rect.center_x, rect.center_y,
+                          arcade.color.WHITE, size=13, anchor_x="center", anchor_y="center")
+
     def _draw_client_wait(self, cx):
         """client_wait：连接状态 / 准备按钮 / 全员准备状态 / 市场仓库 / 取消"""
         gs = self.window.game_state
@@ -568,6 +670,9 @@ class LobbyView(arcade.View):
         tip = "正在连接主机，请稍候…" if not self._handshake_sent else "已加入房间，准备开始游戏…"
         self._tc.text("cw_tip", tip, cx, WINDOW_HEIGHT // 2 + 32,
                       arcade.color.LIGHT_GRAY, size=13, anchor_x="center")
+        # 角色选择区（连接建立后可用，点击上报 SET_CHARACTER 给主机权威映射）
+        if self._handshake_sent:
+            self._draw_char_select(cx)
         # 全员准备状态（READY_STATE 广播驱动）
         if self._ready_display:
             y = WINDOW_HEIGHT // 2 + 8
@@ -627,6 +732,13 @@ class LobbyView(arcade.View):
         self.ready_hover = self.ready_rect.point_in_rect((x, y))
         self.warehouse_hover = self.warehouse_rect.point_in_rect((x, y))
         self.market_hover = self.market_rect.point_in_rect((x, y))
+        # 房间内角色选择按钮 hover（host_wait/client_wait 有效）
+        self.char_hover = ""
+        if self.mode in ("host_wait", "client_wait"):
+            for cid, rect in self.char_rects.items():
+                if rect.point_in_rect((x, y)):
+                    self.char_hover = cid
+                    break
 
     def _open_warehouse(self):
         """房间内打开仓库（联机保持连接，返回时回 LobbyView 复用连接）"""
@@ -660,6 +772,7 @@ class LobbyView(arcade.View):
         gs.net_room_id = ""
         gs.net_roster = {}
         gs.net_spawns = {}
+        gs.net_characters = {}  # 关闭房间：清空角色映射（全员重新选角）
         gs.run_carried = {}
         from views.start_view import StartView
         self.window.show_view(StartView(self.window_ref))
@@ -693,6 +806,11 @@ class LobbyView(arcade.View):
                 self._open_market()
             elif self.close_rect.point_in_rect((x, y)):
                 self._close_room()
+            # 房间内选角（主机本人）
+            for cid, rect in self.char_rects.items():
+                if rect.point_in_rect((x, y)):
+                    self._select_character(cid)
+                    break
         elif self.mode == "join":
             if self.ip_rect.point_in_rect((x, y)):
                 # 点击输入框：进入编辑态
@@ -715,6 +833,12 @@ class LobbyView(arcade.View):
                 self._open_warehouse()
             elif self.market_rect.point_in_rect((x, y)) and self._handshake_sent:
                 self._open_market()
+            # 房间内选角（客户端：上报 SET_CHARACTER，需连接已建立才有 player_id）
+            if self._handshake_sent:
+                for cid, rect in self.char_rects.items():
+                    if rect.point_in_rect((x, y)):
+                        self._select_character(cid)
+                        break
 
     def on_key_press(self, key, modifiers):
         """IP 输入编辑（仅 join 模式 + 输入框聚焦时生效）"""

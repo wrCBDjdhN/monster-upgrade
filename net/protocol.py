@@ -35,6 +35,9 @@ class MsgType(Enum):
     # ── 玩家准备 ──
     READY = "READY"                # 客户端→主机：准备/取消准备（开始游戏前全员就绪）
     READY_STATE = "READY_STATE"    # 主机→全部：全员准备状态广播（大厅/房间内同步显示）
+    # ── 角色（角色系统：房间内选角 + 开局同步 + 局内技能）──
+    SET_CHARACTER = "SET_CHARACTER"  # 客户端→主机：上报选择的角色（开局前，主机记入玩家槽位）
+    SKILL_USE = "SKILL_USE"          # 客户端→主机：上报角色技能释放（主机裁决效果并广播）
     # ── 快照（20Hz 全量广播）──
     PLAYER_SNAPSHOT = "PLAYER_SNAPSHOT"              # 玩家实体快照
     MONSTER_SNAPSHOT = "MONSTER_SNAPSHOT"            # 怪物快照
@@ -98,7 +101,8 @@ MESSAGE_SCHEMAS: dict[MsgType, str] = {
         "  'seed': int,    地图随机种子（确定性重建地图）\n"
         "  'theme': str,   地图主题（forest/desert/space）\n"
         "  'players': list[dict], 全部玩家出生信息，每项：\n"
-        "      {'player_id': int, 'name': str, 'slot': int, 'x': float, 'y': float}\n"
+        "      {'player_id': int, 'name': str, 'slot': int, 'x': float, 'y': float,\n"
+        "       'character_id': str}  角色 id（initial/mage/knight/assassin，开局前选定，幽灵创建用）\n"
         "}"
     ),
     MsgType.ROOM_ENDED: (
@@ -122,6 +126,20 @@ MESSAGE_SCHEMAS: dict[MsgType, str] = {
         "  'players': list[dict], 每项：\n"
         "      {'player_id': int, 'ready': bool, 'name': str}  玩家 id / 是否已准备 / 玩家名\n"
         "}"
+    ),
+    MsgType.SET_CHARACTER: (
+        "客户端上报选择的角色（房间内开局前选定；主机记入该玩家槽位，ROOM_START 下发全房）。\n"
+        "payload: {\n"
+        "  'player_id': int,     上报玩家 id\n"
+        "  'character_id': str}  角色 id（initial/mage/knight/assassin，须为已解锁角色）\n"
+    ),
+    MsgType.SKILL_USE: (
+        "客户端上报角色技能释放（F 键），主机裁决技能效果（伤害/位移/护盾）并广播。\n"
+        "payload: {\n"
+        "  'player_id': int,   施放技能玩家 id\n"
+        "  'x': float, 'y': float,  施放瞬间玩家世界坐标（主机据此修正幽灵位置）\n"
+        "  'mouse_x': float, 'mouse_y': float,  鼠标目标点世界坐标（技能朝向/落点方向）\n"
+        "  'damage': float}    当前武器伤害（技能伤害以武器伤害为基数，倍率按角色定义）\n"
     ),
     MsgType.ROOM_ERROR: (
         "主机广播房间错误：各端回到大厅并展示错误。\n"

@@ -15,6 +15,7 @@ from config import (
     PLAYER_SPEED, PLAYER_HP, PLAYER_SIZE, PLAYER_COLOR,
     MAP_WIDTH, MAP_HEIGHT,
 )
+from entities.character_defs import CHARACTERS
 
 
 class Player(arcade.SpriteSolidColor):
@@ -22,19 +23,32 @@ class Player(arcade.SpriteSolidColor):
 
     继承自 SpriteSolidColor，使用纯色矩形表示玩家。
     管理玩家的生命值、防御力、背包容量等属性。
+
+    角色系统：构造时按 character_id 应用角色基础属性
+    （hp/defense/speed/color，见 entities/character_defs.py），
+    默认 "initial" 与旧版数值完全一致（100 血 / 0 防 / 4.0 速 / 蓝）。
     """
-    def __init__(self, center_x=0, center_y=0):
-        super().__init__(PLAYER_SIZE * 2, PLAYER_SIZE * 2, color=PLAYER_COLOR)
+    def __init__(self, center_x=0, center_y=0, character_id: str = "initial"):
+        char = CHARACTERS.get(character_id, CHARACTERS["initial"])
+        super().__init__(PLAYER_SIZE * 2, PLAYER_SIZE * 2, color=char["color"])
         self.center_x = center_x
         self.center_y = center_y
-        self.hp = PLAYER_HP                      # 当前生命值
-        self.max_hp = PLAYER_HP                  # 最大生命值
+        self.character_id = character_id          # 角色 id（跨层契约：DB/界面/联机共用）
+        self.character_def = char                  # 角色定义引用（技能/被动/数值）
+        self.hp = char["hp"]                      # 当前生命值（角色基础值）
+        self.max_hp = char["hp"]                  # 最大生命值（角色基础值）
         self.change_x = 0.0                      # X 轴速度（由物理引擎处理）
         self.change_y = 0.0                      # Y 轴速度（由物理引擎处理）
         # 装备属性
-        self.defense = 0                         # 总防御力（头盔 + 护甲）
+        self.base_defense = char["defense"]      # 角色基础防御（骑士 10，装备防御叠加其上）
+        self.defense = self.base_defense         # 总防御力（角色基础 + 头盔 + 护甲）
         self.speed_mult = 1.0                    # 移速倍率（药水效果）
         self.speed_effect_timer = 0.0            # 疾跑药水剩余时间
+        # 角色基础移速倍率 = 角色速度 / 标准玩家速度（法师 3.6/4=0.9、骑士 3.4/4=0.85、刺客 4.8/4=1.2）
+        self.char_speed_mult = char["speed"] / PLAYER_SPEED
+        # 技能状态（F 键释放；无技能角色恒为不可用）
+        self.skill_cd = 0.0                      # 技能剩余冷却（秒），<=0 可释放
+        self.skill_active = 0.0                  # 技能生效剩余时间（骑士圣盾庇护持续秒），>0 表示技能效果激活
         # 背包
         self.backpack_capacity = 0               # 背包容量（0 = 无背包，不能拾取资源）
         # 持续回复效果（HoT）
@@ -61,8 +75,20 @@ class Player(arcade.SpriteSolidColor):
         self.center_y = max(half, min(MAP_HEIGHT - half, self.center_y))
 
     def take_damage(self, amount: int):
-        """受到伤害，先扣防御（至少造成 1 点伤害）"""
-        actual = max(1, amount - self.defense)
+        """受到伤害，先扣防御（至少造成 1 点伤害）
+
+        角色被动修正（见 entities/character_defs.py）：
+        - 骑士「钢铁之躯」：受到伤害额外 -5（防御结算后再减）
+        - 骑士「圣盾庇护」激活期间：伤害再乘 (1 - 减伤比例 70%)
+        """
+        # 圣盾庇护激活：先按比例减伤（70% 减伤 → 仅承受 30%）
+        if self.skill_active > 0 and self.character_def.get("skill"):
+            reduce = self.character_def["skill"].get("damage_reduce", 0.0)
+            amount = int(amount * (1.0 - reduce))
+        # 角色被动：钢铁之躯 受到伤害额外 -5
+        passive = self.character_def.get("passive") or {}
+        flat_reduce = passive.get("flat_reduce", 0)
+        actual = max(1, amount - self.defense - flat_reduce)
         # round 到 2 位小数：regen 回复使 hp 成为浮点，直接相减会产生二进制长小数（如 87.13-10=77.129999...）
         self.hp = max(0, round(self.hp - actual, 2))
         # 联机主机伤害广播钩子：扣血完成后以「实际伤害」回调一次（恰好一次/次伤害事件）。
@@ -146,8 +172,18 @@ class Player(arcade.SpriteSolidColor):
 
     @property
     def effective_speed_mult(self) -> float:
-        """最终移速倍率 = 药水/装备倍率 × debuff 减速倍率"""
-        return self.speed_mult * self._debuff_speed_mult
+        """最终移速倍率 = 角色基础移速倍率 × 药水/装备倍率 × debuff 减速倍率"""
+        return self.char_speed_mult * self.speed_mult * self._debuff_speed_mult
+
+    def update_skill(self, delta_time: float):
+        """每帧递减技能冷却与技能生效时间（由 PlayerController.update 或联机幽灵更新路径调用）
+
+        冷却归零后可再次释放；生效时间归零表示技能效果结束（如圣盾庇护减伤结束）。
+        """
+        if self.skill_cd > 0:
+            self.skill_cd = max(0.0, self.skill_cd - delta_time)
+        if self.skill_active > 0:
+            self.skill_active = max(0.0, self.skill_active - delta_time)
 
     @property
     def alive(self) -> bool:
@@ -219,6 +255,8 @@ class PlayerController:
         self.physics_engine.update()
         # 结算玩家 debuff（中毒掉血/减速/眩晕）
         self.player._update_debuffs(delta_time)
+        # 递减技能冷却与技能生效时间（角色技能 F 键用）
+        self.player.update_skill(delta_time)
         # 地图边界
         self.player.clamp_to_map()
         # 相机直接跟随玩家（居中：position 即视口中心）。

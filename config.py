@@ -1,5 +1,7 @@
 """游戏全局配置常量，所有数值集中管理"""
 
+import random
+
 # ── 窗口 ──
 WINDOW_WIDTH = 1280
 WINDOW_HEIGHT = 720
@@ -48,6 +50,16 @@ UPGRADE_BASE_COST = 50         # 基础升级费用
 UPGRADE_MULT_GROWTH = 0.45     # 亚线性增长系数（调大=高等级更强，调小=更弱）
 FORGE_BASE_COST = 200          # 锻造基础费用
 FORGE_PER_LEVEL_COST = 20      # 锻造每级递增费用
+# 锻造神器概率（按材料中神器数量动态判定）：
+FORGE_ARTIFACT_CHANCE_NONE = 0.2    # 两件普通材料：20% 出神器
+FORGE_ARTIFACT_CHANCE_MIXED = 0.6   # 一件神器 + 一件普通：60% 出神器
+FORGE_ARTIFACT_CHANCE_DOUBLE = 1.0  # 两件神器：100% 出神器
+# 武器扩展机制（吸血/散射/光环）：
+LIFESTEAL_DEFAULT = 0.0        # 武器默认吸血比例（0=无吸血，武器定义 lifesteal 字段覆盖）
+SPREAD_COUNT_DEFAULT = 1       # 武器默认弹丸数（1=无散射，武器定义 spread_count 字段覆盖）
+SPREAD_ANGLE_DEFAULT = 0.0     # 武器默认散射夹角（度）
+AURA_SLOW_TICK = 0.5           # 攻速光环减速结算周期（秒）：每 0.5s 对半径内怪物施加一次减速
+AURA_SLOW_LEVEL = 1            # 光环减速效果等级（slow 效果 Lv1=25% 减速）
 SELL_COST_RECOVERY_RATIO = 0.6 # 售卖价 = 累计升级成本 × 该比例
 
 
@@ -292,8 +304,16 @@ ROCKET_PAD_COUNT_MIN = 1           # 每局最少发射台数量
 ROCKET_PAD_COUNT_MAX = 4           # 每局最多发射台数量
 ROCKET_PAD_BOSS_SPAWN_DELAY = 3.0  # 激活后 BOSS 出现延迟（秒）
 ROCKET_PAD_COUNTDOWN = 30.0        # 撤离倒计时（秒）
-ROCKET_PAD_DESTROY_REWARD_GOLD = 30    # 炸毁奖励金币
-ROCKET_PAD_DESTROY_REWARD_ORE = 2      # 炸毁奖励矿石
+ROCKET_PAD_DESTROY_REWARD_GOLD_MIN = 100     # 炸毁奖励金币下限
+ROCKET_PAD_DESTROY_REWARD_GOLD_MAX = 500     # 炸毁奖励金币上限
+ROCKET_PAD_DESTROY_REWARD_RESOURCE_MIN = 20  # 炸毁奖励资源总量下限
+ROCKET_PAD_DESTROY_REWARD_RESOURCE_MAX = 50  # 炸毁奖励资源总量上限
+ROCKET_PAD_DESTROY_LOOT_COUNT = 2            # 炸毁奖励武器/装备件数
+ROCKET_PAD_DESTROY_NORMAL_CHANCE = 0.7       # 每件武器/装备为普通掉落（Lv20-50）的概率
+ROCKET_PAD_DESTROY_NORMAL_LV_MIN = 20        # 普通武器/装备等级下限
+ROCKET_PAD_DESTROY_NORMAL_LV_MAX = 50        # 普通武器/装备等级上限
+ROCKET_PAD_DESTROY_ARTIFACT_LV_MIN = 10      # 神器等级下限
+ROCKET_PAD_DESTROY_ARTIFACT_LV_MAX = 20      # 神器等级上限
 
 # ── 行动时间 ──
 ACTION_TIME_SPACE = 480.0          # 航天基地行动时间（8 分钟）
@@ -303,6 +323,40 @@ ACTION_TIME_DESERT = 300.0         # 沙漠行动时间（5 分钟）
 # ── 航天装备穿戴概率（怪物穿戴分配） ──
 MONSTER_SPACE_ARMOR_CHANCE = 0.30   # 航天怪穿戴航天护甲概率
 MONSTER_SPACE_HELMET_CHANCE = 0.30  # 航天怪穿戴航天头盔概率
+
+# ── 角色等级系统 ──
+# 经验获取：击杀普通怪 EXP_KILL_BASE / BOSS ×EXP_BOSS_MULT / 采集资源 / 开宝箱 / 撤离成功
+PLAYER_MAX_LEVEL = 10               # 角色最高等级（Lv.1 起步，升满后经验不再累积）
+EXP_PER_LEVEL_BASE = 100            # 升级经验基数：升到 Lv.n+1 需 EXP_PER_LEVEL_BASE × n 经验（递增）
+EXP_KILL_BASE = 20                  # 击杀普通怪物经验
+EXP_BOSS_MULT = 5                   # BOSS 击杀经验倍率（20×5=100，火箭台 BOSS 同规则）
+EXP_HARVEST = 8                     # 采集资源经验（树/矿石/仙人掌等）
+EXP_CHEST = 30                      # 开宝箱经验
+EXP_EVAC = 100                      # 撤离成功经验（撤离点/火箭台撤离均计）
+# 升级 3 选 1 永久属性加成池：key 为 character_levels 表加成列名，value 为每次加成数值
+LEVEL_BONUS_POOL = [
+    {"key": "bonus_hp",        "name": "生命上限", "value": 20,   "desc": "最大生命 +20",  "color": (255, 90, 90)},
+    {"key": "bonus_damage",    "name": "攻击伤害", "value": 3,    "desc": "攻击伤害 +3",   "color": (255, 160, 80)},
+    {"key": "bonus_defense",   "name": "防御力",   "value": 3,    "desc": "防御力 +3",     "color": (120, 180, 255)},
+    {"key": "bonus_speed",     "name": "移动速度", "value": 0.2,  "desc": "移动速度 +5%", "color": (140, 255, 140)},
+    {"key": "bonus_atk_speed", "name": "攻击速度", "value": 0.1,  "desc": "攻击速度 +0.1", "color": (255, 220, 120)},
+]
+
+
+def exp_needed_for_level(level):
+    """返回从 Lv.level 升到 Lv.level+1 所需经验（100 × level，逐级递增）
+
+    level >= PLAYER_MAX_LEVEL 时返回 0（满级无需经验）。
+    """
+    if level >= PLAYER_MAX_LEVEL:
+        return 0
+    return EXP_PER_LEVEL_BASE * level
+
+
+def roll_level_up_options(count=3):
+    """随机抽取 count 个不重复的升级加成选项（升级 3 选 1 面板使用）"""
+    return random.sample(LEVEL_BONUS_POOL, k=min(count, len(LEVEL_BONUS_POOL)))
+
 
 # ── 联机网络 ──
 NET_SNAPSHOT_HZ = 20                # 状态快照广播频率（Hz）

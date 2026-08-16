@@ -1,6 +1,6 @@
 # game/ - 核心游戏逻辑
 
-**Updated:** 2026-08-11 | **Files:** 19 | **Lines:** ~4,700
+**Updated:** 2026-08-16 | **Files:** 19 | **Lines:** ~5,134
 
 ## OVERVIEW
 游戏逻辑层：怪物 AI、战斗、随机地图生成、掉落、撤离、宝箱、可采集物、特效、渲染、音效、输入、刷新。被 views/ 层编排；本层可经 `db.database` 读数据，`input_handler.py` 反向依赖 views（TAB 开背包）属例外。
@@ -8,7 +8,7 @@
 ## WHERE TO LOOK
 | 任务 | 文件 |
 |------|------|
-| 怪物类（**数据驱动**：2 参数化基类 + 13 薄类 + Projectile 弹丸） | monsters.py（502 行；薄类仅 `super().__init__(**MONSTER_CONFIGS[name])`，AI 唯一实现在基类） |
+| 怪物类（**数据驱动**：2 参数化基类 + 13 薄类 + Projectile 弹丸） | monsters.py（603 行；薄类仅 `super().__init__(**MONSTER_CONFIGS[name])`，AI 唯一实现在基类） |
 | 怪物数值/元数据（**禁在此硬编码**） | entities/monster_defs.py（MONSTER_CONFIGS/MONSTER_METADATA，见 entities/AGENTS.md） |
 | 玩家精灵与移动 | player.py |
 | 战斗：近战/远程弹丸/debuff/激光结算 | combat.py |
@@ -18,7 +18,7 @@
 | 宝箱 | chest.py |
 | 可采集物（树/矿石/石头/仙人掌） | harvestable.py |
 | 粒子/漂浮文字/音效触发 | effects.py |
-| 批量绘制 / 渲染辅助 / 主渲染 | batch_shapes.py / render_helpers.py / rendering.py |
+| 批量绘制 / 渲染辅助 / 主渲染 | batch_shapes.py / render_helpers.py / rendering.py（696 行，render_game 单函数 528 行） |
 | 程序化合成音效 | sound_manager.py |
 | 键鼠输入映射 | input_handler.py |
 | 怪物死亡回调汇聚（含拾取/掉落/装备分配联动） | entity_callbacks.py |

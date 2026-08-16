@@ -83,8 +83,13 @@ class Room:
     names: dict[str, ServerConnection] = field(default_factory=dict)    # 玩家名 -> 连接
 
     def is_full(self) -> bool:
-        """房间是否已满（满员后拒绝新连接入座）。"""
-        return len(self.players) >= self.max_players
+        """房间是否已满（满员后拒绝新连接入座）。
+
+        客户端容量 = max_players - 1：槽位 0 保留给主机（主机不在
+        room.players 中），故 max_players=4 时 3 个客户端即满员
+        （3 客户端 + 1 主机），与 next_slot() 的槽位分配一致。
+        """
+        return len(self.players) >= self.max_players - 1
 
     def next_slot(self) -> int:
         """取最小空闲槽位号（1..max_players-1）；已满时返回 -1。

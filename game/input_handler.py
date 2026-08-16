@@ -29,8 +29,20 @@ def handle_key_press(view, key, modifiers):
     if key == arcade.key.E:
         view._chest_key_pressed = True
 
-    # 背包界面键 (TAB)
+    # 角色技能键 (F)：释放当前角色的特殊技能（法师奥术爆发/骑士圣盾/刺客影袭）。
+    # 单机/主机本地直接释放；联机客户端上报主机裁决 + 本地纯表现（与 ATTACK_EVENT 同构）。
+    if key == arcade.key.F:
+        _handle_skill_key(view)
+        return
+
+    # 背包界面键 (TAB)：有未消费的升级（pending_choices>0）时优先打开升级面板，
+    # 无待选升级则打开背包（升级面板关闭后可随时 TAB 回来继续选择）
     if key == arcade.key.TAB:
+        ld = getattr(view, "_level_data", None) or {}
+        if ld.get("pending_choices", 0) > 0:
+            from views.level_up_view import LevelUpView
+            view.window.show_view(LevelUpView(view.window_ref, game_view=view))
+            return
         from views.backpack_view import BackpackView
         view.window.show_view(BackpackView(view.window_ref, game_view=view))
         return
@@ -205,6 +217,10 @@ def handle_mouse_press(view, x, y, button, modifiers):
                         None,  # debuff_id：命中判定收敛主机，本地弹丸不携带（不判定）
                         getattr(gs, 'weapon_speed', 1.0),
                         debuffs=None,
+                        # 散射/吸血：客户端本地纯表现弹丸，与主机裁决口径一致（视觉对齐）
+                        lifesteal=getattr(gs, 'weapon_lifesteal', 0.0),
+                        spread_count=getattr(gs, 'weapon_spread_count', 1),
+                        spread_angle=getattr(gs, 'weapon_spread_angle', 0.0),
                     )
             return
 
@@ -219,6 +235,8 @@ def handle_mouse_press(view, x, y, button, modifiers):
                 weapon_range,
                 world_x, world_y,
                 getattr(gs, 'weapon_speed', 1.0),
+                # 吸血剑：近战命中按实际伤害比例回血（攻击者=本地玩家）
+                lifesteal=getattr(gs, 'weapon_lifesteal', 0.0),
             )
             view._player_attack_flash = 0.1
             view._attack_this_frame = True
@@ -272,6 +290,10 @@ def handle_mouse_press(view, x, y, button, modifiers):
                     getattr(gs, 'weapon_special', ''),
                     debuff_id,
                     getattr(gs, 'weapon_speed', 1.0),
+                    # 散射/吸血：单机命中判定在此弹丸上完成（check_monster_hits 统一结算）
+                    lifesteal=getattr(gs, 'weapon_lifesteal', 0.0),
+                    spread_count=getattr(gs, 'weapon_spread_count', 1),
+                    spread_angle=getattr(gs, 'weapon_spread_angle', 0.0),
                 )
             view._player_attack_flash = 0.1
             view._attack_this_frame = True
@@ -291,3 +313,35 @@ def screen_to_world(view, x, y):
     """屏幕坐标转世界坐标"""
     cam = view.controller.camera.position
     return x + cam.x - view.window.width / 2, y + cam.y - view.window.height / 2
+
+
+def _handle_skill_key(view):
+    """角色技能释放（F 键）
+
+    - 单机/主机本地：use_skill 直接释放（伤害/位移/护盾本地生效）
+    - 联机客户端：上报 SKILL_USE（主机在对应幽灵上权威裁决命中/位移/护盾），
+      本地仅纯表现（弹丸/瞬移/护盾视觉 + 本地冷却计时），与 ATTACK_EVENT 同构
+    """
+    from game.character_skills import use_skill, can_use_skill
+    gs = view.window.game_state
+    if not can_use_skill(view.player):
+        return  # 冷却中/眩晕/无技能角色：不消耗
+    # 鼠标世界坐标（技能方向/落点；与 handle_mouse_press 同口径换算）
+    cam = view.controller.camera.position
+    world_x = view._mouse_x + cam[0] - view.window.width / 2
+    world_y = view._mouse_y + cam[1] - view.window.height / 2
+    damage = getattr(gs, "weapon_damage", 0)
+    if gs.net_mode == "client" and gs.net_client is not None:
+        # 客户端：上报 SKILL_USE（主机权威裁决），本地仅纯表现
+        gs.net_client.send((MsgType.SKILL_USE, {
+            "player_id": getattr(gs, "net_player_id", 0),
+            "x": view.player.center_x,
+            "y": view.player.center_y,
+            "mouse_x": world_x,
+            "mouse_y": world_y,
+            "damage": damage,
+        }))
+        use_skill(view, view.player, world_x, world_y, damage, broadcast=False)
+        return
+    # 单机/主机本地：直接释放（含命中判定与广播；solo 下 broadcast 无副作用自动跳过）
+    use_skill(view, view.player, world_x, world_y, damage, broadcast=True)

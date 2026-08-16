@@ -80,16 +80,21 @@ class CombatSystem:
         """
         return self._cooldowns.get(attacker_id, 0.0) <= 0
 
-    def melee_attack(self, player, monsters: arcade.SpriteList, weapon_damage: float, weapon_range: float, mouse_x: float = 0, mouse_y: float = 0, weapon_speed: float = 1.0, attacker_id: int = 0) -> list:
+    def melee_attack(self, player, monsters: arcade.SpriteList, weapon_damage: float, weapon_range: float, mouse_x: float = 0, mouse_y: float = 0, weapon_speed: float = 1.0, attacker_id: int = 0, lifesteal: float = 0.0) -> list:
         """近战攻击：扇形命中检测，返回被击中的怪物列表
 
         attacker_id：攻击者标识（联机时各玩家独立冷却），默认 0 = 单人模式
+        lifesteal：吸血比例（0~1），命中造成实际伤害的该比例转化为攻击者生命回复
         """
         if not self.can_attack(attacker_id):
             return []
 
         # 冷却时间 = 1 / attack_speed（attack_speed 越高，冷却越短，攻击越快）
         self._cooldowns[attacker_id] = 1.0 / max(0.1, weapon_speed)
+
+        # 角色被动攻击修正（法师+20%/骑士低血+30%/刺客暴击，见 character_skills.py）
+        from game.character_skills import modify_attack_damage  # 延迟导入避免循环依赖
+        weapon_damage = modify_attack_damage(player, weapon_damage)
 
         # 获取鼠标方向角度
         dx = mouse_x - player.center_x
@@ -108,16 +113,26 @@ class CombatSystem:
             monster_angle = math.degrees(math.atan2(mdy, mdx))
             angle_diff = abs((monster_angle - attack_angle + 180) % 360 - 180)
             if angle_diff <= MELEE_ARC_DEGREES / 2:
+                # 记录击杀归属（等级经验：主机按 last_attacker_id 判断是否本端玩家击杀）
+                m.last_attacker_id = attacker_id
                 actual = m.take_damage(round(weapon_damage))
                 hit.append((m, actual))
+        # 吸血：按全部命中造成的实际伤害合计回血（如吸血剑 lifesteal=0.15）
+        if lifesteal > 0 and hit:
+            heal_amount = round(sum(actual for _, actual in hit) * lifesteal)
+            if heal_amount > 0 and hasattr(player, "heal"):
+                player.heal(heal_amount)
         return hit
 
-    def ranged_attack(self, player, weapon_damage: float, weapon_proj_speed: float, mouse_x: float = 0, mouse_y: float = 0, weapon_special: str = "", debuff_id: str = None, weapon_speed: float = 1.0, attacker_id: int = 0, debuffs: list = None) -> None:
+    def ranged_attack(self, player, weapon_damage: float, weapon_proj_speed: float, mouse_x: float = 0, mouse_y: float = 0, weapon_special: str = "", debuff_id: str = None, weapon_speed: float = 1.0, attacker_id: int = 0, debuffs: list = None, lifesteal: float = 0.0, spread_count: int = 1, spread_angle: float = 0.0) -> None:
         """远程攻击：生成弹丸，支持特殊属性（穿透/爆炸）与附带 debuff
 
         attacker_id：攻击者标识（联机时各玩家独立冷却），默认 0 = 单人模式
         debuffs：弹丸附带的 debuff 列表（元素为 (效果ID, 效果等级) 元组），
                  联机客户端装备附加效果由此携带（debuff_id 保留兼容，二者合并应用）
+        lifesteal：吸血比例（0~1），命中实际伤害的该比例转化为攻击者生命回复
+        spread_count：一次发射的弹丸数量（>1 时散射，如三连散射炮 spread_count=3）
+        spread_angle：相邻弹丸的夹角（度），弹丸围绕鼠标方向均匀分布
         """
         if not self.can_attack(attacker_id):
             return
@@ -125,31 +140,53 @@ class CombatSystem:
         # 冷却时间 = 1 / attack_speed（attack_speed 越高，冷却越短，攻击越快）
         self._cooldowns[attacker_id] = 1.0 / max(0.1, weapon_speed)
 
+        # 角色被动攻击修正（法师+20%/骑士低血+30%/刺客暴击，见 character_skills.py）
+        from game.character_skills import modify_attack_damage  # 延迟导入避免循环依赖
+        weapon_damage = modify_attack_damage(player, weapon_damage)
+
         dx = mouse_x - player.center_x
         dy = mouse_y - player.center_y
         dist = math.hypot(dx, dy)
         if dist == 0:
             return
         speed = weapon_proj_speed if weapon_proj_speed else PROJECTILE_SPEED
-        proj = _PlayerProjectile(
-            player.center_x, player.center_y,
-            mouse_x, mouse_y,
-            speed, round(weapon_damage),
-            special=weapon_special,
-            debuff_id=debuff_id,
-            debuffs=debuffs,
-            owner_net_id=attacker_id,
-        )
-        self.projectiles.append(proj)
+        base_angle = math.atan2(dy, dx)
+        # 散射：以鼠标方向为基准，弹丸按夹角均匀分布（中心对称）
+        count = max(1, int(spread_count))
+        for i in range(count):
+            if count > 1:
+                # 第 i 发相对基准角的偏移：从 -(n-1)/2 到 +(n-1)/2 均匀分布
+                offset = (i - (count - 1) / 2.0) * math.radians(spread_angle)
+                angle = base_angle + offset
+                tx = player.center_x + math.cos(angle) * dist
+                ty = player.center_y + math.sin(angle) * dist
+            else:
+                tx, ty = mouse_x, mouse_y
+            proj = _PlayerProjectile(
+                player.center_x, player.center_y,
+                tx, ty,
+                speed, round(weapon_damage),
+                special=weapon_special,
+                debuff_id=debuff_id,
+                debuffs=debuffs,
+                owner_net_id=attacker_id,
+                owner_player=player,
+                lifesteal=lifesteal,
+            )
+            self.projectiles.append(proj)
 
     def check_monster_hits(self, monsters: arcade.SpriteList) -> list:
         """检查弹丸命中怪物，支持穿透和爆炸效果，返回 [(monster, actual_damage)] 列表"""
         hit_monsters = []  # [(monster, actual_damage)]
         for proj in list(self.projectiles):
+            # 本弹丸独立命中的怪物（吸血按本弹丸实际伤害结算，避免累计其他弹丸命中）
+            proj_hits = []
             hits = arcade.check_for_collision_with_list(proj, monsters)
             if hits:
                 for m in hits:
                     if hasattr(m, 'alive') and m.alive:
+                        # 弹丸命中归属记录（等级经验：主机按 last_attacker_id 判断是否本端玩家击杀）
+                        m.last_attacker_id = proj.owner_net_id
                         # 弹丸附带 debuff 施加到被命中怪物（含权杖随机效果与联机客户端装备附加效果，
                         # 兼容旧 debuff_id：已合并进 proj.debuffs）
                         for eid, lvl in getattr(proj, "debuffs", []):
@@ -160,6 +197,7 @@ class CombatSystem:
                             if m not in [h for h, _ in hit_monsters]:
                                 actual = m.take_damage(proj.damage)
                                 hit_monsters.append((m, actual))
+                                proj_hits.append((m, actual))
                         # 爆炸弹丸：对命中点周围所有怪物造成伤害
                         elif proj.special == "explosive":
                             explosion_radius = 80  # 爆炸范围
@@ -169,17 +207,28 @@ class CombatSystem:
                                 if hasattr(m2, 'alive') and m2.alive:
                                     dist = math.hypot(m2.center_x - m.center_x, m2.center_y - m.center_y)
                                     if dist <= explosion_radius and m2 not in [h for h, _ in hit_monsters]:
+                                        # 爆炸波及怪物同样记录归属（等级经验判定用）
+                                        m2.last_attacker_id = proj.owner_net_id
                                         actual = m2.take_damage(proj.damage)
                                         hit_monsters.append((m2, actual))
+                                        proj_hits.append((m2, actual))
                             proj.remove_from_sprite_lists()
                             break
                         else:
                             actual = m.take_damage(proj.damage)
                             if m not in [h for h, _ in hit_monsters]:
                                 hit_monsters.append((m, actual))
+                                proj_hits.append((m, actual))
                 # 非穿透弹丸命中后移除
                 if proj.special != "penetrating" and proj in self.projectiles:
                     proj.remove_from_sprite_lists()
+            # 吸血：本弹丸命中造成实际伤害后，按比例回复攻击者生命（如吸血剑）
+            if getattr(proj, "lifesteal", 0) > 0 and proj_hits:
+                heal_amount = round(
+                    sum(actual for _, actual in proj_hits) * proj.lifesteal
+                )
+                if heal_amount > 0 and getattr(proj, "owner_player", None) is not None:
+                    proj.owner_player.heal(heal_amount)
         return hit_monsters
 
     def check_projectile_aoe(self, player, aoe_radius: float = ROCKET_TROOP_AOE_RADIUS) -> list:
@@ -327,6 +376,8 @@ class LaserBeam:
             radius = (getattr(m, 'width', 16) + getattr(m, 'height', 16)) / 4.0
             if self._point_segment_distance(m.center_x, m.center_y, sx, sy, ex, ey) <= self.width / 2 + radius:
                 self._target_cooldowns[id(m)] = self._hit_interval
+                # 激光击杀归属记录（等级经验：主机按 last_attacker_id 判断是否本端玩家击杀）
+                m.last_attacker_id = self.owner_net_id
                 actual = m.take_damage(dmg)
                 # 激光附带 debuff 施加到被命中怪物（联机客户端装备附加效果，命中即生效）
                 for eid, lvl in self.debuffs:
@@ -372,7 +423,7 @@ class LaserBeam:
 
 
 class _PlayerProjectile(arcade.SpriteSolidColor):
-    def __init__(self, cx, cy, tx, ty, speed, damage, special=None, debuff_id=None, debuffs=None, owner_net_id: int = 0):
+    def __init__(self, cx, cy, tx, ty, speed, damage, special=None, debuff_id=None, debuffs=None, owner_net_id: int = 0, owner_player=None, lifesteal: float = 0.0):
         super().__init__(PROJECTILE_SIZE, PROJECTILE_SIZE, color=(255, 255, 100))
         self.center_x = cx
         self.center_y = cy
@@ -388,6 +439,10 @@ class _PlayerProjectile(arcade.SpriteSolidColor):
         # 联机：发射者玩家 id（主机序列化 PROJECTILE_SNAPSHOT 用 owner_id 标识，
         # 客户端据此跳过自己发射的弹丸——本地已有纯表现弹丸，避免双重渲染）
         self.owner_net_id = owner_net_id
+        # 弹丸发射者玩家对象（吸血用，命中时按实际伤害比例回血；单机=玩家本人，联机主机=幽灵）
+        self.owner_player = owner_player
+        # 吸血比例（0~1）：命中怪物后按实际伤害的该比例回复攻击者生命
+        self.lifesteal = lifesteal
         # 联机：弹丸网络 id（主机首次序列化时惰性分配，存活期不变）
         self.proj_id = None
         dx = tx - cx

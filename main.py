@@ -29,6 +29,7 @@ class GameState:
     def __init__(self):
         self.player_id: int | None = None          # 玩家数据库 ID（登录后设置）
         self.player_name: str = "hero"              # 玩家名称（默认 "hero"）
+        self.character_id: str = "initial"          # 当前选择角色（initial/mage/knight/assassin，单机/联机共用）
         self.run_carried: dict = {}                 # 本次携带物: {"resource": {id: qty}, "gold": int, "weapon": {id: qty}}
         self.current_weapon_kind: str = "melee"     # 当前武器类型: "melee"(近战) 或 "ranged"(远程)
         self.current_weapon_id: int | None = None   # 当前武器数据库 ID
@@ -60,6 +61,8 @@ class GameState:
         self.net_spawns: dict[int, tuple[int, int]] = {}  # 全房出生点 {player_id: (x, y)}，幽灵出生用
         self.net_ready: bool = False            # 本端是否已准备（开始游戏前全员就绪判定；host 恒为 True）
         self.net_wait_reason: str = ""          # 客户端撤离/死亡后回房等待的原因（evac/dead），大厅提示用
+        self.net_characters: dict = {}          # 联机玩家角色映射 {player_id: character_id}，主机权威维护，
+                                                # 开局前由 SET_CHARACTER 上报更新，ROOM_START 打包下发全房
 
 
 def main():

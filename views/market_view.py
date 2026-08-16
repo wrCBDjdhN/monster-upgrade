@@ -20,6 +20,17 @@ class MarketView(ScrollView):
         # 文本缓存：持久 arcade.Text 对象，复用纹理避免每帧重建文本（消除 PerformanceWarning）
         self._tc = TextCache()
         self.wh_rect = arcade.XYWH(WINDOW_WIDTH - 100, 40, 120, 36)
+        # 顶部分类 Tab 栏：按分类构建内容，切换时重建并归零滚动
+        self._tabs = ["武器", "装备", "药水", "宝箱"]
+        self._tab = "武器"
+        self.tab_rects = {}
+        tab_w, tab_h, gap = 120, 30, 12
+        total_w = len(self._tabs) * tab_w + (len(self._tabs) - 1) * gap
+        start_x = (WINDOW_WIDTH - total_w) // 2
+        for i, name in enumerate(self._tabs):
+            self.tab_rects[name] = arcade.XYWH(
+                start_x + i * (tab_w + gap) + tab_w / 2, WINDOW_HEIGHT - 135, tab_w, tab_h,
+            )
         # 开箱动画状态（支持批量：_box_results 为本次批量开出的结果队列）
         self._box_opening = False
         self._box_open_timer = 0.0
@@ -33,12 +44,15 @@ class MarketView(ScrollView):
         self._build_content()
 
     def _build_content(self):
-        """构建完整内容列表，每项记录类型和逻辑Y坐标"""
+        """构建当前分类页的内容列表，每项记录类型和逻辑Y坐标
+
+        顶部分类 Tab（武器/装备/药水/宝箱）决定只构建对应区块，
+        切换 Tab 时（on_mouse_press 内联处理）重建此列表并归零滚动。
+        """
         self._tc.clear()  # 内容结构重建，清空文本缓存避免旧 key 残留
         self.content_items = []  # [(type, y, data)]
         pid = self.window.game_state.player_id
         weapons = get_weapons(pid)
-        equip = get_equipment(pid)
         gold = get_gold(pid)
 
         # 统计武器数量
@@ -47,212 +61,210 @@ class MarketView(ScrollView):
             key = (w["name"], w["level"])
             weapon_counts[key] = weapon_counts.get(key, 0) + 1
 
-        # 统计装备数量（用于升级判断）
-        equip_counts = {}  # {(name, level): count}
-        # 注意：已装备的不计入可消耗数量
-
         y = 0  # 从0开始计算逻辑Y
 
-        # === 武器升级区域 ===
-        self.content_items.append(("header", y, "─── 武器升级 ───"))
-        self.content_items.append(("subheader", y - 18, "条件: 同名同级武器 x1 + 金币 (伤害+15% 攻速+15%)"))
-        y -= 50
+        if self._tab == "武器":
+            # === 武器升级区域 ===
+            self.content_items.append(("header", y, "─── 武器升级 ───"))
+            self.content_items.append(("subheader", y - 18, "条件: 同名同级武器 x1 + 金币 (伤害+15% 攻速+15%)"))
+            y -= 50
 
-        if weapons:
-            for w in weapons:
-                kind_label = "近战" if w["kind"] == "melee" else "远程"
-                cost = UPGRADE_BASE_COST * w["level"]
-                key = (w["name"], w["level"])
-                has_material = weapon_counts.get(key, 0) >= 2
-                self.content_items.append(("weapon_upgrade", y, {
-                    "id": w["id"], "name": w["name"], "level": w["level"],
-                    "kind": kind_label, "damage": w["damage"], "cost": cost,
-                    "has_material": has_material, "can_upgrade": has_material and gold >= cost,
-                    "effects": w.get("effects") or [],
-                }))
-                y -= 50
-        else:
-            self.content_items.append(("text", y, "(无武器，击杀怪物获取)"))
-            y -= 40
+            if weapons:
+                for w in weapons:
+                    kind_label = "近战" if w["kind"] == "melee" else "远程"
+                    cost = UPGRADE_BASE_COST * w["level"]
+                    key = (w["name"], w["level"])
+                    has_material = weapon_counts.get(key, 0) >= 2
+                    self.content_items.append(("weapon_upgrade", y, {
+                        "id": w["id"], "name": w["name"], "level": w["level"],
+                        "kind": kind_label, "damage": w["damage"], "cost": cost,
+                        "has_material": has_material, "can_upgrade": has_material and gold >= cost,
+                        "effects": w.get("effects") or [],
+                    }))
+                    y -= 50
+            else:
+                self.content_items.append(("text", y, "(无武器，击杀怪物获取)"))
+                y -= 40
 
-        # === 升级头盔（显示全部拥有的头盔）===
-        from db.database import get_equipment_inventory, get_equipment_materials
-        inventory = get_equipment_inventory(pid)
-        owned_helmets = [e for e in inventory if e["slot"] == "helmet"]
-        if owned_helmets:
+            # === 购买武器区域===
             y -= 20
-            self.content_items.append(("header", y, "─── 升级头盔 ───"))
-            self.content_items.append(("subheader", y - 18, "条件: 同名同级头盔 x1 + 金币 (防+15%)"))
+            self.content_items.append(("header", y, "─── 购买武器 ───"))
+            self.content_items.append(("subheader", y - 18, "条件: 金币 (购买后可在仓库装备使用)"))
             y -= 40
-            for helm in owned_helmets:
-                upgrade_cost = helm["defense"] * 30
-                materials = get_equipment_materials(pid, "helmet", helm["name"], helm["level"], exclude_id=helm["id"])
-                has_material = len(materials) > 0
-                status = "★已装备" if helm["is_equipped"] else ""
-                self.content_items.append(("upgrade_helmet", y, {
-                    "name": helm["name"], "defense": helm["defense"], "level": helm["level"],
-                    "cost": upgrade_cost, "can_upgrade": has_material and gold >= upgrade_cost,
-                    "material_id": materials[0] if has_material else None,
-                    "has_material": has_material, "equip_id": helm["id"], "status": status,
-                    "effects": helm.get("effects") or [],
+            for wdef in list(MELEE_WEAPONS.values()) + list(RANGED_WEAPONS.values()):
+                # 拳头是初始武器，不可购买
+                if wdef["item_id"] == "fist":
+                    continue
+                # 神器等价格为0的物品不可在市场购买（仅锻造获得）
+                if wdef.get("price", 100) <= 0:
+                    continue
+                # 受限制武器（枪械/权杖/诅咒弯刀等）不可购买，只能开箱/锻造/掉落获得
+                if wdef.get("market_restricted"):
+                    continue
+                cost = wdef.get("price", 100)
+                kind_label = "近战" if wdef["kind"] == "melee" else "远程"
+                self.content_items.append(("buy_weapon", y, {
+                    "item_id": wdef["item_id"], "name": wdef["name"],
+                    "kind": wdef["kind"], "kind_label": kind_label,
+                    "damage": wdef["damage"], "attack_speed": wdef.get("attack_speed", 1.0),
+                    "range": wdef.get("range", 40), "cost": cost,
+                    "can_buy": gold >= cost,
                 }))
                 y -= 40
 
-        # === 购买头盔 ===
-        y -= 20
-        self.content_items.append(("header", y, "─── 购买头盔 ───"))
-        self.content_items.append(("subheader", y - 18, "条件: 金币 (穿戴后减少受到的伤害)"))
-        y -= 40
-        for item_id, info in HELMETS.items():
-            # 神器等价格为0的物品不可在市场购买（仅锻造获得）
-            if info.get("price", 100) <= 0:
-                continue
-            # 受限制物品（木乃伊头盔等）不可购买，只能开箱/锻造/掉落获得
-            if info.get("market_restricted"):
-                continue
-            cost = info.get("price", 100)
-            self.content_items.append(("buy_helmet", y, {
-                "item_id": item_id, "name": info["name"],
-                "defense": info["defense"], "cost": cost,
-                "can_buy": gold >= cost,
-            }))
-            y -= 40
+        elif self._tab == "装备":
+            # === 升级头盔（显示全部拥有的头盔）===
+            from db.database import get_equipment_inventory, get_equipment_materials
+            inventory = get_equipment_inventory(pid)
+            owned_helmets = [e for e in inventory if e["slot"] == "helmet"]
+            if owned_helmets:
+                y -= 20
+                self.content_items.append(("header", y, "─── 升级头盔 ───"))
+                self.content_items.append(("subheader", y - 18, "条件: 同名同级头盔 x1 + 金币 (防+15%)"))
+                y -= 40
+                for helm in owned_helmets:
+                    upgrade_cost = helm["defense"] * 30
+                    materials = get_equipment_materials(pid, "helmet", helm["name"], helm["level"], exclude_id=helm["id"])
+                    has_material = len(materials) > 0
+                    status = "★已装备" if helm["is_equipped"] else ""
+                    self.content_items.append(("upgrade_helmet", y, {
+                        "name": helm["name"], "defense": helm["defense"], "level": helm["level"],
+                        "cost": upgrade_cost, "can_upgrade": has_material and gold >= upgrade_cost,
+                        "material_id": materials[0] if has_material else None,
+                        "has_material": has_material, "equip_id": helm["id"], "status": status,
+                        "effects": helm.get("effects") or [],
+                    }))
+                    y -= 40
 
-        # === 升级护甲（显示全部拥有的护甲）===
-        owned_armors = [e for e in inventory if e["slot"] == "armor"]
-        if owned_armors:
+            # === 购买头盔 ===
             y -= 20
-            self.content_items.append(("header", y, "─── 升级护甲 ───"))
-            self.content_items.append(("subheader", y - 18, "条件: 同名同级护甲 x1 + 金币 (防+15%)"))
+            self.content_items.append(("header", y, "─── 购买头盔 ───"))
+            self.content_items.append(("subheader", y - 18, "条件: 金币 (穿戴后减少受到的伤害)"))
             y -= 40
-            for arm in owned_armors:
-                upgrade_cost = arm["defense"] * 30
-                materials = get_equipment_materials(pid, "armor", arm["name"], arm["level"], exclude_id=arm["id"])
-                has_material = len(materials) > 0
-                status = "★已装备" if arm["is_equipped"] else ""
-                self.content_items.append(("upgrade_armor", y, {
-                    "name": arm["name"], "defense": arm["defense"], "level": arm["level"],
-                    "cost": upgrade_cost, "can_upgrade": has_material and gold >= upgrade_cost,
-                    "material_id": materials[0] if has_material else None,
-                    "has_material": has_material, "equip_id": arm["id"], "status": status,
-                    "effects": arm.get("effects") or [],
+            for item_id, info in HELMETS.items():
+                # 神器等价格为0的物品不可在市场购买（仅锻造获得）
+                if info.get("price", 100) <= 0:
+                    continue
+                # 受限制物品（木乃伊头盔等）不可购买，只能开箱/锻造/掉落获得
+                if info.get("market_restricted"):
+                    continue
+                cost = info.get("price", 100)
+                self.content_items.append(("buy_helmet", y, {
+                    "item_id": item_id, "name": info["name"],
+                    "defense": info["defense"], "cost": cost,
+                    "can_buy": gold >= cost,
                 }))
                 y -= 40
 
-        # === 购买护甲 ===
-        y -= 20
-        self.content_items.append(("header", y, "─── 购买护甲 ───"))
-        self.content_items.append(("subheader", y - 18, "条件: 金币 (穿戴后减少受到的伤害)"))
-        y -= 40
-        for item_id, info in ARMORS.items():
-            # 神器等价格为0的物品不可在市场购买（仅锻造获得）
-            if info.get("price", 150) <= 0:
-                continue
-            # 受限制物品（木乃伊护甲等）不可购买，只能开箱/锻造/掉落获得
-            if info.get("market_restricted"):
-                continue
-            cost = info.get("price", 150)
-            self.content_items.append(("buy_armor", y, {
-                "item_id": item_id, "name": info["name"],
-                "defense": info["defense"], "cost": cost,
-                "can_buy": gold >= cost,
-            }))
-            y -= 40
+            # === 升级护甲（显示全部拥有的护甲）===
+            owned_armors = [e for e in inventory if e["slot"] == "armor"]
+            if owned_armors:
+                y -= 20
+                self.content_items.append(("header", y, "─── 升级护甲 ───"))
+                self.content_items.append(("subheader", y - 18, "条件: 同名同级护甲 x1 + 金币 (防+15%)"))
+                y -= 40
+                for arm in owned_armors:
+                    upgrade_cost = arm["defense"] * 30
+                    materials = get_equipment_materials(pid, "armor", arm["name"], arm["level"], exclude_id=arm["id"])
+                    has_material = len(materials) > 0
+                    status = "★已装备" if arm["is_equipped"] else ""
+                    self.content_items.append(("upgrade_armor", y, {
+                        "name": arm["name"], "defense": arm["defense"], "level": arm["level"],
+                        "cost": upgrade_cost, "can_upgrade": has_material and gold >= upgrade_cost,
+                        "material_id": materials[0] if has_material else None,
+                        "has_material": has_material, "equip_id": arm["id"], "status": status,
+                        "effects": arm.get("effects") or [],
+                    }))
+                    y -= 40
 
-        # === 购买背包 ===
-        y -= 20
-        self.content_items.append(("header", y, "─── 购买背包 ───"))
-        self.content_items.append(("subheader", y - 18, "条件: 金币 (没有背包不能拾取资源)"))
-        y -= 40
-        for item_id, info in BACKPACKS.items():
-            # 神器等价格为0的物品不可在市场购买（仅锻造获得）
-            if info.get("price", 200) <= 0:
-                continue
-            cost = info.get("price", 200)
-            self.content_items.append(("buy_backpack", y, {
-                "item_id": item_id, "name": info["name"],
-                "capacity": info["capacity"], "cost": cost,
-                "can_buy": gold >= cost,
-            }))
+            # === 购买护甲 ===
+            y -= 20
+            self.content_items.append(("header", y, "─── 购买护甲 ───"))
+            self.content_items.append(("subheader", y - 18, "条件: 金币 (穿戴后减少受到的伤害)"))
             y -= 40
+            for item_id, info in ARMORS.items():
+                # 神器等价格为0的物品不可在市场购买（仅锻造获得）
+                if info.get("price", 150) <= 0:
+                    continue
+                # 受限制物品（木乃伊护甲等）不可购买，只能开箱/锻造/掉落获得
+                if info.get("market_restricted"):
+                    continue
+                cost = info.get("price", 150)
+                self.content_items.append(("buy_armor", y, {
+                    "item_id": item_id, "name": info["name"],
+                    "defense": info["defense"], "cost": cost,
+                    "can_buy": gold >= cost,
+                }))
+                y -= 40
 
-        # === 购买药水 ===
-        y -= 20
-        self.content_items.append(("header", y, "─── 购买药水 ───"))
-        self.content_items.append(("subheader", y - 18, "条件: 金币 (按1-3使用)"))
-        y -= 40
-        for pot_id, info in POTIONS.items():
-            # 价格为0的物品（仙人掌果实等）不可在市场购买（仅沙漠掉落获得）
-            if info.get("price", 50) <= 0:
-                continue
-            # 受限制物品不可购买（与武器/装备判断逻辑保持一致）
-            if info.get("market_restricted"):
-                continue
-            cost = info.get("price", 50)
-            self.content_items.append(("buy_potion", y, {
-                "item_id": pot_id, "name": info["name"],
-                "desc": info.get("description", ""), "cost": cost,
-                "effect": info["effect"], "value": info["value"],
-                "duration": info.get("duration", 0),
-                "can_buy": gold >= cost,
-            }))
+            # === 购买背包 ===
+            y -= 20
+            self.content_items.append(("header", y, "─── 购买背包 ───"))
+            self.content_items.append(("subheader", y - 18, "条件: 金币 (没有背包不能拾取资源)"))
             y -= 40
+            for item_id, info in BACKPACKS.items():
+                # 神器等价格为0的物品不可在市场购买（仅锻造获得）
+                if info.get("price", 200) <= 0:
+                    continue
+                cost = info.get("price", 200)
+                self.content_items.append(("buy_backpack", y, {
+                    "item_id": item_id, "name": info["name"],
+                    "capacity": info["capacity"], "cost": cost,
+                    "can_buy": gold >= cost,
+                }))
+                y -= 40
 
-        # === 购买武器区域===
-        y -= 20
-        self.content_items.append(("header", y, "─── 购买武器 ───"))
-        self.content_items.append(("subheader", y - 18, "条件: 金币 (购买后可在仓库装备使用)"))
-        y -= 40
-        for wdef in list(MELEE_WEAPONS.values()) + list(RANGED_WEAPONS.values()):
-            # 拳头是初始武器，不可购买
-            if wdef["item_id"] == "fist":
-                continue
-            # 神器等价格为0的物品不可在市场购买（仅锻造获得）
-            if wdef.get("price", 100) <= 0:
-                continue
-            # 受限制武器（枪械/权杖/诅咒弯刀等）不可购买，只能开箱/锻造/掉落获得
-            if wdef.get("market_restricted"):
-                continue
-            cost = wdef.get("price", 100)
-            kind_label = "近战" if wdef["kind"] == "melee" else "远程"
-            self.content_items.append(("buy_weapon", y, {
-                "item_id": wdef["item_id"], "name": wdef["name"],
-                "kind": wdef["kind"], "kind_label": kind_label,
-                "damage": wdef["damage"], "attack_speed": wdef.get("attack_speed", 1.0),
-                "range": wdef.get("range", 40), "cost": cost,
-                "can_buy": gold >= cost,
-            }))
+        elif self._tab == "药水":
+            # === 购买药水 ===
+            self.content_items.append(("header", y, "─── 购买药水 ───"))
+            self.content_items.append(("subheader", y - 18, "条件: 金币 (按1-3使用)"))
             y -= 40
+            for pot_id, info in POTIONS.items():
+                # 价格为0的物品（仙人掌果实等）不可在市场购买（仅沙漠掉落获得）
+                if info.get("price", 50) <= 0:
+                    continue
+                # 受限制物品不可购买（与武器/装备判断逻辑保持一致）
+                if info.get("market_restricted"):
+                    continue
+                cost = info.get("price", 50)
+                self.content_items.append(("buy_potion", y, {
+                    "item_id": pot_id, "name": info["name"],
+                    "desc": info.get("description", ""), "cost": cost,
+                    "effect": info["effect"], "value": info["value"],
+                    "duration": info.get("duration", 0),
+                    "can_buy": gold >= cost,
+                }))
+                y -= 40
 
-        # === 武器箱区域 ===
-        y -= 20
-        self.content_items.append(("header", y, "─── 武器箱 ───"))
-        self.content_items.append(("subheader", y - 18, "条件: 金币 (随机获得一把武器)"))
-        y -= 40
-        for box_id, box in WEAPON_BOXES.items():
-            cost = box["price"]
-            self.content_items.append(("buy_box", y, {
-                "box_id": box_id, "name": box["name"],
-                "desc": box["description"], "color": box["color"],
-                "cost": cost, "box_type": "weapon",
-                "can_buy": gold >= cost,
-            }))
+        else:  # 宝箱
+            # === 武器箱区域 ===
+            self.content_items.append(("header", y, "─── 武器箱 ───"))
+            self.content_items.append(("subheader", y - 18, "条件: 金币 (随机获得一把武器)"))
             y -= 40
+            for box_id, box in WEAPON_BOXES.items():
+                cost = box["price"]
+                self.content_items.append(("buy_box", y, {
+                    "box_id": box_id, "name": box["name"],
+                    "desc": box["description"], "color": box["color"],
+                    "cost": cost, "box_type": "weapon",
+                    "can_buy": gold >= cost,
+                }))
+                y -= 40
 
-        # === 装备箱区域 ===
-        y -= 20
-        self.content_items.append(("header", y, "─── 装备箱 ───"))
-        self.content_items.append(("subheader", y - 18, "条件: 金币 (随机获得一件装备)"))
-        y -= 40
-        for box_id, box in EQUIPMENT_BOXES.items():
-            cost = box["price"]
-            self.content_items.append(("buy_box", y, {
-                "box_id": box_id, "name": box["name"],
-                "desc": box["description"], "color": box["color"],
-                "cost": cost, "box_type": "equipment",
-                "can_buy": gold >= cost,
-            }))
+            # === 装备箱区域 ===
+            y -= 20
+            self.content_items.append(("header", y, "─── 装备箱 ───"))
+            self.content_items.append(("subheader", y - 18, "条件: 金币 (随机获得一件装备)"))
             y -= 40
+            for box_id, box in EQUIPMENT_BOXES.items():
+                cost = box["price"]
+                self.content_items.append(("buy_box", y, {
+                    "box_id": box_id, "name": box["name"],
+                    "desc": box["description"], "color": box["color"],
+                    "cost": cost, "box_type": "equipment",
+                    "can_buy": gold >= cost,
+                }))
+                y -= 40
 
         self.content_height = abs(y) + 300  # 总内容高度（多加一些确保能滚到底）
 
@@ -272,7 +284,7 @@ class MarketView(ScrollView):
 
         # 1) 记录锚点：视口内第一个有唯一标识的可见项及其屏幕Y
         anchor = None
-        content_top = WINDOW_HEIGHT - 125  # 与 on_draw / on_mouse_press 一致
+        content_top = WINDOW_HEIGHT - 160  # 与 on_draw / on_mouse_press 一致（下方为 Tab 栏）
         for item_type, item_y, data in self.content_items:
             key = _item_key(item_type, data)
             if key is None:
@@ -347,11 +359,19 @@ class MarketView(ScrollView):
         if equip_text:
             self._tc.text("equip_now", f"当前装备: {equip_text}", 60, WINDOW_HEIGHT - 100,
                           arcade.color.CORNFLOWER_BLUE, 11)
-            content_top = WINDOW_HEIGHT - 125
         else:
             self._tc.text("equip_now", "当前装备: 无", 60, WINDOW_HEIGHT - 100,
                           arcade.color.GRAY, 11)
-            content_top = WINDOW_HEIGHT - 125
+        content_top = WINDOW_HEIGHT - 160  # 内容区顶部（下方固定 Tab 栏）
+
+        # === 顶部 Tab 栏（固定，不随内容滚动）===
+        for name, rect in self.tab_rects.items():
+            active = (name == self._tab)
+            bg = (80, 130, 80) if active else (50, 55, 65)
+            arcade.draw_rect_filled(rect, bg)
+            self._tc.text(f"tab_{name}", name, rect.center_x, rect.center_y,
+                          arcade.color.WHITE if active else arcade.color.LIGHT_GRAY,
+                          15, anchor_x="center", anchor_y="center")
 
         # === 可滚动内容 ===
         for i, (item_type, item_y, data) in enumerate(self.content_items):
@@ -450,17 +470,8 @@ class MarketView(ScrollView):
                 self._tc.text(f"buy_box_btn_{i}", f"购买({data['cost']}G)", btn.center_x, btn.center_y,
                               arcade.color.WHITE, 10, anchor_x="center", anchor_y="center")
 
-        # 滚动条
-        if self.content_height > content_top - 60:
-            view_h = content_top - 60
-            bar_h = max(30, view_h * view_h / self.content_height)
-            # offset越大 → bar越往下
-            max_scroll = max(1, self.content_height - 400)
-            bar_y = content_top - bar_h - (view_h - bar_h) * self.scroll_offset / max_scroll
-            arcade.draw_rect_filled(
-                arcade.XYWH(WINDOW_WIDTH - 12, bar_y, 6, bar_h),
-                (120, 120, 120),
-            )
+        # 滚动条（基类统一绘制 + 支持鼠标拖拽）
+        self.draw_scrollbar(content_top)
 
         # === 固定底部导航 ===
         arcade.draw_rect_filled(self.back_rect, arcade.color.DARK_RED)
@@ -550,9 +561,22 @@ class MarketView(ScrollView):
             self.window.show_view(WarehouseView(self.window_ref))
             return
 
+        # 顶部 Tab 栏切换分类
+        for name, rect in self.tab_rects.items():
+            if rect.point_in_rect((x, y)):
+                if name != self._tab:
+                    self._tab = name
+                    self.scroll_offset = 0.0  # 切换分类时归零滚动
+                    self._build_content()
+                return
+
         # 计算内容区域顶部（须与 on_draw 完全一致）
         get_equipment(pid)  # 保持与绘制时一致的状态读取
-        content_top = WINDOW_HEIGHT - 125
+        content_top = WINDOW_HEIGHT - 160
+
+        # 右侧滚动条拖拽
+        if self.start_scroll_drag(x, y, content_top):
+            return
 
         # 检测可滚动内容中的按钮点击
         for item_type, item_y, data in self.content_items:
@@ -681,7 +705,10 @@ class MarketView(ScrollView):
             return
 
     def on_mouse_motion(self, x, y, dx, dy):
-        """滑块拖拽时实时更新数量"""
+        """滚动条拖拽实时滚动；滑块拖拽时实时更新数量"""
+        if self._scroll_dragging:
+            self.update_scroll_drag(x, y)
+            return
         st = self._bulk_state
         if st and st["dragging"]:
             track_left = 640 - 215
@@ -689,7 +716,8 @@ class MarketView(ScrollView):
             self._set_qty(round((x - track_left) / track_w * (st["max_qty"] - 1)) + 1)
 
     def on_mouse_release(self, x, y, button, modifiers):
-        """松开鼠标：结束滑块拖拽"""
+        """松开鼠标：结束滚动条拖拽与滑块拖拽"""
+        self.end_scroll_drag()
         if self._bulk_state:
             self._bulk_state["dragging"] = False
 

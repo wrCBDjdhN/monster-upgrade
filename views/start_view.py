@@ -183,5 +183,6 @@ class StartView(arcade.View):
             init_db()
             gs = self.window.game_state
             gs.player_id = get_or_create_player(gs.player_name)
-            from views.map_select_view import MapSelectView
-            self.window.show_view(MapSelectView(self.window_ref))
+            # 角色系统：单机流程 开始游戏 → 角色选择 → 地图选择（角色选择页内可购买）
+            from views.character_select_view import CharacterSelectView
+            self.window.show_view(CharacterSelectView(self.window_ref))

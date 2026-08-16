@@ -101,6 +101,62 @@ MELEE_WEAPONS = {
         "capacity_cost": 3,
         "artifact": True,  # 神器标记
     },
+    "storm_hammer": {
+        "kind": "melee",
+        "item_id": "storm_hammer",
+        "name": "雷神之锤",
+        "damage": 95,
+        "attack_speed": 0.6,  # 慢速重击流
+        "range": 110,
+        "price": 0,
+        "color": (180, 200, 255),  # 蓝白色=雷电
+        "shape": "mace",
+        "capacity_cost": 3,
+        "debuff": "stun",  # 命中眩晕目标（控场）
+        "artifact": True,
+    },
+    "frost_blade": {
+        "kind": "melee",
+        "item_id": "frost_blade",
+        "name": "霜之哀伤",
+        "damage": 70,
+        "attack_speed": 1.4,  # 中速风筝流
+        "range": 130,
+        "price": 0,
+        "color": (100, 180, 255),  # 冰蓝色=冰冻
+        "shape": "sword",
+        "capacity_cost": 3,
+        "debuff": "freeze",  # 命中冰冻目标（减速50%）
+        "artifact": True,
+    },
+    "flame_blade": {
+        "kind": "melee",
+        "item_id": "flame_blade",
+        "name": "赤焰魔剑",
+        "damage": 75,
+        "attack_speed": 1.6,  # 高攻速输出流
+        "range": 120,
+        "price": 0,
+        "color": (255, 100, 40),  # 红橙色=火焰
+        "shape": "sword",
+        "capacity_cost": 3,
+        "debuff": "burn",  # 命中点燃目标（DOT伤害）
+        "artifact": True,
+    },
+    "vampiric_blade": {
+        "kind": "melee",
+        "item_id": "vampiric_blade",
+        "name": "吸血剑",
+        "damage": 85,
+        "attack_speed": 1.2,
+        "range": 120,
+        "price": 0,
+        "color": (200, 30, 60),  # 血红色
+        "shape": "sword",
+        "capacity_cost": 3,
+        "lifesteal": 0.15,  # 造成伤害的15%转化为生命回复
+        "artifact": True,
+    },
 }
 
 # 远程武器：damage, attack_speed, projectile_speed, range(射程)
@@ -249,6 +305,83 @@ RANGED_WEAPONS = {
         "capacity_cost": 3,
         "special": "laser",  # 持续激光，实时跟随鼠标方向，可穿透墙壁
         "artifact": True,  # 神器标记
+    },
+    "annihilation_cannon": {
+        "kind": "ranged",
+        "item_id": "annihilation_cannon",
+        "name": "湮灭炮",
+        "damage": 90,
+        "attack_speed": 0.5,  # 慢速重型攻坚
+        "projectile_speed": PROJECTILE_SPEED + 150,
+        "range": 320,
+        "price": 0,
+        "color": (160, 40, 40),  # 暗红色=毁灭
+        "shape": "gun",
+        "capacity_cost": 4,
+        "special": "explosive",  # 爆炸范围伤害（AOE清群）
+        "artifact": True,
+    },
+    "piercing_bow": {
+        "kind": "ranged",
+        "item_id": "piercing_bow",
+        "name": "贯穿之弓",
+        "damage": 45,
+        "attack_speed": 2.5,  # 极速连射
+        "projectile_speed": PROJECTILE_SPEED + 150,
+        "range": 400,
+        "price": 0,
+        "color": (0, 220, 180),  # 青绿色
+        "shape": "bow",
+        "capacity_cost": 2,
+        "special": "penetrating",  # 穿透弹丸（清线）
+        "artifact": True,
+    },
+    "plague_staff": {
+        "kind": "ranged",
+        "item_id": "plague_staff",
+        "name": "瘟疫法杖",
+        "damage": 40,
+        "attack_speed": 1.5,
+        "projectile_speed": PROJECTILE_SPEED + 80,
+        "range": 350,
+        "price": 0,
+        "color": (90, 160, 60),  # 墨绿色=瘟疫
+        "shape": "staff",
+        "capacity_cost": 3,
+        "random_debuff": True,  # 每颗子弹随机附带一种 debuff（全异常流）
+        "artifact": True,
+    },
+    "tri_shot_cannon": {
+        "kind": "ranged",
+        "item_id": "tri_shot_cannon",
+        "name": "三连散射炮",
+        "damage": 30,
+        "attack_speed": 1.5,
+        "projectile_speed": PROJECTILE_SPEED + 100,
+        "range": 300,
+        "price": 0,
+        "color": (255, 170, 60),  # 橙黄色
+        "shape": "gun",
+        "capacity_cost": 3,
+        "spread_count": 3,  # 一次发射3发弹丸
+        "spread_angle": 8.0,  # 相邻弹丸夹角（度）
+        "artifact": True,
+    },
+    "frost_aura_staff": {
+        "kind": "ranged",
+        "item_id": "frost_aura_staff",
+        "name": "冰霜领域",
+        "damage": 50,
+        "attack_speed": 0.9,
+        "projectile_speed": PROJECTILE_SPEED + 50,
+        "range": 280,
+        "price": 0,
+        "color": (140, 220, 255),  # 淡蓝色=冰霜
+        "shape": "staff",
+        "capacity_cost": 3,
+        "aura_slow": True,  # 攻速光环：持续减速周围怪物
+        "aura_radius": 220,  # 光环生效半径
+        "artifact": True,
     },
 }
 

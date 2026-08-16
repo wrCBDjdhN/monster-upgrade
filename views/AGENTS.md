@@ -1,6 +1,6 @@
 # views/ - UI 视图层
 
-**Updated:** 2026-08-11 | **Files:** 11 | **Lines:** ~3,720
+**Updated:** 2026-08-16 | **Files:** 12 | **Lines:** ~6,546
 
 ## OVERVIEW
 全部界面，均为 `arcade.View` 子类（`text_cache.py` 除外，是文本缓存工具类）。切换用 `window.show_view()`；共享状态一律走 `window.game_state`（main.GameState）。
@@ -10,7 +10,8 @@
 |------|------|------|
 | 开始界面（携带武器显示 + 功能入口按钮） | start_view.py | 入口按钮模式样板，导航枢纽；init_db/get_or_create_player 引导点 |
 | 地图选择（3 地图 forest/desert/space） | map_select_view.py | 地图种子选择（先写 seed/theme 再 gv.setup()） |
-| 主游戏视图（**最大,995 行**） | game_view.py | HUD、世界/屏幕坐标标签、实体生成编排、委托 game/ 层 |
+| 联机大厅（建房/加入/观战） | lobby_view.py | 联机入口：主机建房/客户端加入、全员就绪开局、观战（net_mode 判定） |
+| 主游戏视图（**最大,3038 行**） | game_view.py | HUD、世界/屏幕坐标标签、实体生成编排、委托 game/ 层 |
 | 仓库 | warehouse_view.py | 物品管理（资源/武器/装备售卖） |
 | 市场 | market_view.py | 买卖 + 开箱动画（856 行，第二大） |
 | 锻造坊（升级） | forge_view.py | 材料合成 + 神器，含纯函数 forge_result_level/merge_forge_effects |

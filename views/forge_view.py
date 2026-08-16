@@ -4,7 +4,8 @@
 - 材料：Lv.5 及以上的武器（不含当前已装备的）和未装备的 Lv.5+ 装备，至少选择2件
 - 费用：FORGE_BASE_COST(200) + 材料平均等级 × FORGE_PER_LEVEL_COST(20)，随材料等级递增
 - 结果：结果等级 = 两材料等级相加 ± 随机(0~2)（普通与神器统一）；两材料同名效果合并并 +1 级（上限5级）；
-  20% 获得一件神器（神器同样使用相加公式，且继承合并效果）
+  神器概率按材料组合动态判定：两件普通 20%、一件神器+一件普通 60%、两件神器 100%
+  （神器同样使用相加公式，且继承合并效果）
 """
 
 import arcade
@@ -13,6 +14,8 @@ from config import (
     WINDOW_WIDTH, WINDOW_HEIGHT,
     FORGE_BASE_COST, FORGE_PER_LEVEL_COST, upgrade_mult_product,
     ALL_WEAPON_IDS, ALL_EQUIP_POOL,
+    FORGE_ARTIFACT_CHANCE_NONE, FORGE_ARTIFACT_CHANCE_MIXED,
+    FORGE_ARTIFACT_CHANCE_DOUBLE,
 )
 from db.database import (
     get_weapons, get_equipment_inventory, get_gold,
@@ -28,8 +31,6 @@ from views.text_cache import TextCache
 
 # 材料最低等级
 FORGE_MIN_LEVEL = 5
-# 神器概率（20%）
-ARTIFACT_CHANCE = 0.2
 # 普通结果等级浮动范围（两材料等级相加 ± 0~2）
 FORGE_LEVEL_VARIATION = 2
 
@@ -197,7 +198,7 @@ class ForgeView(ScrollView):
         self._tc.text(
             "header_rule",
             "消耗至少2件Lv.5+材料，费用随材料等级递增；结果等级=材料等级相加±2，"
-            "同名效果合并升级，20%获得神器",
+            "同名效果合并升级，神器概率：2普通20% / 1神器+1普通60% / 2神器100%",
             WINDOW_WIDTH // 2, WINDOW_HEIGHT - 80,
                          arcade.color.GRAY, 11, anchor_x="center")
         # 已选材料数（动态显示）
@@ -336,7 +337,8 @@ class ForgeView(ScrollView):
     def _do_forge(self):
         """执行锻造：扣动态费用 + 消耗材料 + 合并效果 + 随机产出
 
-        结果等级 = 两材料等级相加 ± 随机(0~2)（下限1）；同名效果合并并+1级；20% 神器
+        结果等级 = 两材料等级相加 ± 随机(0~2)（下限1）；同名效果合并并+1级；
+        神器概率按材料组合动态判定：两件普通 20%、一件神器+一件普通 60%、两件神器 100%
         """
         pid = self.window.game_state.player_id
         if len(self.selected) < 2:
@@ -346,18 +348,27 @@ class ForgeView(ScrollView):
         if gold < forge_cost:
             return
 
-        # 反查两件材料的等级与效果（删除前）
+        # 反查两件材料的等级、效果与是否神器（删除前；神器判定 = defs 中 artifact=True）
         weapons = {w["id"]: w for w in get_weapons(pid)}
         equips = {e["id"]: e for e in get_equipment_inventory(pid)}
         mat_levels = []
         mat_effects = []
+        mat_artifact_counts = 0
         for mtype, mid in self.selected:
             if mtype == "weapon" and mid in weapons:
                 mat_levels.append(weapons[mid]["level"])
                 mat_effects.append(weapons[mid].get("effects", []))
+                wid = weapons[mid]["item_id"]
+                wdef = MELEE_WEAPONS.get(wid) or RANGED_WEAPONS.get(wid)
+                if wdef and wdef.get("artifact"):
+                    mat_artifact_counts += 1
             elif mtype == "equipment" and mid in equips:
                 mat_levels.append(equips[mid]["level"])
                 mat_effects.append(equips[mid].get("effects", []))
+                eid = equips[mid]["item_id"]
+                edef = HELMETS.get(eid) or ARMORS.get(eid) or BACKPACKS.get(eid)
+                if edef and edef.get("artifact"):
+                    mat_artifact_counts += 1
 
         # 扣除金币
         if not spend_gold(pid, forge_cost):
@@ -380,8 +391,15 @@ class ForgeView(ScrollView):
         # 结果等级 = 两材料等级相加 ± 2（普通与神器统一，用户需求：神器不再随机等级）
         result_level = forge_result_level(mat_levels)
 
-        # 判定结果：20% 神器，80% 普通（两者等级均用相加公式）
-        if random.random() < ARTIFACT_CHANCE:
+        # 判定结果：神器概率按材料中神器数量动态调整
+        # （两件普通 20%、一件神器+一件普通 60%、两件神器 100%；等级均用相加公式）
+        if mat_artifact_counts >= 2:
+            artifact_chance = FORGE_ARTIFACT_CHANCE_DOUBLE
+        elif mat_artifact_counts == 1:
+            artifact_chance = FORGE_ARTIFACT_CHANCE_MIXED
+        else:
+            artifact_chance = FORGE_ARTIFACT_CHANCE_NONE
+        if random.random() < artifact_chance:
             artifact = random.choice(ARTIFACTS)
             result = self._grant_artifact(pid, artifact, result_level, merged_effects)
         else:

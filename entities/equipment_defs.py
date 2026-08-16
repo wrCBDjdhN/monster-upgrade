@@ -56,6 +56,15 @@ HELMETS = {
         "capacity_cost": 3,
         "artifact": True,  # 神器标记
     },
+    "holy_crown": {
+        "name": "圣光冠冕",
+        "defense": 80,  # 强相互作用力头盔（60）上位版
+        "price": 0,
+        "color": (255, 215, 80),  # 金色=圣光
+        "description": "由神圣之光凝聚而成，防御远超普通头盔",
+        "capacity_cost": 3,
+        "artifact": True,
+    },
 }
 
 # ── 护甲 ──
@@ -113,6 +122,15 @@ ARMORS = {
         "description": "由强相互作用力材料制成，防御力极高",
         "capacity_cost": 3,
         "artifact": True,  # 神器标记
+    },
+    "dragon_scale_armor": {
+        "name": "龙鳞战甲",
+        "defense": 130,  # 强相互作用力护甲（100）上位版
+        "price": 0,
+        "color": (180, 40, 40),  # 深红色=龙鳞
+        "description": "由巨龙鳞片锻造而成，坚不可摧",
+        "capacity_cost": 3,
+        "artifact": True,
     },
 }
 

@@ -34,6 +34,8 @@ def init_db():
     3. weapons: 武器（含伤害、攻速、等级）
     4. equipment: 装备（头盔/护甲/背包，含防御力、容量）
     5. potions: 药水（含效果、数值、持续时间）
+    6. character_unlocks: 角色解锁记录（购买过的付费角色）
+    7. character_levels: 角色等级（等级/经验/待选升级次数/永久属性加成，按角色独立）
     """
     with _conn() as c:
         # 玩家表
@@ -94,6 +96,35 @@ def init_db():
                 value REAL NOT NULL,
                 duration REAL NOT NULL DEFAULT 0,
                 quantity INTEGER NOT NULL DEFAULT 1,
+                FOREIGN KEY(player_id) REFERENCES players(id)
+            )
+        """)
+        # 角色解锁表（付费角色购买记录；初始角色免费自带，不写入本表）
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS character_unlocks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                player_id INTEGER NOT NULL,
+                character_id TEXT NOT NULL,
+                unlocked_at TEXT NOT NULL,
+                UNIQUE(player_id, character_id),
+                FOREIGN KEY(player_id) REFERENCES players(id)
+            )
+        """)
+        # 角色等级表（等级/经验/待选升级次数/永久属性加成，按 (player_id, character_id) 独立）
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS character_levels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                player_id INTEGER NOT NULL,
+                character_id TEXT NOT NULL,
+                level INTEGER NOT NULL DEFAULT 1,
+                exp INTEGER NOT NULL DEFAULT 0,
+                pending_choices INTEGER NOT NULL DEFAULT 0,
+                bonus_hp REAL NOT NULL DEFAULT 0,
+                bonus_damage REAL NOT NULL DEFAULT 0,
+                bonus_defense REAL NOT NULL DEFAULT 0,
+                bonus_speed REAL NOT NULL DEFAULT 0,
+                bonus_atk_speed REAL NOT NULL DEFAULT 0,
+                UNIQUE(player_id, character_id),
                 FOREIGN KEY(player_id) REFERENCES players(id)
             )
         """)
@@ -162,3 +193,9 @@ from db.warehouse import add_warehouse_item, get_warehouse, sell_warehouse_item 
 
 # 药水管理
 from db.potions import add_potion, get_potions, use_potion, remove_potion  # noqa: F401, E402
+
+# 角色管理（购买解锁持久化）
+from db.characters import get_unlocked_characters, is_character_unlocked, unlock_character  # noqa: F401, E402
+
+# 角色等级管理（等级/经验/待选升级/永久加成）
+from db.levels import get_character_levels, add_exp, choose_bonus  # noqa: F401, E402

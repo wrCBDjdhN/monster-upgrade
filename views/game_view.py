@@ -8,7 +8,7 @@ import time  # 联机 ATTACK_EVENT 时间戳（毫秒）
 import arcade
 from config import (
     WINDOW_WIDTH, WINDOW_HEIGHT, PLAYER_HP,
-    PLAYER_SIZE, PLAYER_COLOR, TILE_SIZE,
+    PLAYER_SIZE, PLAYER_COLOR, TILE_SIZE, PLAYER_SPEED,
     EVAC_COLOR, EVAC_RADIUS,
     WELL_HEAL, WELL_SPEED_MULT, WELL_SPEED_DURATION,
     CACTUS_THORN_DAMAGE,  # 仙人掌反伤：客户端近战攻击环境物命中时作用于攻击者（幽灵）
@@ -20,6 +20,10 @@ from config import (
     NET_ACTION_TIME_BCAST_SEC,  # 行动时间广播间隔（主机每秒广播剩余行动时间）
     PROJECTILE_SIZE,  # 标准弹丸边长（客户端远端弹丸纯表现层渲染尺寸）
     DROP_PICKUP_RADIUS,  # 掉落物拾取半径（主机拾取仲裁距离阈值，Todo 18）
+    LIFESTEAL_DEFAULT, SPREAD_COUNT_DEFAULT, SPREAD_ANGLE_DEFAULT,  # 武器扩展机制默认值（吸血/散射）
+    AURA_SLOW_TICK, AURA_SLOW_LEVEL,  # 攻速光环：减速结算周期与效果等级
+    # 等级系统：击杀/撤离经验常量（客户端击杀结算用）
+    EXP_KILL_BASE, EXP_BOSS_MULT, EXP_EVAC,
 )
 from net.protocol import MsgType  # 联机消息类型枚举（MONSTER_SNAPSHOT 等）
 from game.map_gen import generate_map
@@ -41,6 +45,7 @@ from game.entity_callbacks import (
     on_monster_death, handle_harvestable_combat, on_harvestable_destroyed,
     handle_chest_interaction, handle_well_interaction, spawn_chest_loot,
     get_drop_display_name, scatter_drops, sync_obstacles,
+    _award_exp,  # 等级经验发放（客户端击杀/撤离经验共用，各端本地结算）
 )
 from game.respawn import respawn_harvestables, respawn_monsters
 from game.rendering import render_game
@@ -257,6 +262,9 @@ class GameView(arcade.View):
         self._monster_sprite_list = arcade.SpriteList()
         # 行动时间倒计时（space=8min, forest/desert=5min）
         self._action_time_remaining = None  # None=无限，float=剩余秒数
+        # 角色等级数据缓存（等级/经验/待选升级/永久加成）：setup 读取、经验发放时刷新，
+        # HUD 与升级面板（level_up_view）共用，避免每帧查库
+        self._level_data = None
 
     def setup(self):
         gs = self.window.game_state
@@ -288,7 +296,8 @@ class GameView(arcade.View):
             sx, sy = gs.net_spawn
         else:
             sx, sy = self.map_data["rooms"][0].center if self.map_data["rooms"] else (400, 400)
-        self.player = Player(center_x=sx, center_y=sy)
+        self.player = Player(center_x=sx, center_y=sy,
+                             character_id=getattr(gs, "character_id", "initial"))
 
         # 加载装备属性
         equip = {}
@@ -319,13 +328,14 @@ class GameView(arcade.View):
                         if edata.get("type") == "passive":
                             pdata = effect_params(eid, elvl)
                             if eid == "max_hp":
-                                self.player.max_hp += pdata.get("value", 25)
-                                self.player.hp += pdata.get("value", 25)
+                                self.player.max_hp += int(pdata.get("value", 25))
+                                self.player.hp += int(pdata.get("value", 25))
                             elif eid == "regen":
                                 self.player.regen_per_sec += pdata.get("value", 1)
                             elif eid == "speed":
                                 self.player.gear_speed_mult *= (1.0 + pdata.get("value", 0.30))
-            self.player.defense = total_def
+            # 总防御 = 角色基础防御（骑士 +10）+ 装备防御；原代码直接覆盖会丢失角色基础防御
+            self.player.defense = self.player.base_defense + total_def
             self.player.backpack_capacity = get_backpack_capacity(gs.player_id)
             gs.backpack_capacity = self.player.backpack_capacity  # 同步到 GameState 供其他 View 使用
 
@@ -504,6 +514,17 @@ class GameView(arcade.View):
                 gs.weapon_proj_speed = 0
                 gs.weapon_special = ""
                 gs.weapon_auto_fire = False
+            # 武器扩展机制：吸血/散射/光环（从武器定义读取，供攻击与光环结算使用）
+            # 修复：DB 武器记录不含扩展字段（仅 id/item_id/kind/name/damage/attack_speed/level/effects），
+            # 此前从 w（DB 记录）取值恒为默认值 → 三连散射炮只发射 1 发/吸血剑不吸血/冰霜领域光环不生效。
+            # 改为按 item_id 从 ALL_WEAPONS 武器定义读取，与拾取武器路径（本文件 _equip_pickup 附近）口径一致。
+            from entities.weapon_defs import ALL_WEAPONS
+            wdef_full = ALL_WEAPONS.get(w["item_id"], {})
+            gs.weapon_lifesteal = wdef_full.get("lifesteal", LIFESTEAL_DEFAULT)
+            gs.weapon_spread_count = wdef_full.get("spread_count", SPREAD_COUNT_DEFAULT)
+            gs.weapon_spread_angle = wdef_full.get("spread_angle", SPREAD_ANGLE_DEFAULT)
+            gs.weapon_aura_slow = wdef_full.get("aura_slow", False)
+            gs.weapon_aura_radius = wdef_full.get("aura_radius", 0)
         else:
             gs.current_weapon_kind = "melee"
             gs.current_weapon_id = None
@@ -514,9 +535,39 @@ class GameView(arcade.View):
             gs.weapon_proj_speed = 0
             gs.weapon_special = ""
             gs.weapon_auto_fire = False
+            gs.weapon_lifesteal = LIFESTEAL_DEFAULT
+            gs.weapon_spread_count = SPREAD_COUNT_DEFAULT
+            gs.weapon_spread_angle = SPREAD_ANGLE_DEFAULT
+            gs.weapon_aura_slow = False
+            gs.weapon_aura_radius = 0
+
+        # ── 角色等级系统：应用永久加成（等级绑定职业，各端本地结算）──
+        # 从 character_levels 表读取等级/经验/永久加成并缓存到 _level_data（HUD/升级面板共用）；
+        # 血量/防御/移速叠加到玩家实体，伤害/攻速叠加到武器数值。
+        # 伤害/攻速加成同时缓存到 gs.level_bonus_*，供 _apply_free_equip 拾取武器时叠加
+        # （拾取新武器会重置 weapon_damage/weapon_speed，需在此补回等级加成，否则加成丢失）。
+        self._level_data = None
+        if gs.player_id:
+            from db.database import get_character_levels
+            ld = get_character_levels(gs.player_id, getattr(gs, "character_id", "initial"))
+            self._level_data = ld
+            # 血量/防御：叠加到玩家实体（防御在装备计算之后叠加，避免被基础防御+装备覆盖）
+            self.player.max_hp += int(ld["bonus_hp"])
+            self.player.hp += int(ld["bonus_hp"])
+            self.player.defense += ld["bonus_defense"]
+            # 移速：bonus_speed 单位像素/帧，折算为倍率叠加到角色基础移速倍率
+            # （实际移速 = PLAYER_SPEED × effective_speed_mult，effective = char_speed_mult × 药水 × debuff）
+            self.player.char_speed_mult += ld["bonus_speed"] / PLAYER_SPEED
+            # 伤害/攻速：叠加到武器数值，并缓存供 _apply_free_equip 拾取武器时叠加
+            gs.level_bonus_damage = ld["bonus_damage"]
+            gs.level_bonus_atk_speed = ld["bonus_atk_speed"]
+            gs.weapon_damage += ld["bonus_damage"]
+            gs.weapon_speed += ld["bonus_atk_speed"]
 
         # 战斗系统 - CombatSystem 只需要 wall_list 用于弹丸碰撞检测
         self.combat = CombatSystem(self.wall_list)
+        # 攻速光环结算计时器（冰霜领域神器：每 AURA_SLOW_TICK 秒对周围怪物施加减速）
+        self._aura_tick = 0.0
 
         # 撤离状态
         self.evac = EvacState()
@@ -565,8 +616,8 @@ class GameView(arcade.View):
                     elif eid == "speed":
                         self.player.gear_speed_mult *= (1.0 + pdata["value"])
                     elif eid == "max_hp":
-                        self.player.max_hp += pdata.get("value", 25)
-                        self.player.hp += pdata.get("value", 25)
+                        self.player.max_hp += int(pdata.get("value", 25))
+                        self.player.hp += int(pdata.get("value", 25))
                 elif etype == "debuff":
                     self._attack_debuffs.append((eid, elvl))
         # 装备附加效果（装备也可能带 debuff，攻击时一并施加）
@@ -678,6 +729,8 @@ class GameView(arcade.View):
             hit = self.combat.melee_attack(
                 attacker, monsters, damage, wrange, tx, ty, speed,
                 attacker_id=attacker_id,
+                # 吸血剑：主机裁决客户端近战命中时，按实际伤害比例给攻击者（幽灵）回血
+                lifesteal=wdef.get("lifesteal", LIFESTEAL_DEFAULT),
             )
             # 武器自带 debuff（如诅咒弯刀中毒）随命中施加并广播；客户端装备附加 debuff 一并施加
             wdebuff = wdef.get("debuff")
@@ -724,7 +777,8 @@ class GameView(arcade.View):
                         # 环境物被击杀：掉落 + 移出障碍（env_destroyed/drop_spawn
                         # 由 _broadcast_map_changes 与 drop_spawn 广播统一同步到客户端）
                         if not h.alive:
-                            on_harvestable_destroyed(self, h)
+                            # 客户端近战裁决路径：采集经验归属客户端，不发给本端主机
+                            on_harvestable_destroyed(self, h, award_exp=False)
         elif wdef.get("special") == "laser":
             # 陨星炮：主机生成激光（起点=幽灵位置），命中由 check_laser_hits 统一广播；
             # 客户端装备附加 debuff 挂到激光上，命中即施加
@@ -750,7 +804,43 @@ class GameView(arcade.View):
                 wdef.get("special", ""), debuff_id, speed,
                 attacker_id=attacker_id,
                 debuffs=debuffs,
+                # 散射/吸血（主机裁决弹丸命中时生效）：散射按武器定义生成多发弹丸
+                lifesteal=wdef.get("lifesteal", LIFESTEAL_DEFAULT),
+                spread_count=wdef.get("spread_count", SPREAD_COUNT_DEFAULT),
+                spread_angle=wdef.get("spread_angle", SPREAD_ANGLE_DEFAULT),
             )
+
+    def _resolve_skill_use(self, sender_id: int, payload: dict) -> None:
+        """主机权威裁决客户端的技能释放（SKILL_USE）：技能效果收敛主机
+
+        - 施放者用客户端幽灵（remote_players，懒创建于地图出生点，角色 id 来自
+          ROOM_START 名册）；若该 id 是主机本地玩家则直接用 self.player；
+        - 用客户端上报的施放瞬间世界坐标修正幽灵位置（与 ATTACK_EVENT 同口径，
+          20Hz 快照存在滞后，技能弹丸发射点/影袭落点按滞后位置裁决会 miss）；
+        - use_skill(broadcast=True)：奥术爆发弹丸经 PROJECTILE_SNAPSHOT 同步、
+          影袭落点命中经 _broadcast_damage 广播、圣盾减伤在幽灵 take_damage 结算，
+          全部与客户端本地纯表现（input_handler F 键）保持一致。
+        """
+        gs = self.window.game_state
+        caster_id = payload.get("player_id", sender_id)
+        # 施放者实体：防御性支持主机本地玩家（正常路径主机本地技能不经此入口）
+        if getattr(gs, "net_player_id", None) is not None and caster_id == gs.net_player_id:
+            caster = self.player
+        else:
+            caster = self._ensure_ghost(caster_id)
+        # 用客户端上报的施放瞬间世界坐标修正幽灵位置（仅幽灵；主机本地玩家位置本就准确）
+        report_x = payload.get("x")
+        report_y = payload.get("y")
+        if report_x is not None and report_y is not None and caster is not self.player:
+            caster.center_x = float(report_x)
+            caster.center_y = float(report_y)
+        # 技能伤害基数 = 客户端上报的当前武器伤害（与 ATTACK_EVENT 采纳客户端伤害同口径）
+        damage = float(payload.get("damage") or 0)
+        from game.character_skills import use_skill
+        use_skill(self, caster,
+                  float(payload.get("mouse_x") or 0),
+                  float(payload.get("mouse_y") or 0),
+                  damage, broadcast=True)
 
     def _apply_damage_result(self, payload: dict) -> None:
         """客户端应用主机下发的 DAMAGE_RESULT：远端怪物按 net_id 扣血并显示命中反馈
@@ -772,6 +862,15 @@ class GameView(arcade.View):
             floating_texts.add_damage(rm.center_x, rm.center_y + 25, damage)
             if hasattr(rm, "_hit_flash"):
                 rm._hit_flash = 0.15
+            # 等级系统：客户端击杀经验（各端本地结算）
+            # 主机在 on_monster_death 按 last_attacker_id 归属发放；客户端无归属广播，
+            # 简化：DAMAGE_RESULT 使远端怪物血量归零即视为本端参与击杀（host 本地玩家击杀
+            # 也走本路径，net_mode 非 client 时跳过避免与 on_monster_death 重复发放）。
+            if (rm.hp <= 0 and not getattr(rm, "_exp_awarded", False)
+                    and getattr(self.window.game_state, "net_mode", "solo") == "client"):
+                rm._exp_awarded = True  # 防重复：同一怪物只发一次击杀经验
+                amount = EXP_KILL_BASE * (EXP_BOSS_MULT if getattr(rm, "is_boss", False) else 1)
+                _award_exp(self, amount)
         # 附加 debuff 列表（表现层记录，快照会校准覆盖）：逐条施加，含效果等级
         # （修复客户端特殊效果不全生效：旧版只广播单个无等级 debuff，多效果丢失）
         debuffs = payload.get("debuffs") or []
@@ -810,10 +909,16 @@ class GameView(arcade.View):
         else:
             sx, sy = (self.map_data["rooms"][0].center
                       if self.map_data.get("rooms") else (400, 400))
-        ghost = Player(center_x=sx, center_y=sy)
-        # 幽灵名册：玩家名（名册驱动，供渲染头顶名称与状态条显示）
+        # 幽灵名册：玩家名 + 角色 id（名册驱动，供渲染头顶名称、状态条与技能裁决用）
         roster_entry = (gs.net_roster or {}).get(player_id)
+        ghost = Player(
+            center_x=sx, center_y=sy,
+            character_id=roster_entry.get("character_id", "initial") if roster_entry else "initial",
+        )
         ghost.net_name = roster_entry.get("name", f"玩家{player_id}") if roster_entry else f"玩家{player_id}"
+        # 幽灵联机身份：技能弹丸归属（_arcane_blast 取 owner_net_id=net_player_id，
+        # 客户端快照跳过 owner_id==my_id 去重，见 _apply_projectile_snapshot 注释）
+        ghost.net_player_id = player_id
         # 幽灵朝向（Entity 同步 todo 23 快照字段，默认朝右）
         ghost.facing = 0.0
         # 主机权威：幽灵受击（怪物近战/弹丸）→ 广播 PLAYER_HURT（各端扣血显示）。
@@ -1516,6 +1621,8 @@ class GameView(arcade.View):
         run_carried = self._deserialize_evac_carried(payload.get("run_carried") or {})
         commit_run_to_warehouse(gs.player_id, run_carried)
         clear_run(gs.run_carried)
+        # 等级系统：客户端撤离成功经验（各端本地结算，客户端经 EVAC_RESULT 发放）
+        _award_exp(self, EXP_EVAC)
         # 客户端撤离成功 → 进入观战模式（跟随主机幽灵继续观看）而非回房等待：
         # - _spectating=True：渲染隐藏本体/武器/读条，input_handler 屏蔽操作，相机跟随观战目标；
         # - _spectate_target_id=None：由 _spectate_camera_target 自动回退第一个存活幽灵（主机）；
@@ -2037,6 +2144,10 @@ class GameView(arcade.View):
             gs.weapon_damage = wdef.get("damage", 8)
             gs.weapon_speed = wdef.get("attack_speed", 1.0)
             gs.weapon_range = wdef.get("range", 40)
+            # 等级系统：拾取新武器会重置 weapon_damage/weapon_speed，这里补回角色永久加成
+            # （加成在 setup() 缓存到 gs.level_bonus_damage/level_bonus_atk_speed，与 setup 加载武器同口径）
+            gs.weapon_damage += getattr(gs, "level_bonus_damage", 0)
+            gs.weapon_speed += getattr(gs, "level_bonus_atk_speed", 0)
             if gs.current_weapon_kind == "ranged":
                 gs.weapon_proj_speed = wdef.get("projectile_speed", 400)
                 gs.weapon_special = wdef.get("special", "")
@@ -2045,6 +2156,12 @@ class GameView(arcade.View):
                 gs.weapon_proj_speed = 0
                 gs.weapon_special = ""
                 gs.weapon_auto_fire = False
+            # 武器扩展机制：吸血/散射/光环（与 setup() 加载仓库武器一致）
+            gs.weapon_lifesteal = wdef.get("lifesteal", LIFESTEAL_DEFAULT)
+            gs.weapon_spread_count = wdef.get("spread_count", SPREAD_COUNT_DEFAULT)
+            gs.weapon_spread_angle = wdef.get("spread_angle", SPREAD_ANGLE_DEFAULT)
+            gs.weapon_aura_slow = wdef.get("aura_slow", False)
+            gs.weapon_aura_radius = wdef.get("aura_radius", 0)
             # 刷新武器名缓存，避免渲染层因 current_weapon_id 匹配不到数据库行而显示"拳头"
             self._cached_weapon_id = d.item_id
             self._cached_weapon_name = wdef.get("name", "武器")
@@ -2258,6 +2375,10 @@ class GameView(arcade.View):
                 if inbound.get("msg_type") == MsgType.ATTACK_EVENT.name:
                     self._resolve_attack_event(
                         sender_id, inbound.get("payload") or {})
+                elif inbound.get("msg_type") == MsgType.SKILL_USE.name:
+                    # 客户端技能释放请求：主机在对应幽灵上权威裁决（伤害/位移/护盾，
+                    # 弹丸经 PROJECTILE_SNAPSHOT 同步，命中经 DAMAGE_RESULT 广播）
+                    self._resolve_skill_use(sender_id, inbound.get("payload") or {})
                 elif inbound.get("msg_type") == MsgType.POTION_USE.name:
                     # 药水使用请求：主机确认生效并广播 POTION_ACK（治疗数字全端可见）
                     self._handle_potion_use(sender_id, inbound.get("payload") or {})
@@ -2510,6 +2631,20 @@ class GameView(arcade.View):
                     m, actual, hit=True, crit=False,
                     debuffs=list(self._attack_debuffs),  # 完整列表（含等级），修复主机 debuff 不同步
                 )
+            # 攻速光环（冰霜领域神器）：每 AURA_SLOW_TICK 秒对玩家周围 aura_radius 内怪物施加减速
+            # （主机权威：怪物状态收敛主机，客户端不本地裁决）
+            if getattr(gs, "weapon_aura_slow", False) and not self._spectating:
+                self._aura_tick -= dt
+                if self._aura_tick <= 0:
+                    self._aura_tick = AURA_SLOW_TICK
+                    aura_radius = getattr(gs, "weapon_aura_radius", 0)
+                    for m in self.monsters:
+                        if not hasattr(m, 'alive') or not m.alive:
+                            continue
+                        dist = math.hypot(m.center_x - self.player.center_x,
+                                          m.center_y - self.player.center_y)
+                        if dist <= aura_radius and hasattr(m, "apply_debuff"):
+                            m.apply_debuff("slow", AURA_SLOW_LEVEL)
         else:
             # 客户端：本地弹丸纯视觉碰撞（环境物/远端怪物），伤害判定仍收敛主机——
             # 普通弹丸命中环境物/怪物即消失（穿透弹丸保留），并显示粒子/伤害数字反馈
@@ -2560,6 +2695,10 @@ class GameView(arcade.View):
                             getattr(gs, 'weapon_special', ''),
                             None, getattr(gs, 'weapon_speed', 1.0),
                             debuffs=None,
+                            # 散射/吸血：本地纯表现弹丸与主机裁决口径一致（视觉对齐）
+                            lifesteal=getattr(gs, 'weapon_lifesteal', LIFESTEAL_DEFAULT),
+                            spread_count=getattr(gs, 'weapon_spread_count', SPREAD_COUNT_DEFAULT),
+                            spread_angle=getattr(gs, 'weapon_spread_angle', SPREAD_ANGLE_DEFAULT),
                         )
             elif self.combat.can_attack():
                 self.combat.ranged_attack(
@@ -2569,6 +2708,10 @@ class GameView(arcade.View):
                     world_mx, world_my,
                     getattr(gs, 'weapon_special', ''),
                     weapon_speed=getattr(gs, 'weapon_speed', 1.0),
+                    # 散射/吸血：单机命中判定在此弹丸上完成（check_monster_hits 统一结算）
+                    lifesteal=getattr(gs, 'weapon_lifesteal', LIFESTEAL_DEFAULT),
+                    spread_count=getattr(gs, 'weapon_spread_count', SPREAD_COUNT_DEFAULT),
+                    spread_angle=getattr(gs, 'weapon_spread_angle', SPREAD_ANGLE_DEFAULT),
                 )
                 self._player_attack_flash = 0.1
                 self._attack_this_frame = True
@@ -2612,6 +2755,8 @@ class GameView(arcade.View):
                         # 保存携带物品用于显示收益
                         carried_copy = dict(gs.run_carried) if hasattr(gs, 'run_carried') else {}
                         clear_run(gs.run_carried)
+                        # 等级系统：火箭台撤离成功经验（各端本地结算，solo/host 发放）
+                        _award_exp(self, EXP_EVAC)
                         # 增强提示：大字+粒子效果
                         floating_texts.add(self.player.center_x, self.player.center_y + 80,
                                            "撤离成功！战利品已存入仓库",
@@ -2839,6 +2984,8 @@ class GameView(arcade.View):
                 # 保存携带物品用于显示收益（先复制再清空）
                 carried_copy = dict(gs.run_carried) if hasattr(gs, 'run_carried') else {}
                 clear_run(gs.run_carried)
+                # 等级系统：撤离成功经验（各端本地结算，solo/host 撤离点成功发放）
+                _award_exp(self, EXP_EVAC)
                 # 增强提示：大字+粒子效果
                 floating_texts.add(self.player.center_x, self.player.center_y + 80,
                                    "撤离成功！战利品已存入仓库",
@@ -2887,6 +3034,12 @@ class GameView(arcade.View):
         gs.equipped_helmet_id = None
         gs.equipped_armor_id = None
         gs.equipped_backpack_id = None
+        # 重置武器扩展机制字段（死亡/清装后避免光环/吸血残留作用于观战或无武器状态）
+        gs.weapon_lifesteal = LIFESTEAL_DEFAULT
+        gs.weapon_spread_count = SPREAD_COUNT_DEFAULT
+        gs.weapon_spread_angle = SPREAD_ANGLE_DEFAULT
+        gs.weapon_aura_slow = False
+        gs.weapon_aura_radius = 0
 
     def _fail_run(self, reason: str):
         """行动失败统一处理：超时/死亡 → 清空携带物 → 删除数据库中的装备
