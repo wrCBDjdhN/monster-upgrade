@@ -654,24 +654,24 @@ def render_game(view):
                           pad.center_y - view.player.center_y)
         if dist < 100:  # 靠近时显示提示
             if pad.state == "idle":
-                # 绘制背景框
+                # 绘制背景框（坐标系为逻辑分辨率，最大化/全屏时由 main.GameWindow 缩放）
                 arcade.draw_rect_filled(
-                    arcade.XYWH(view.window.width // 2, 80, 250, 40),
+                    arcade.XYWH(WINDOW_WIDTH // 2, 80, 250, 40),
                     (0, 0, 0, 200))
                 # 复用持久 Text 缓存（key=pad_hint，替代 draw_text 消除 PerformanceWarning）
                 view._hud_text("pad_hint", "按 E 激活火箭发射台",
-                               view.window.width // 2, 80,
+                               WINDOW_WIDTH // 2, 80,
                                arcade.color.YELLOW, 16,
                                anchor_x="center", anchor_y="center",
                                bold=True)
             elif pad.state == "boss_defeated":
                 # 绘制背景框
                 arcade.draw_rect_filled(
-                    arcade.XYWH(view.window.width // 2, 80, 320, 40),
+                    arcade.XYWH(WINDOW_WIDTH // 2, 80, 320, 40),
                     (0, 0, 0, 200))
                 # 复用持久 Text 缓存（与上方共用 key=pad_hint，文本/颜色变化时自动重建）
                 view._hud_text("pad_hint", "按 7 炸毁 | 按 8 启用撤离",
-                               view.window.width // 2, 80,
+                               WINDOW_WIDTH // 2, 80,
                                arcade.color.GREEN, 16,
                                anchor_x="center", anchor_y="center",
                                bold=True)
@@ -682,13 +682,13 @@ def render_game(view):
             secs = int(countdown) % 60
             # 绘制倒计时背景
             arcade.draw_rect_filled(
-                arcade.XYWH(view.window.width // 2, view.window.height - 60, 280, 50),
+                arcade.XYWH(WINDOW_WIDTH // 2, WINDOW_HEIGHT - 60, 280, 50),
                 (0, 0, 0, 200))
             # 绘制倒计时文字（<10秒变红）
             color = arcade.color.RED if countdown < 10 else arcade.color.GREEN
             # 复用持久 Text 缓存（key=pad_countdown，替代 draw_text 消除 PerformanceWarning）
             view._hud_text("pad_countdown", f"撤离倒计时: {mins}:{secs:02d}",
-                           view.window.width // 2, view.window.height - 60,
+                           WINDOW_WIDTH // 2, WINDOW_HEIGHT - 60,
                            color, 22, anchor_x="center", anchor_y="center",
                            bold=True)
 

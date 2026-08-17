@@ -1055,10 +1055,11 @@ class GameView(arcade.View):
         if gs.net_client is None or gs.net_player_id is None:
             return
         my_id = gs.net_player_id
-        # 鼠标世界坐标（沿用 on_mouse_motion 里的计算）
+        # 鼠标世界坐标（沿用 on_mouse_motion 里的计算；坐标系为逻辑分辨率，
+        # 窗口最大化/全屏时由 main.GameWindow 统一换算，见 input_handler 注释）
         cam = self.controller.camera.position if self.controller else (0, 0)
-        world_mx = self._mouse_x + cam[0] - self.window.width / 2
-        world_my = self._mouse_y + cam[1] - self.window.height / 2
+        world_mx = self._mouse_x + cam[0] - WINDOW_WIDTH / 2
+        world_my = self._mouse_y + cam[1] - WINDOW_HEIGHT / 2
         import math
         facing = math.atan2(world_my - self.player.center_y,
                             world_mx - self.player.center_x)
@@ -2599,10 +2600,11 @@ class GameView(arcade.View):
 
         # 战斗系统
         self.combat.update(dt)
-        # 屏幕鼠标坐标转世界坐标（激光和全自动武器需要世界坐标计算方向）
+        # 屏幕鼠标坐标转世界坐标（激光和全自动武器需要世界坐标计算方向；
+        # 坐标系为逻辑分辨率，见 input_handler 注释）
         cam = self.controller.camera.position
-        world_mx = self._mouse_x + cam[0] - self.window.width / 2
-        world_my = self._mouse_y + cam[1] - self.window.height / 2
+        world_mx = self._mouse_x + cam[0] - WINDOW_WIDTH / 2
+        world_my = self._mouse_y + cam[1] - WINDOW_HEIGHT / 2
         # 激光束更新（陨星炮神器：实时跟随鼠标方向）
         self.combat.update_lasers(dt, world_mx, world_my)
         # 玩家弹丸/激光命中怪物判定与反馈（主机权威：战斗伤害判定收敛主机；

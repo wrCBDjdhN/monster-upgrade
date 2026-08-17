@@ -4,7 +4,7 @@ import math
 import time
 import random
 import arcade
-from config import FRUIT_SPEED_MULT
+from config import FRUIT_SPEED_MULT, WINDOW_WIDTH, WINDOW_HEIGHT
 from game.sound_manager import sound_manager
 from game.effects import particle_system, floating_texts
 from entities.effects_defs import DEBUFF_POOL
@@ -132,9 +132,11 @@ def handle_mouse_press(view, x, y, button, modifiers):
         view._left_mouse_held = True
 
         # 屏幕坐标转世界坐标（combat 函数需要世界坐标计算方向）
+        # 窗口坐标系恒为逻辑分辨率（main.GameWindow 已把鼠标坐标换算到逻辑空间，
+        # 渲染投影也固定为逻辑分辨率），故以 WINDOW_WIDTH/HEIGHT 换算，而非物理窗口尺寸
         cam = view.controller.camera.position
-        world_x = x + cam[0] - view.window.width / 2
-        world_y = y + cam[1] - view.window.height / 2
+        world_x = x + cam[0] - WINDOW_WIDTH / 2
+        world_y = y + cam[1] - WINDOW_HEIGHT / 2
 
         gs = view.window.game_state
         kind = gs.current_weapon_kind
@@ -310,9 +312,9 @@ def handle_mouse_release(view, x, y, button, modifiers):
 
 
 def screen_to_world(view, x, y):
-    """屏幕坐标转世界坐标"""
+    """屏幕坐标转世界坐标（坐标系为逻辑分辨率，见 handle_mouse_press 注释）"""
     cam = view.controller.camera.position
-    return x + cam.x - view.window.width / 2, y + cam.y - view.window.height / 2
+    return x + cam.x - WINDOW_WIDTH / 2, y + cam.y - WINDOW_HEIGHT / 2
 
 
 def _handle_skill_key(view):
@@ -328,8 +330,8 @@ def _handle_skill_key(view):
         return  # 冷却中/眩晕/无技能角色：不消耗
     # 鼠标世界坐标（技能方向/落点；与 handle_mouse_press 同口径换算）
     cam = view.controller.camera.position
-    world_x = view._mouse_x + cam[0] - view.window.width / 2
-    world_y = view._mouse_y + cam[1] - view.window.height / 2
+    world_x = view._mouse_x + cam[0] - WINDOW_WIDTH / 2
+    world_y = view._mouse_y + cam[1] - WINDOW_HEIGHT / 2
     damage = getattr(gs, "weapon_damage", 0)
     if gs.net_mode == "client" and gs.net_client is not None:
         # 客户端：上报 SKILL_USE（主机权威裁决），本地仅纯表现

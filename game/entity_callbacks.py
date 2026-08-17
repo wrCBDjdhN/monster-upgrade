@@ -9,6 +9,7 @@ from config import (
     ROCKET_PAD_DESTROY_NORMAL_LV_MIN, ROCKET_PAD_DESTROY_NORMAL_LV_MAX,
     ROCKET_PAD_DESTROY_ARTIFACT_LV_MIN, ROCKET_PAD_DESTROY_ARTIFACT_LV_MAX,
     EXP_KILL_BASE, EXP_BOSS_MULT, EXP_HARVEST, EXP_CHEST,
+    WINDOW_WIDTH, WINDOW_HEIGHT,
 )
 # 怪物元数据（武器颜色/掉落表键名/死亡粒子颜色）统一从 monster_defs.py 读取
 from entities.monster_defs import MONSTER_METADATA
@@ -157,10 +158,11 @@ def handle_harvestable_combat(view, dt):
     if attack_happened and getattr(view, '_attack_kind', None) == "melee":
         px, py = view.player.center_x, view.player.center_y
         attack_range = getattr(view, '_last_attack_range', 40)
-        # 屏幕坐标转世界坐标（_mouse_x/_mouse_y 是屏幕坐标，px/py 是世界坐标）
+        # 屏幕坐标转世界坐标（_mouse_x/_mouse_y 是屏幕坐标，px/py 是世界坐标；
+        # 坐标系为逻辑分辨率，见 input_handler 注释）
         cam = view.controller.camera.position
-        world_mx = view._mouse_x + cam[0] - view.window.width / 2
-        world_my = view._mouse_y + cam[1] - view.window.height / 2
+        world_mx = view._mouse_x + cam[0] - WINDOW_WIDTH / 2
+        world_my = view._mouse_y + cam[1] - WINDOW_HEIGHT / 2
         for i, h in enumerate(view.harvestables):
             if not h.alive:
                 continue
