@@ -3,10 +3,13 @@
 import random
 
 # ── 窗口 ──
+# 逻辑分辨率：全部视图绘制/布局均以 WINDOW_WIDTH×WINDOW_HEIGHT 为坐标系，
+# 窗口实际尺寸变化（最大化/全屏/拖拽缩放）时由 main.GameWindow 等比缩放渲染
 WINDOW_WIDTH = 1280
 WINDOW_HEIGHT = 720
 WINDOW_TITLE = "打怪升级"
-FULLSCREEN = False  # 按F11切换
+WINDOW_RESIZABLE = True   # 允许窗口最大化/拖拽调整尺寸
+FULLSCREEN = False        # 启动即全屏（False=窗口模式）；游戏内按 F11 随时切换
 
 # ── 地图 ──
 MAP_WIDTH = 3200

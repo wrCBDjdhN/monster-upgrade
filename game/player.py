@@ -11,9 +11,10 @@
 """
 
 import arcade
+from arcade.types import LBWH, LRBT
 from config import (
     PLAYER_SPEED, PLAYER_HP, PLAYER_SIZE, PLAYER_COLOR,
-    MAP_WIDTH, MAP_HEIGHT,
+    MAP_WIDTH, MAP_HEIGHT, WINDOW_WIDTH, WINDOW_HEIGHT,
 )
 from entities.character_defs import CHARACTERS
 
@@ -202,7 +203,17 @@ class PlayerController:
     def __init__(self, player: Player, physics_engine):
         self.player = player
         self.physics_engine = physics_engine
-        self.camera = arcade.Camera2D()
+        self.camera = arcade.Camera2D(
+            # 投影固定为逻辑分辨率（1280x720 中心对称 ±640/±360）：
+            # Camera2D 默认按「构造时 viewport」生成投影，若 resize 后再进图，
+            # 投影会变为 ±800/±450，与文字层 FixedLogicalProjector 的固定投影
+            # (±W/2, ±H/2) 不一致 → 相机移动时文字与画面位移不同步。
+            # 显式固定投影后，任意窗口尺寸下世界层/文字层 NDC 换算完全一致。
+            projection=LRBT(
+                -WINDOW_WIDTH / 2, WINDOW_WIDTH / 2,
+                -WINDOW_HEIGHT / 2, WINDOW_HEIGHT / 2,
+            ),
+        )
         # Camera2D.position 是视口中心的世界坐标，直接设为玩家中心即可居中
         self.camera.position = (player.center_x, player.center_y)
         # 相机是否跟随玩家（观战模式置 False：相机改由 game_view 观战段控制，
@@ -266,5 +277,21 @@ class PlayerController:
             self.camera.position = (self.player.center_x, self.player.center_y)
 
     def use_camera(self):
-        """激活相机（设置视口变换）"""
+        """激活相机（设置视口变换）
+
+        Camera2D 构造时 viewport 取自 framebuffer 初始尺寸（1280x720），
+        窗口 resize 后不会自动更新；若沿用旧视口，世界层 GL 视口与
+        main.FixedLogicalProjector（HUD/文字层）的 letterbox 视口不一致，
+        会导致相机移动时文字与画面位移不同步（文字不随人物移动）。
+        因此每次激活相机前，按当前窗口逻辑尺寸重算 letterbox 视口并同步，
+        保证世界层与文字层使用同一 GL 视口（修复窗口缩放后文字错位 bug）。
+        """
+        win = arcade.get_window()
+        log_w, log_h = win.get_size()
+        scale = min(log_w / WINDOW_WIDTH, log_h / WINDOW_HEIGHT)
+        vw = max(1, round(WINDOW_WIDTH * scale))
+        vh = max(1, round(WINDOW_HEIGHT * scale))
+        vx = (log_w - vw) // 2
+        vy = (log_h - vh) // 2
+        self.camera.viewport = LBWH(vx, vy, vw, vh)
         self.camera.use()
