@@ -1,6 +1,6 @@
 # game/ - 核心游戏逻辑
 
-**Updated:** 2026-08-16 | **Files:** 19 | **Lines:** ~5,134
+**Updated:** 2026-08-16 | **Files:** 19 | **Lines:** ~4,644
 
 ## OVERVIEW
 游戏逻辑层：怪物 AI、战斗、随机地图生成、掉落、撤离、宝箱、可采集物、特效、渲染、音效、输入、刷新。被 views/ 层编排；本层可经 `db.database` 读数据，`input_handler.py` 反向依赖 views（TAB 开背包）属例外。
@@ -25,6 +25,7 @@
 | 火箭发射台（space 主题撤离装置，**非 Sprite**） | rocket_pad.py |
 | 怪物护甲/头盔/武器分配 | monster_utils.py |
 | 怪物重生 | respawn.py |
+| 角色技能（技能效果、冷却、释放） | character_skills.py |
 
 ## CONVENTIONS
 - 怪物类 = `_MeleeMonsterBase`/`_RangedMonsterBase` 子类（arcade.SpriteSolidColor）；**具体怪物 = 薄类**，构造 `super().__init__(center_x=..., center_y=..., **MONSTER_CONFIGS["Xxx"])`，数值一律来自 entities/monster_defs.py

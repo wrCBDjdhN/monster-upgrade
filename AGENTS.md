@@ -1,9 +1,9 @@
 # PROJECT KNOWLEDGE BASE - 打怪升级项目
 
-**Updated:** 2026-08-16
-**Commit:** 3540f0d
+**Updated:** 2026-08-17
+**Commit:** e6177b7
 **Branch:** master
-**Stats:** 56 Python files, ~15,888 行（联机层 + 大厅 + 火箭发射台就位）
+**Stats:** 62 Python files, ~14,761 行（联机层 + 大厅 + 火箭发射台就位）
 
 ## 项目知识库（结构速览）
 
@@ -14,12 +14,12 @@
 打怪升级/
 ├── main.py       # 入口：arcade.Window + GameState（各 View 共享状态，含 player_id/run_carried/当前武器/地图种子/net_mode）
 ├── config.py     # 全部数值常量（窗口/玩家/怪物/战斗/掉落/升级公式/宝箱/火箭发射台），调整平衡性只改这里
-├── entities/     # 数据定义：weapon_defs / equipment_defs / monster_defs / resource_defs / effects_defs（见 entities/AGENTS.md）
-├── db/           # SQLite 层：connection / database(建表+CRUD re-export) / players / weapons / equipment / warehouse / potions（见 db/AGENTS.md）
-├── game/         # 核心逻辑：怪物AI / 战斗 / 地图生成 / 掉落 / 撤离 / 宝箱 / 特效 / 渲染 / 音效 / 输入 / 刷新 / 回调汇聚（见 game/AGENTS.md）
+├── entities/     # 数据定义：weapon_defs / equipment_defs / monster_defs / resource_defs / effects_defs / character_defs（见 entities/AGENTS.md）
+├── db/           # SQLite 层：connection / database(建表+CRUD re-export) / players / weapons / equipment / warehouse / potions / characters / levels（见 db/AGENTS.md）
+├── game/         # 核心逻辑：怪物AI / 战斗 / 地图生成 / 掉落 / 撤离 / 宝箱 / 特效 / 渲染 / 音效 / 输入 / 刷新 / 回调汇聚 / 角色技能（见 game/AGENTS.md）
 ├── net/          # 联机网络层：protocol / server / client / thread_bridge + 4 个 _selftest 自检脚本（见 net/AGENTS.md）
 ├── docs/         # 文档：net-mode-matrix.md（联机模式矩阵）
-└── views/        # UI：start / map_select / game(3038行,最大) / lobby / warehouse / market / forge / backpack / scroll / text_cache（见 views/AGENTS.md）
+└── views/        # UI：start / map_select / game(2553行,最大) / lobby / warehouse / market / forge / backpack / scroll / text_cache / character_select / level_up（见 views/AGENTS.md）
 ```
 
 ### 高频入口速查
@@ -36,11 +36,13 @@
 | 加联机协议消息 | `net/protocol.py`（MsgType 枚举 + 消息 schema，见 net/AGENTS.md） |
 | 跑网络自检 | `python net/_selftest*.py`（4 个自检脚本，返回码 0=通过） |
 | 联机模式判定 | `window.game_state.net_mode`（solo/host/client），客户端禁本地仲裁 |
+| 角色系统 | `entities/character_defs.py` + `db/characters.py` + `game/character_skills.py` + `views/character_select_view.py` |
+| 升级系统 | `db/levels.py` + `views/level_up_view.py` + `game/character_skills.py` |
 
 ### CODE MAP（核心符号）
 | 符号 | 类型 | 位置 | 角色 |
 |------|------|------|------|
-| `GameState` | class | main.py:22 | 各 View 共享运行时状态（player_id/run_carried/武器/地图种子/net_mode） |
+| `GameState` | class | main.py:23 | 各 View 共享运行时状态（player_id/run_carried/武器/地图种子/net_mode） |
 | `RocketPad` | class | game/rocket_pad.py | 火箭发射台状态机 IDLE→ACTIVATED→BOSS_SPAWNED→BOSS_DEFEATED→DESTROYED/EVACUATING→EVAC_SUCCESS（非 Sprite） |
 | `_MONSTER_CLASSES` | dict | views/game_view.py | 怪物类型名 → 类映射（数据驱动注册） |
 | `MONSTER_CONFIGS` | dict | entities/monster_defs.py | 怪物数值配置（hp/damage/speed/弹丸参数），BOSS 条目内联倍率（hp×8/damage×4/speed×0.7） |
@@ -50,6 +52,11 @@
 | `entity_callbacks` | module | game/entity_callbacks.py | 怪物死亡回调汇聚 + RocketPad 陷阱注释（:428） |
 | `commit_run_to_warehouse` | func | game/evac.py | 撤离入库唯一口径（gold=本次携带金币） |
 | `TextCache` | class | views/text_cache.py | 持久 arcade.Text 缓存，避免每帧 draw_text 重建纹理 |
+| `CharacterSkills` | class | game/character_skills.py | 角色技能系统（技能效果、冷却、释放） |
+| `CharacterSelectView` | class | views/character_select_view.py | 角色选择界面（4角色/技能/经验升级永久加成） |
+| `LevelUpView` | class | views/level_up_view.py | 升级面板（3选1永久加成） |
+| `CharactersDB` | module | db/characters.py | 角色数据库操作（创建/读取/更新角色） |
+| `LevelsDB` | module | db/levels.py | 等级/经验数据操作（升级曲线、经验获取） |
 
 ### 关键约定
 - 中文 docstring + 中文注释为硬性约定；汇报必须中文
@@ -63,6 +70,8 @@
 - net 层铁律：协议禁静默忽略未知消息、回调禁阻塞主线程、回调禁碰 arcade 对象（见 net/AGENTS.md）
 - `Player.update()` 已含移动逻辑，禁手动二次调用（否则位移翻倍，player.py:202 注释）；RocketPad 非 Sprite，勿按 Sprite 处理
 - 动画/读条期间禁滚动/点击（views 层约定，见 views/AGENTS.md）
+- 角色系统：`character_defs.py`（角色数据）+ `db/characters.py`（角色持久化）+ `game/character_skills.py`（技能逻辑）+ `views/character_select_view.py`（选角UI）
+- 升级系统：`db/levels.py`（等级/经验数据）+ `views/level_up_view.py`（升级界面）+ `game/character_skills.py`（技能效果）
 
 ## 核心工作流程
 
@@ -134,6 +143,8 @@
 | 添加新地图元素 | `game/map_gen.py` | 生成逻辑、位置计算、碰撞处理 |
 | 添加新UI元素 | `views/game_view.py` | HUD绘制、世界坐标标签、屏幕坐标标签 |
 | 添加新效果 | `game/effects.py` | 粒子系统、浮动文字、音效播放 |
+| 添加新角色 | `entities/character_defs.py` + `db/characters.py` | 角色数据定义 + 持久化操作 |
+| 添加新技能 | `game/character_skills.py` | 技能效果、冷却、释放逻辑 |
 
 ### 操作步骤
 

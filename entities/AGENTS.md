@@ -1,9 +1,9 @@
 # entities/ - 静态数据定义
 
-**Updated:** 2026-08-11 | **Files:** 6 | **Lines:** ~975
+**Updated:** 2026-08-17 | **Files:** 6 | **Lines:** ~1080
 
 ## OVERVIEW
-数据定义层：武器/装备/资源/怪物/效果模板（weapon/equipment/resource 3 个纯字典 + effects_defs 含规则逻辑 + monster_defs 含注册表逻辑）。**添加新条目 = 复制现有条目改值**，不发明新结构。被 db/game/views 三方引用；本层只依赖 config（weapon_defs 用 PROJECTILE_SPEED，monster_defs 用 PROJECTILE_SPEED/PROJECTILE_SIZE）。
+数据定义层：武器/装备/资源/怪物/效果/角色模板（weapon/equipment/resource 3 个纯字典 + character_defs 角色定义 + effects_defs 含规则逻辑 + monster_defs 含注册表逻辑）。**添加新条目 = 复制现有条目改值**，不发明新结构。被 db/game/views 三方引用；本层只依赖 config（weapon_defs 用 PROJECTILE_SPEED，monster_defs 用 PROJECTILE_SPEED/PROJECTILE_SIZE，character_defs 用 PLAYER_SPEED/PLAYER_HP）。
 
 ## WHERE TO LOOK
 | 任务 | 文件 |
@@ -12,12 +12,14 @@
 | 装备/药水 | equipment_defs.py（HELMETS/ARMORS/BACKPACKS/POTIONS + 怪物掉落表 + get_item_def） |
 | 怪物（**数据驱动核心**） | monster_defs.py（MONSTER_CONFIGS 数值 + MONSTER_METADATA 渲染/掉落/武器池 + MELEE/RANGED_MONSTERS 分类 + get_boss_config） |
 | 资源 | resource_defs.py（RESOURCES 3 种） |
+| 角色 | character_defs.py（CHARACTERS 4 角色 + skill/passive 定义） |
 | 效果规则（**含逻辑，非纯数据**） | effects_defs.py（效果池 + 5 级分级表 + 9 个函数） |
 
 ## 字段 schema（核心字段必填，其余可选）
 - 武器：`kind`(melee/ranged) / `item_id` / `name`(中文) / `damage` / `attack_speed`(越高越快) / `range` / `price`(0=禁购) / `color` / `shape` / `capacity_cost`
 - 装备：`name` / `defense`(头盔护甲) 或 `capacity`(背包) / `price` / `color` / `description` / `capacity_cost`；药水用 `effect`+`value`(+`duration`)+`stackable`
 - 资源：`name` / `sell_price` / `color`
+- 角色：`CHARACTERS[id]` = name / hp / defense / speed / color / price(0=免费) / skill{id/name/cooldown/damage_mult+附加字段} / passive{damage_mult/crit_chance/crit_mult/flat_reduce+...}
 - 怪物：`MONSTER_CONFIGS[name]` = size/color/hp/damage/speed/attack_delay/aggro_range(+远程 proj_*)；`MONSTER_METADATA[name]` = weapon_color/loot_key/death_color/weapon_pool(+armor_key/group_count)
 - 可选标记：`market_restricted`(市场禁购但保留随机池) / `artifact`(神器仅锻造) / `special`(penetrating/explosive/laser) / `debuff` / `auto_fire` / `is_boss` / `required_weapon_level`
 
