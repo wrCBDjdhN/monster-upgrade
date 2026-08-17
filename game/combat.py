@@ -24,6 +24,7 @@ from config import (
     ROCKET_TROOP_AOE_RADIUS,
 )
 from .effects import particle_system  # 爆炸粒子效果
+from .batch_shapes import ShapeBatch  # 批量绘制：激光一次 draw call 提交（性能优化）
 
 
 class CombatSystem:
@@ -178,6 +179,7 @@ class CombatSystem:
     def check_monster_hits(self, monsters: arcade.SpriteList) -> list:
         """检查弹丸命中怪物，支持穿透和爆炸效果，返回 [(monster, actual_damage)] 列表"""
         hit_monsters = []  # [(monster, actual_damage)]
+        hit_set = set()    # 已命中怪物集合：O(1) 查重，替代每次重建列表线性查找（性能优化）
         for proj in list(self.projectiles):
             # 本弹丸独立命中的怪物（吸血按本弹丸实际伤害结算，避免累计其他弹丸命中）
             proj_hits = []
@@ -194,9 +196,10 @@ class CombatSystem:
                                 m.apply_debuff(eid, lvl)
                         # 穿透弹丸：只对未被击中的怪物造成伤害
                         if proj.special == "penetrating":
-                            if m not in [h for h, _ in hit_monsters]:
+                            if m not in hit_set:
                                 actual = m.take_damage(proj.damage)
                                 hit_monsters.append((m, actual))
+                                hit_set.add(m)
                                 proj_hits.append((m, actual))
                         # 爆炸弹丸：对命中点周围所有怪物造成伤害
                         elif proj.special == "explosive":
@@ -206,18 +209,20 @@ class CombatSystem:
                             for m2 in monsters:
                                 if hasattr(m2, 'alive') and m2.alive:
                                     dist = math.hypot(m2.center_x - m.center_x, m2.center_y - m.center_y)
-                                    if dist <= explosion_radius and m2 not in [h for h, _ in hit_monsters]:
+                                    if dist <= explosion_radius and m2 not in hit_set:
                                         # 爆炸波及怪物同样记录归属（等级经验判定用）
                                         m2.last_attacker_id = proj.owner_net_id
                                         actual = m2.take_damage(proj.damage)
                                         hit_monsters.append((m2, actual))
+                                        hit_set.add(m2)
                                         proj_hits.append((m2, actual))
                             proj.remove_from_sprite_lists()
                             break
                         else:
                             actual = m.take_damage(proj.damage)
-                            if m not in [h for h, _ in hit_monsters]:
+                            if m not in hit_set:
                                 hit_monsters.append((m, actual))
+                                hit_set.add(m)
                                 proj_hits.append((m, actual))
                 # 非穿透弹丸命中后移除
                 if proj.special != "penetrating" and proj in self.projectiles:
@@ -409,17 +414,19 @@ class LaserBeam:
         return hits
 
     def draw(self):
-        """绘制激光（即时绘制模式，三层：外圈光晕 + 主体 + 中心亮核）"""
+        """绘制激光（批量绘制：ShapeBatch.line 一次 draw call 提交三层，替代即时模式）"""
         if self.expired:
             return
         sx, sy = self.start_point
         ex, ey = self.end_point
+        batch = ShapeBatch()
         # 外圈光晕（半透明）
-        arcade.draw_line(sx, sy, ex, ey, (255, 100, 255, 60), self.width + 10)
+        batch.line(sx, sy, ex, ey, (255, 100, 255, 60), self.width + 10)
         # 主体
-        arcade.draw_line(sx, sy, ex, ey, (255, 255, 255), self.width)
+        batch.line(sx, sy, ex, ey, (255, 255, 255), self.width)
         # 中心亮核
-        arcade.draw_line(sx, sy, ex, ey, (255, 180, 255), max(3, self.width // 3))
+        batch.line(sx, sy, ex, ey, (255, 180, 255), max(3, self.width // 3))
+        batch.draw()
 
 
 class _PlayerProjectile(arcade.SpriteSolidColor):

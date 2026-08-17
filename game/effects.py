@@ -3,6 +3,7 @@
 import math
 import random
 import arcade
+from .batch_shapes import ShapeBatch  # 批量绘制：粒子一次 draw call 提交（性能优化）
 
 
 class Particle:
@@ -42,53 +43,60 @@ class ParticleSystem:
         self.particles: list[Particle] = []
 
     def update(self, dt):
+        # 就地过滤存活粒子：先更新后原地压缩，避免每帧新建列表分配内存
+        write = 0
         for p in self.particles:
             p.update(dt)
-        self.particles = [p for p in self.particles if p.alive]
+            if p.life > 0:
+                self.particles[write] = p
+                write += 1
+        del self.particles[write:]
 
     def draw(self):
+        """批量绘制全部粒子（ShapeBatch 一次 draw call，替代逐粒子立即模式绘制）"""
+        if not self.particles:
+            return
+        batch = ShapeBatch()
         for p in self.particles:
             alpha = p.alpha
+            if alpha <= 0:
+                continue
             color = (p.color[0], p.color[1], p.color[2], alpha)
             size = int(p.size * (p.life / p.max_life))
             if size > 0:
-                arcade.draw_circle_filled(p.x, p.y, size, color)
+                batch.circle(p.x, p.y, size, color)
+        batch.draw()
 
-    def emit(self, x, y, count, color, speed=100, life=0.5, size=3, gravity=0, spread=360):
-        """发射粒子"""
+    def emit(self, x, y, count, color, speed=100, life=0.5, size=3, gravity=0, spread=360, angle=None):
+        """发射粒子
+
+        angle=None：向 0~spread 度均匀随机方向扩散（默认 360° 全向）；
+        指定 angle：朝该方向发射（spread 为角度抖动范围）。
+        """
         for _ in range(count):
-            angle = random.uniform(0, math.radians(spread))
+            if angle is None:
+                a = random.uniform(0, math.radians(spread))
+                ox = random.uniform(-5, 5)
+                oy = random.uniform(-5, 5)
+                psize = size * random.uniform(0.8, 1.2)
+            else:
+                a = math.radians(angle + random.uniform(-spread, spread))
+                ox = random.uniform(-3, 3)
+                oy = random.uniform(-3, 3)
+                psize = size
+                gravity = 0
             spd = random.uniform(speed * 0.5, speed * 1.5)
-            vx = math.cos(angle) * spd
-            vy = math.sin(angle) * spd
-            p = Particle(
-                x + random.uniform(-5, 5),
-                y + random.uniform(-5, 5),
-                vx, vy,
+            self.particles.append(Particle(
+                x + ox, y + oy,
+                math.cos(a) * spd, math.sin(a) * spd,
                 life * random.uniform(0.7, 1.3),
-                color,
-                size * random.uniform(0.8, 1.2),
-                gravity,
-            )
-            self.particles.append(p)
+                color, psize, gravity,
+            ))
 
     def emit_directional(self, x, y, count, angle, color, speed=100, life=0.5, size=3, spread=30):
-        """朝特定方向发射粒子"""
-        for _ in range(count):
-            a = math.radians(angle + random.uniform(-spread, spread))
-            spd = random.uniform(speed * 0.5, speed * 1.5)
-            vx = math.cos(a) * spd
-            vy = math.sin(a) * spd
-            p = Particle(
-                x + random.uniform(-3, 3),
-                y + random.uniform(-3, 3),
-                vx, vy,
-                life * random.uniform(0.7, 1.3),
-                color,
-                size,
-                0,
-            )
-            self.particles.append(p)
+        """朝特定方向发射粒子（委托 emit，保持原接口不变）"""
+        self.emit(x, y, count, color, speed=speed, life=life, size=size,
+                  spread=spread, angle=angle)
 
 
 class FloatingText:
@@ -140,11 +148,22 @@ class FloatingTextManager:
         self._overlap_offset = 18  # 重叠时的垂直偏移量
 
     def update(self, dt):
+        # 就地过滤存活文字：先更新后原地压缩，避免每帧新建列表分配内存
+        write = 0
         for t in self.texts:
             t.update(dt)
-        self.texts = [t for t in self.texts if t.alive]
-        # 清理过期的位置记录
-        self._recent_positions = [(x, y, life - dt) for x, y, life in self._recent_positions if life - dt > 0]
+            if t.life > 0:
+                self.texts[write] = t
+                write += 1
+        del self.texts[write:]
+        # 就地清理过期的位置记录
+        write = 0
+        for i, (x, y, life) in enumerate(self._recent_positions):
+            life -= dt
+            if life > 0:
+                self._recent_positions[write] = (x, y, life)
+                write += 1
+        del self._recent_positions[write:]
 
     def draw(self):
         for t in self.texts:
