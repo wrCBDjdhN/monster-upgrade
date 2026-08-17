@@ -25,17 +25,54 @@ AI 行为：
 
 import math
 import arcade
-from config import MAP_WIDTH, MAP_HEIGHT, PROJECTILE_SIZE, PROJECTILE_LIFETIME
+from config import MAP_WIDTH, MAP_HEIGHT, TILE_SIZE, PROJECTILE_SIZE, PROJECTILE_LIFETIME
 from entities.monster_defs import MONSTER_CONFIGS
+
+
+class _WallGrid:
+    """墙体空间索引：按网格分桶，查询时只遍历附近网格内的墙，避免每帧全量遍历
+
+    同一局内所有怪物共享同一份 walls 列表（game_view 统一赋值），
+    因此索引只构建一次，配合下方单槽缓存复用。
+    """
+
+    def __init__(self, walls, cell=TILE_SIZE * 4):
+        self.cell = cell
+        self.buckets = {}  # (gx, gy) -> [(wx, wy, ww, wh), ...]
+        for wx, wy, ww, wh in walls:
+            if ww <= 0 or wh <= 0:
+                continue
+            x0 = wx // cell
+            x1 = (wx + ww) // cell
+            y0 = wy // cell
+            y1 = (wy + wh) // cell
+            for gx in range(x0, x1 + 1):
+                for gy in range(y0, y1 + 1):
+                    self.buckets.setdefault((gx, gy), []).append((wx, wy, ww, wh))
+
+    def nearby(self, x: float, y: float) -> list:
+        """返回位置 (x, y) 所在网格及其 8 邻域内的候选墙列表"""
+        gx = int(x // self.cell)
+        gy = int(y // self.cell)
+        result = []
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                result.extend(self.buckets.get((gx + dx, gy + dy), ()))
+        return result
+
+
+# 单槽墙索引缓存：(walls, _WallGrid)。同局共享同一 walls 列表，切图（新列表）自动重建
+_wall_grid_cache = None  # (walls, _WallGrid) | None
 
 
 def _can_move_to(new_x, new_y, size, walls):
     """检查怪物能否移动到 (new_x, new_y)，不穿墙，不限制房间（可通过门离开）"""
+    global _wall_grid_cache
     half = size
-    # 检查墙壁碰撞（简单 AABB）
-    for wx, wy, ww, wh in walls:
-        if ww <= 0 or wh <= 0:
-            continue
+    # 空间索引：只检查目标位置附近网格内的墙（性能优化，行为与原全量遍历一致）
+    if _wall_grid_cache is None or _wall_grid_cache[0] is not walls:
+        _wall_grid_cache = (walls, _WallGrid(walls))
+    for wx, wy, ww, wh in _wall_grid_cache[1].nearby(new_x, new_y):
         if (new_x + half > wx and new_x - half < wx + ww and
             new_y + half > wy and new_y - half < wy + wh):
             return False
