@@ -274,8 +274,24 @@ class WarehouseView(ScrollView):
                 if eq["is_equipped"]:
                     from db.database import unequip_slot
                     unequip_slot(pid, eq["slot"])
+                    # 修复：卸下装备时同步清空 GameState 对应槽位，避免残留
+                    # equipped_*_id 导致进入游戏后背包栏显示已装备但属性未生效
+                    if eq["slot"] == "helmet":
+                        gs.equipped_helmet_id = None
+                    elif eq["slot"] == "armor":
+                        gs.equipped_armor_id = None
+                    elif eq["slot"] == "backpack":
+                        gs.equipped_backpack_id = None
                 else:
                     equip_from_inventory(pid, eq["id"])
+                    # 修复：装备时同步 GameState 对应槽位（与卸下对称），
+                    # 使游戏内背包栏/开局加载与仓库操作保持一致
+                    if eq["slot"] == "helmet":
+                        gs.equipped_helmet_id = eq["item_id"]
+                    elif eq["slot"] == "armor":
+                        gs.equipped_armor_id = eq["item_id"]
+                    elif eq["slot"] == "backpack":
+                        gs.equipped_backpack_id = eq["item_id"]
                 self._rebuild()
                 return
 

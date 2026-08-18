@@ -307,6 +307,12 @@ class GameView(arcade.View):
                 EFFECTS as _EFFECTS_DEFS, parse_effect_item, effect_params,
             )
             equip = get_equipment(gs.player_id)
+            # 修复：先清空 GameState 装备槽位，再按数据库权威值重载。
+            # 此前仅在 DB 有装备时才覆盖 equipped_*_id，仓库中卸下装备后残留的
+            # 旧值会导致背包栏显示已装备但属性（防御/容量）未生效。
+            gs.equipped_helmet_id = None
+            gs.equipped_armor_id = None
+            gs.equipped_backpack_id = None
             total_def = 0
             for slot_name in ("helmet", "armor", "backpack"):
                 if slot_name in equip:
@@ -592,6 +598,10 @@ class GameView(arcade.View):
 
         # 重置携带物
         gs.run_carried = {}
+        # 重置局内免费拾取记录：free_equipped_item_ids 是会话级集合，若不随新一局清空，
+        # 上一局免费拾取的 item_id 会残留，导致撤离时把「从仓库带入的同名装备」误判为
+        # 局内拾取而重复入库（修复：撤离复制仓库装备 bug）
+        gs.free_equipped_item_ids = set()
 
         # 摄像机控制器
         physics = arcade.PhysicsEngineSimple(self.player, self.obstacle_list)

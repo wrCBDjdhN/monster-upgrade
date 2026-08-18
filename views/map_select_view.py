@@ -44,12 +44,15 @@ class MapSelectView(arcade.View):
         self._tc = TextCache()  # 持久 Text 对象缓存，避免 draw_text 每帧重建纹理
         self.hovered_map = -1
         # 计算卡片位置（多张卡片整体居中）
+        # 关键：arcade.XYWH(x, y, w, h) 的 x,y 是矩形【中心】坐标（anchor 默认 CENTER），
+        # 不是左上角。故第一张卡片的中心 = 组中心 - 组内偏移，组中心对齐窗口中心。
         self.cards = []
         card_w, card_h = 300, 180
         spacing = 40  # 卡片间距
-        total_w = len(MAPS) * card_w + (len(MAPS) - 1) * spacing
-        start_x = (WINDOW_WIDTH - total_w) // 2
-        start_y = WINDOW_HEIGHT // 2 - card_h // 2 + 40
+        # 修复：原先按「左上角语义」计算，导致卡片组中心 x=490（偏左150px）、
+        # y 偏移 40（偏下），三张卡片整体不居中；现改为组中心 = 窗口中心
+        start_x = WINDOW_WIDTH // 2 - (len(MAPS) - 1) * (card_w + spacing) // 2
+        start_y = WINDOW_HEIGHT // 2
         for i, m in enumerate(MAPS):
             rect = arcade.XYWH(start_x + i * (card_w + spacing), start_y, card_w, card_h)
             self.cards.append(rect)
