@@ -9,3 +9,6 @@ __pycache__/
 .sisyphus/
 # 工作目录（opencode 工具）
 .omo/
+# 打包产物（PyInstaller 的 dist/build、Inno Setup 安装包输出）
+dist/
+build/

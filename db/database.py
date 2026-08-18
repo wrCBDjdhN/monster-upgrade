@@ -10,17 +10,11 @@
 - db/potions.py: 药水管理
 """
 
-import sqlite3
-import os
 from datetime import datetime
 
-# 数据库文件路径（与本文件同目录）
-DB_PATH = os.path.join(os.path.dirname(__file__), "game.db")
-
-
-def _conn():
-    """获取数据库连接"""
-    return sqlite3.connect(DB_PATH)
+# 数据库连接统一走 db.connection（DB_PATH/_conn 在打包模式下指向用户数据目录，
+# 源码模式维持 db/ 目录；此处仅 re-export 保持本模块对外接口不变）
+from db.connection import DB_PATH, _conn  # noqa: F401
 
 
 # ── 数据库初始化（保留在此文件，因为涉及所有表的创建） ──
