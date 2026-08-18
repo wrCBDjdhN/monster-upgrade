@@ -197,7 +197,14 @@ def draw_player_base_equipment(player, equip, batch=None):
 
 
 def draw_player_weapon(player, weapon_kind, weapon_color, weapon_shape, batch=None):
-    """在玩家本体右侧绘制不透明实心手持武器，按 shape 区分形态。"""
+    """在玩家本体右侧绘制不透明实心手持武器，按 shape 区分形态。
+
+    武器一律竖直握持在玩家右侧（枪械为横握）：
+    - 主体竖直细条锚定 wx = 玩家右缘 + 5px；
+    - 附属部件（剑格/锤头/杖顶宝石/枪口/握把）与主体【垂直方向】相连，
+      修复此前按水平偏移（+length）导致部件横向分离错位的 bug（如石锤
+      锤柄与锤头横向并排）；并补齐 gun 分支（8 种枪械此前完全不渲染）。
+    """
     if weapon_color is None or weapon_shape in ("none", None):
         return
     cx, cy = player.center_x, player.center_y
@@ -207,33 +214,57 @@ def draw_player_weapon(player, weapon_kind, weapon_color, weapon_shape, batch=No
     if weapon_shape == "sword":
         blade_len = int(h * 1.2)
         if batch is not None:
-            batch.rect(wx + blade_len * 0.5, cy, 3, blade_len, weapon_color)
-            batch.rect(wx, cy, 11, 3, (180, 180, 190))
+            # 剑身：竖直细条
+            batch.rect(wx, cy, 3, blade_len, weapon_color)
+            # 剑格：横条贴住剑身下端（垂直连接）
+            batch.rect(wx, cy - blade_len * 0.5 + 4, 11, 3, (180, 180, 190))
         else:
-            arcade.draw_rect_filled(arcade.XYWH(wx + blade_len * 0.5, cy, 3, blade_len), weapon_color)
-            arcade.draw_rect_filled(arcade.XYWH(wx, cy, 11, 3), (180, 180, 190))
+            arcade.draw_rect_filled(arcade.XYWH(wx, cy, 3, blade_len), weapon_color)
+            arcade.draw_rect_filled(arcade.XYWH(wx, cy - blade_len * 0.5 + 4, 11, 3), (180, 180, 190))
     elif weapon_shape == "mace":
         handle_len = int(h * 1.0)
         if batch is not None:
-            batch.rect(wx + handle_len * 0.5, cy, 5, handle_len, weapon_color)
-            batch.circle(wx + handle_len, cy, 6, weapon_color)
+            # 锤柄：竖直细条
+            batch.rect(wx, cy, 5, handle_len, weapon_color)
+            # 锤头：圆，在锤柄顶端（垂直连接）
+            batch.circle(wx, cy + handle_len * 0.5 + 3, 6, weapon_color)
         else:
-            arcade.draw_rect_filled(arcade.XYWH(wx + handle_len * 0.5, cy, 5, handle_len), weapon_color)
-            arcade.draw_circle_filled(wx + handle_len, cy, 6, weapon_color)
+            arcade.draw_rect_filled(arcade.XYWH(wx, cy, 5, handle_len), weapon_color)
+            arcade.draw_circle_filled(wx, cy + handle_len * 0.5 + 3, 6, weapon_color)
     elif weapon_shape == "bow":
         bow_len = int(h * 1.4)
         if batch is not None:
-            batch.rect(wx + bow_len * 0.5, cy, 4, bow_len, weapon_color)
+            # 弓身：竖直细条
+            batch.rect(wx, cy, 4, bow_len, weapon_color)
+            # 弓弦：弓身左侧细竖条（浅色，区分弓身）
+            batch.rect(wx - 3, cy, 1, bow_len, (220, 220, 225))
         else:
-            arcade.draw_rect_filled(arcade.XYWH(wx + bow_len * 0.5, cy, 4, bow_len), weapon_color)
+            arcade.draw_rect_filled(arcade.XYWH(wx, cy, 4, bow_len), weapon_color)
+            arcade.draw_rect_filled(arcade.XYWH(wx - 3, cy, 1, bow_len), (220, 220, 225))
     elif weapon_shape == "staff":
         staff_len = int(h * 1.3)
         if batch is not None:
-            batch.rect(wx + staff_len * 0.5, cy, 3, staff_len, weapon_color)
-            batch.circle(wx + staff_len, cy, 5, weapon_color)
+            # 杖身：竖直细条
+            batch.rect(wx, cy, 3, staff_len, weapon_color)
+            # 杖顶宝石：圆，在杖身顶端（垂直连接）
+            batch.circle(wx, cy + staff_len * 0.5 + 3, 5, weapon_color)
         else:
-            arcade.draw_rect_filled(arcade.XYWH(wx + staff_len * 0.5, cy, 3, staff_len), weapon_color)
-            arcade.draw_circle_filled(wx + staff_len, cy, 5, weapon_color)
+            arcade.draw_rect_filled(arcade.XYWH(wx, cy, 3, staff_len), weapon_color)
+            arcade.draw_circle_filled(wx, cy + staff_len * 0.5 + 3, 5, weapon_color)
+    elif weapon_shape == "gun":
+        # 枪械：横握造型（水平枪身 + 枪口 + 下方握把）
+        gun_len = int(h * 1.1)
+        if batch is not None:
+            # 枪身：水平横条
+            batch.rect(wx + gun_len * 0.5, cy, gun_len, 5, weapon_color)
+            # 枪口：枪身右端加粗短段
+            batch.rect(wx + gun_len + 4, cy, 6, 3, (120, 120, 125))
+            # 握把：枪身下方竖条（与枪身底缘相接）
+            batch.rect(wx, cy - 7, 4, 9, (80, 80, 88))
+        else:
+            arcade.draw_rect_filled(arcade.XYWH(wx + gun_len * 0.5, cy, gun_len, 5), weapon_color)
+            arcade.draw_rect_filled(arcade.XYWH(wx + gun_len + 4, cy, 6, 3), (120, 120, 125))
+            arcade.draw_rect_filled(arcade.XYWH(wx, cy - 7, 4, 9), (80, 80, 88))
 
 
 # ===================== 掉落物 =====================

@@ -448,19 +448,22 @@ def render_game(view):
         else:
             arcade.draw_line(px, py, ex, ey, (255, 255, 220, 240), 14)
 
+    # 玩家手持武器（观战模式不绘制：玩家已撤离/阵亡，武器残影会残留在撤离点，
+    # 导致观战时人物看起来"不消失"）
+    # 修复：武器图元此前被追加到世界层批次 wb（其 draw() 早已执行完毕、之后不再
+    # 提交，导致武器永不显示），改为挂到玩家层批次 pb，并在 pb.draw() 之前提交，
+    # 随玩家本体一起渲染（追加顺序在本体之后，武器绘制在本体之上）。
+    if not getattr(view, "_spectating", False):
+        w_item_id = getattr(view.window.game_state, 'current_weapon_item_id', None)
+        w_color, w_shape, w_kind = get_weapon_visual(w_item_id)
+        draw_player_weapon(view.player, w_kind, w_color, w_shape, pb)
+
     # 玩家层一次性绘制
     if pb is not None:
         try:
             pb.draw()
         except Exception:
             pb = None
-
-    # 玩家手持武器（观战模式不绘制：玩家已撤离/阵亡，武器残影会残留在撤离点，
-    # 导致观战时人物看起来"不消失"）
-    if not getattr(view, "_spectating", False):
-        w_item_id = getattr(view.window.game_state, 'current_weapon_item_id', None)
-        w_color, w_shape, w_kind = get_weapon_visual(w_item_id)
-        draw_player_weapon(view.player, w_kind, w_color, w_shape, wb)
 
     # 粒子效果
     particle_system.draw()
