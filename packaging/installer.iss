@@ -3,7 +3,7 @@
 ; 注意：本文件必须保存为 UTF-8 带 BOM 编码，否则中文会乱码
 
 #define MyAppName "打怪升级"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppExeName "MonsterUpgrade.exe"
 #define MyAppId "{{8E2B1A3C-4F5D-4A6B-9C1E-3D2F5A6B7C8D}"
 
