@@ -192,6 +192,7 @@ def modify_attack_damage(player, damage: float) -> float:
     1. 法师「法力亲和」：伤害 ×1.2
     2. 骑士「逆境反击」：血量 <30% 时 ×1.3
     3. 刺客「致命一击」：15% 概率 ×2（每次攻击掷一次，弹丸/挥砍整体判定）
+    4. 狂暴药水（power_effect_timer 未归零）：伤害 × power_mult（默认 1.0 无加成）
     返回修正后的伤害值（浮点，调用方自行 round）。
     """
     passive = getattr(player, "character_def", {}).get("passive") or {}
@@ -210,4 +211,6 @@ def modify_attack_damage(player, damage: float) -> float:
     crit = passive.get("crit_chance", 0.0)
     if crit > 0 and random.random() < crit:
         dmg *= float(passive.get("crit_mult", 2.0))
+    # 狂暴药水：伤害倍率（power_effect_timer 归零时 power_mult 已复位为 1.0）
+    dmg *= getattr(player, "power_mult", 1.0)
     return dmg

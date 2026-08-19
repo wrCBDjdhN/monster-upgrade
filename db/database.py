@@ -122,6 +122,13 @@ def init_db():
                 FOREIGN KEY(player_id) REFERENCES players(id)
             )
         """)
+        # 游戏设置表（键值对：按键绑定/主音量/静音开关，settings_view 读写，重启保留）
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """)
         # 为 equipment 表添加 level 列（如果不存在）
         try:
             c.execute("ALTER TABLE equipment ADD COLUMN level INTEGER NOT NULL DEFAULT 1")
@@ -193,3 +200,10 @@ from db.characters import get_unlocked_characters, is_character_unlocked, unlock
 
 # 角色等级管理（等级/经验/待选升级/永久加成）
 from db.levels import get_character_levels, add_exp, choose_bonus  # noqa: F401, E402
+
+# 游戏设置管理（按键绑定/音量/静音，settings_view 读写）
+from db.settings import (  # noqa: F401, E402
+    get_setting, set_setting,
+    get_key_bindings, set_key_bindings, reset_key_bindings,
+    get_volume, set_volume, get_sound_enabled, set_sound_enabled,
+)

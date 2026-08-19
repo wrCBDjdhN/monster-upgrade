@@ -4,20 +4,53 @@ import math
 import time
 import random
 import arcade
-from config import FRUIT_SPEED_MULT, WINDOW_WIDTH, WINDOW_HEIGHT
+from config import WINDOW_WIDTH, WINDOW_HEIGHT
 from game.sound_manager import sound_manager
 from game.effects import particle_system, floating_texts
 from entities.effects_defs import DEBUFF_POOL
 from net.protocol import MsgType  # 联机消息类型（客户端上报 ATTACK_EVENT 用）
 
 
+def _action_keys(view, *actions) -> set:
+    """返回指定动作在当前键位绑定下对应的键码集合（按键判定用）
+
+    从 view.key_bindings（GameView 加载，见 views/game_view.py）读取动作→键名列表，
+    把键名解析为 arcade.key 键码；view 未加载绑定或键名非法时安全跳过。
+    设置界面重绑后（写 db + 刷新 view.key_bindings）此处自动生效。
+    """
+    bindings = getattr(view, "key_bindings", None) or {}
+    codes = set()
+    for act in actions:
+        for name in bindings.get(act, []):
+            code = getattr(arcade.key, name, None)
+            if code is not None:
+                codes.add(code)
+    return codes
+
+
 def handle_key_press(view, key, modifiers):
     """处理键盘按下事件"""
     gs = view.window.game_state
 
+    # 设置界面键 (ESC)：任何模式（含观战）都可打开设置界面调整按键/音量。
+    # 放在观战早退之前：观战中玩家也要能开设置。
+    if key == arcade.key.ESCAPE:
+        from views.settings_view import SettingsView
+        view.window.show_view(SettingsView(view.window_ref, game_view=view))
+        return
+
+    # 小地图放大键 (M)：切换「周围视野 ⇄ 整张地图」显示模式（见 rendering.draw_minimap）
+    if key in _action_keys(view, "minimap_zoom"):
+        view._minimap_full = not getattr(view, "_minimap_full", False)
+        # 新手教程：按下 M 即视为已讲解小地图（游戏内横幅切换为撤离引导）
+        tut = getattr(gs, "tutorial", None)
+        if tut is not None and tut.active and tut.stage == 3:
+            tut.minimap_taught = True
+        return
+
     # 观战模式（主机撤离/死亡后）：禁操作，仅响应 V 键循环切换观战视角
     if getattr(view, "_spectating", False):
-        if key == arcade.key.V:
+        if key in _action_keys(view, "spectate"):
             view._cycle_spectate_target()
         return
 
@@ -26,18 +59,18 @@ def handle_key_press(view, key, modifiers):
         view.controller.on_key_press(key)
 
     # 宝箱交互键
-    if key == arcade.key.E:
+    if key in _action_keys(view, "interact"):
         view._chest_key_pressed = True
 
     # 角色技能键 (F)：释放当前角色的特殊技能（法师奥术爆发/骑士圣盾/刺客影袭）。
     # 单机/主机本地直接释放；联机客户端上报主机裁决 + 本地纯表现（与 ATTACK_EVENT 同构）。
-    if key == arcade.key.F:
+    if key in _action_keys(view, "skill"):
         _handle_skill_key(view)
         return
 
     # 背包界面键 (TAB)：有未消费的升级（pending_choices>0）时优先打开升级面板，
     # 无待选升级则打开背包（升级面板关闭后可随时 TAB 回来继续选择）
-    if key == arcade.key.TAB:
+    if key in _action_keys(view, "backpack"):
         ld = getattr(view, "_level_data", None) or {}
         if ld.get("pending_choices", 0) > 0:
             from views.level_up_view import LevelUpView
@@ -49,10 +82,10 @@ def handle_key_press(view, key, modifiers):
 
     # 火箭发射台菜单选择（7=炸毁，8=启用撤离）
     # 直接按7/8即可选择，无需先按E
-    if key in (arcade.key.KEY_7, arcade.key.KEY_8):
+    if key in _action_keys(view, "rocket_destroy", "rocket_evac"):
+        choice = 1 if key in _action_keys(view, "rocket_destroy") else 2
         # 检查是否有打开的菜单
         if hasattr(view, '_rocket_pad_menu') and view._rocket_pad_menu is not None:
-            choice = 1 if key == arcade.key.KEY_7 else 2
             from game.entity_callbacks import handle_rocket_pad_choice
             handle_rocket_pad_choice(view, choice)
             return
@@ -61,49 +94,90 @@ def handle_key_press(view, key, modifiers):
             dist = math.hypot(pad.center_x - view.player.center_x,
                               pad.center_y - view.player.center_y)
             if dist < 60 and pad.state == "boss_defeated":
-                choice = 1 if key == arcade.key.KEY_7 else 2
                 from game.entity_callbacks import handle_rocket_pad_choice
                 view._rocket_pad_menu = pad
                 handle_rocket_pad_choice(view, choice)
                 return
 
-    # 药水快捷键 (1-3)
-    if gs.player_id and key in (arcade.key.KEY_1, arcade.key.KEY_2, arcade.key.KEY_3):
-        potion_index = key - arcade.key.KEY_1
-        from db.database import get_potions, use_potion
-        potions = get_potions(gs.player_id)
-        if potion_index < len(potions):
-            pot = potions[potion_index]
+    # 药水快捷键 (1-3)：候选 = 本局药水槽（run:item_id，不占容量优先用）+ 仓库药水
+    potion_index = -1
+    for _i, _act in enumerate(("potion_1", "potion_2", "potion_3")):
+        if key in _action_keys(view, _act):
+            potion_index = _i
+            break
+    if gs.player_id and potion_index >= 0:
+        # 本局药水槽在前：热键 1-N 先消耗本局拾取药水，仓库药水随后
+        run_potions = getattr(gs, "run_potions", None) or {}
+        candidates = [f"run:{item_id}" for item_id, qty in run_potions.items() if qty > 0]
+        from db.database import get_potions
+        candidates.extend(p["id"] for p in get_potions(gs.player_id))
+        if potion_index < len(candidates):
+            potion_id = candidates[potion_index]
             # 联机客户端：药水使用请求交主机确认（HP 主机权威），本地不直接生效
             if gs.net_mode == "client" and gs.net_client is not None:
                 gs.net_client.send((MsgType.POTION_USE, {
                     "player_id": getattr(gs, "net_player_id", 0),
-                    "potion_id": pot["id"],
-                    "potion_name": pot.get("name", ""),
+                    "potion_id": potion_id,
                 }))
                 return
-            effect_info = use_potion(gs.player_id, pot["id"])
-            if effect_info:
-                effect = effect_info["effect"]
-                value = effect_info["value"]
-                duration = effect_info["duration"]
-                if effect == "heal":
-                    view.player.apply_hot(value / max(1, duration), duration)
-                    floating_texts.add(view.player.center_x, view.player.center_y,
-                                      f"回复中 +{int(value)} HP", arcade.color.GREEN)
-                elif effect == "speed":
-                    # 用药水自身的 value 作为加速倍率（替代硬编码 1.5）
-                    view.player.speed_mult = value * view.player.gear_speed_mult
-                    view.player.speed_effect_timer = duration
-                    floating_texts.add(view.player.center_x, view.player.center_y,
-                                      "加速!", arcade.color.CYAN)
-                elif effect == "fruit":
-                    # 果实药水：回复生命 + 按 config 倍率加速
-                    view.player.heal(value)
-                    view.player.speed_mult = FRUIT_SPEED_MULT * view.player.gear_speed_mult
-                    view.player.speed_effect_timer = duration
-                    floating_texts.add(view.player.center_x, view.player.center_y,
-                                      f"果实 +{value} HP 加速!", arcade.color.GREEN)
+            # 单机/主机：本地权威使用（查定义 → 扣减 → 应用效果 → 浮动文字）
+            _use_potion_local(view, gs, potion_id)
+
+
+def _use_potion_local(view, gs, potion_id: str | int) -> None:
+    """单机/联机主机本地权威使用药水：查定义 → 扣减 → 应用效果 → 浮动文字
+
+    potion_id 形如 "run:item_id"（本局药水槽，减 run_potions）或仓库药水 DB id（int）。
+    """
+    from entities.equipment_defs import POTIONS
+    # 类型守卫：仓库药水 potion_id 为 DB int id，仅字符串且带 "run:" 前缀才是本局药水槽
+    if isinstance(potion_id, str) and potion_id.startswith("run:"):
+        # 本局药水：从 POTIONS 定义取效果，扣减 run_potions（不占背包容量）
+        item_id = potion_id[4:]
+        run_potions = getattr(gs, "run_potions", None)
+        if not run_potions or run_potions.get(item_id, 0) <= 0:
+            return
+        pdef = POTIONS.get(item_id)
+        if not pdef:
+            return
+        run_potions[item_id] -= 1
+        if run_potions[item_id] <= 0:
+            del run_potions[item_id]
+        _apply_potion_effect(view, pdef.get("effect", "heal"),
+                             pdef.get("value", 0), pdef.get("duration", 0),
+                             pdef.get("name", item_id))
+        return
+    # 仓库药水：经 db 层扣减（use_potion 扣库存并返回效果信息）
+    from db.database import use_potion
+    effect_info = use_potion(gs.player_id, potion_id)
+    if not effect_info:
+        return
+    _apply_potion_effect(view, effect_info["effect"],
+                         effect_info.get("value", 0), effect_info.get("duration", 0),
+                         potion_id)
+
+
+def _apply_potion_effect(view, effect: str, value: float, duration: float, name: str) -> None:
+    """本地应用药水效果到玩家并显示浮动文字（与 player.apply_potion_effect 同口径）
+
+    修复：治疗药水无 duration 时（如超级治疗药水）旧版 apply_hot(value, 0) 永不生效，
+    现统一走 apply_potion_effect 的瞬回分支（duration<=0 → 瞬间回复）。
+    """
+    player = view.player
+    heal_amount = player.apply_potion_effect(effect, value, duration)
+    if heal_amount > 0:
+        floating_texts.add(player.center_x, player.center_y,
+                           f"+{int(heal_amount)} HP", arcade.color.GREEN)
+    elif effect == "speed":
+        floating_texts.add(player.center_x, player.center_y, "加速!", arcade.color.CYAN)
+    elif effect == "fruit":
+        floating_texts.add(player.center_x, player.center_y, "果实加速!", arcade.color.GREEN)
+    elif effect == "shield":
+        floating_texts.add(player.center_x, player.center_y,
+                           f"护盾 +{int(value)}", (120, 160, 255))
+    elif effect == "power":
+        floating_texts.add(player.center_x, player.center_y,
+                           f"狂暴! +{int((value - 1) * 100)}% 伤害", (255, 120, 40))
 
 
 def handle_key_release(view, key, modifiers):
@@ -113,7 +187,7 @@ def handle_key_release(view, key, modifiers):
         return
     if view.controller:
         view.controller.on_key_release(key)
-    if key == arcade.key.E:
+    if key in _action_keys(view, "interact"):
         view._chest_key_pressed = False
 
 

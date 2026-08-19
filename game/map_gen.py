@@ -210,7 +210,7 @@ def generate_map(seed: int, num_rooms: int = 6, theme: str = "forest") -> dict:
 
     for crx, cry, crw, crh in corner_rects:
         placed = False
-        for _try in range(12):  # 每个角落区域多次尝试，提高放置成功率
+        for _try in range(20):  # 每个角落区域多次尝试，提高放置成功率（修复后门洞双向避让更严格，调高尝试次数补偿）
             bx = rng.randint(crx, crx + crw - boss_w)
             by = rng.randint(cry, cry + crh - boss_h)
             # 检查与现有房间是否过近（留 2 块瓦片间距）
@@ -224,35 +224,14 @@ def generate_map(seed: int, num_rooms: int = 6, theme: str = "forest") -> dict:
                     break
             if too_close:
                 continue
-            # 修复：检查 BOSS 建筑（含墙体）是否堵住出生房（rooms[0]）门洞出口走廊。
+            # 修复：BOSS 建筑与房间门洞走廊双向避让。
             # 房间门洞选择阶段只避让邻近房间（rooms），BOSS 建筑是后生成的，未参与门洞避让；
-            # 若 BOSS 墙正对门洞且间距过近（仅 2 瓦片），玩家出门即被 BOSS 墙挡住，被困出生房间。
-            boss_rect = (bx - tw, by - tw, bx + boss_w + tw, by + boss_h + tw)
-            door_blocked = False
-            spawn_room = rooms[0]
-            # 门洞出口走廊：以门洞为中心、向门外延伸 ROOM_SPACING 的矩形（宽 = 门宽*2）
-            half = door_width  # 门宽 128px，走廊每侧留一扇门宽余量
-            if spawn_room.door_side == 0:  # 上
-                door_exit = (spawn_room.door_pos - half, spawn_room.y - ROOM_SPACING,
-                             spawn_room.door_pos + half, spawn_room.y)
-            elif spawn_room.door_side == 1:  # 下
-                door_exit = (spawn_room.door_pos - half, spawn_room.y + spawn_room.h,
-                             spawn_room.door_pos + half, spawn_room.y + spawn_room.h + ROOM_SPACING)
-            elif spawn_room.door_side == 2:  # 左
-                door_exit = (spawn_room.x - ROOM_SPACING, spawn_room.door_pos - half,
-                             spawn_room.x, spawn_room.door_pos + half)
-            else:  # 右
-                door_exit = (spawn_room.x + spawn_room.w, spawn_room.door_pos - half,
-                             spawn_room.x + spawn_room.w + ROOM_SPACING, spawn_room.door_pos + half)
-            # AABB 相交判定（含边界重叠视为堵门）
-            if not (
-                boss_rect[0] + boss_rect[2] <= door_exit[0] or boss_rect[0] >= door_exit[0] + door_exit[2] or
-                boss_rect[1] + boss_rect[3] <= door_exit[1] or boss_rect[1] >= door_exit[1] + door_exit[3]
-            ):
-                door_blocked = True
-            if door_blocked:
-                continue
-            # 门洞开在朝向地图中心的一侧
+            # 若 BOSS 墙正对门洞且间距过近（仅 2 瓦片），玩家出门即被 BOSS 墙挡住，无法进入/被困。
+            # 修复点：
+            # 1) AABB 判定公式修正（原 `boss_rect[0]+boss_rect[2]` 把角点坐标相加，判定恒失效）；
+            # 2) 检查范围从仅出生房（rooms[0]）扩展到全部房间门洞走廊；
+            # 3) 新增 BOSS 自身门洞走廊（朝地图中心延伸）不被任一房间（含墙）堵住的检查。
+            # 门洞开在朝向地图中心的一侧（先算门洞，供走廊避让检查使用）
             center_x, center_y = MAP_WIDTH // 2, MAP_HEIGHT // 2
             b_center_x = bx + boss_w // 2
             b_center_y = by + boss_h // 2
@@ -261,9 +240,61 @@ def generate_map(seed: int, num_rooms: int = 6, theme: str = "forest") -> dict:
                 door_side = 3 if b_center_x < center_x else 2  # 门在右 / 左
             else:
                 door_side = 0 if b_center_y < center_y else 1  # 门在上 / 下
-            # 门洞位置取建筑边长中点附近
+            # 门洞位置取建筑边长中点附近；门洞中心（房间门洞走廊以门洞中心为基准，BOSS 门洞同样取中心）
             door_pos = (boss_w if door_side in (0, 1) else boss_h) // 2
-            door_width = TILE_SIZE * 2  # 门宽 128 像素
+            door_cx = bx + door_pos + door_width // 2  # 上/下门洞的水平中心
+            door_cy = by + door_pos + door_width // 2  # 左/右门洞的垂直中心
+            half = door_width  # 门宽 128px，走廊每侧留一扇门宽余量
+            boss_rect = (bx - tw, by - tw, bx + boss_w + tw, by + boss_h + tw)
+            # 1) BOSS 建筑（含墙）不得堵住任一房间的门洞出口走廊
+            door_blocked = False
+            for r in rooms:
+                if r.door_side == 0:  # 上
+                    door_exit = (r.door_pos - half, r.y - ROOM_SPACING,
+                                 r.door_pos + half, r.y)
+                elif r.door_side == 1:  # 下
+                    door_exit = (r.door_pos - half, r.y + r.h,
+                                 r.door_pos + half, r.y + r.h + ROOM_SPACING)
+                elif r.door_side == 2:  # 左
+                    door_exit = (r.x - ROOM_SPACING, r.door_pos - half,
+                                 r.x, r.door_pos + half)
+                else:  # 右
+                    door_exit = (r.x + r.w, r.door_pos - half,
+                                 r.x + r.w + ROOM_SPACING, r.door_pos + half)
+                # 修正后的 AABB 相交判定（角点比较，含边界重叠视为堵门）
+                if not (
+                    boss_rect[2] <= door_exit[0] or door_exit[2] <= boss_rect[0] or
+                    boss_rect[3] <= door_exit[1] or door_exit[3] <= boss_rect[1]
+                ):
+                    door_blocked = True
+                    break
+            if door_blocked:
+                continue
+            # 2) BOSS 自身门洞走廊（朝地图中心、向外延伸 ROOM_SPACING）不得被任一房间（含墙）堵住
+            if door_side == 0:  # 上
+                boss_door_exit = (door_cx - half, by - tw - ROOM_SPACING,
+                                  door_cx + half, by - tw)
+            elif door_side == 1:  # 下
+                boss_door_exit = (door_cx - half, by + boss_h + tw,
+                                  door_cx + half, by + boss_h + tw + ROOM_SPACING)
+            elif door_side == 2:  # 左
+                boss_door_exit = (bx - tw - ROOM_SPACING, door_cy - half,
+                                  bx - tw, door_cy + half)
+            else:  # 右
+                boss_door_exit = (bx + boss_w + tw, door_cy - half,
+                                  bx + boss_w + tw + ROOM_SPACING, door_cy + half)
+            boss_door_blocked = False
+            for r in rooms:
+                # 房间含墙矩形（房间墙体厚 tw）
+                room_rect = (r.x - tw, r.y - tw, r.x + r.w + tw, r.y + r.h + tw)
+                if not (
+                    boss_door_exit[2] <= room_rect[0] or room_rect[2] <= boss_door_exit[0] or
+                    boss_door_exit[3] <= room_rect[1] or room_rect[3] <= boss_door_exit[1]
+                ):
+                    boss_door_blocked = True
+                    break
+            if boss_door_blocked:
+                continue
 
             if door_side == 0:  # 门在上墙
                 door_x = bx + door_pos

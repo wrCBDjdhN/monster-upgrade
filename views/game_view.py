@@ -12,7 +12,6 @@ from config import (
     EVAC_COLOR, EVAC_RADIUS,
     WELL_HEAL, WELL_SPEED_MULT, WELL_SPEED_DURATION,
     CACTUS_THORN_DAMAGE,  # 仙人掌反伤：客户端近战攻击环境物命中时作用于攻击者（幽灵）
-    FRUIT_SPEED_MULT,  # 果实药水加速倍率（主机权威药水结算用，见 _handle_potion_use）
     MONSTER_WEAPON_LEVEL_RANGE, MONSTER_GEAR_LEVEL_RANGE,
     BOSS_WEAPON_LEVEL_RANGE, BOSS_GEAR_LEVEL_RANGE,
     NET_SNAPSHOT_HZ,  # 状态快照广播频率（怪物快照 20Hz）
@@ -186,6 +185,9 @@ class GameView(arcade.View):
         self._well_broadcasted = False             # 水井首次开启是否已广播
         self._broadcasted_pads: dict = {}          # 火箭台序号 -> 上次广播的状态键（state 或 (state,countdown)）
         self.drops: list[DropItem] = []
+        # 新手教程：游戏内引导横幅文字缓存（TextCache，避免每帧重建纹理）
+        from views.text_cache import TextCache
+        self._tut_tc = TextCache()
         self.projectiles = None
         # 可破坏环境物
         self.harvestables: list = []
@@ -230,6 +232,13 @@ class GameView(arcade.View):
         self._evac_unit_ring = None
         # 宝箱按键状态
         self._chest_key_pressed = False
+        # 键位绑定：{动作名: [arcade.key 属性名, ...]}，从 db settings 加载（默认 config.KEY_BINDINGS）。
+        # PlayerController（移动）与 input_handler（E/F/TAB/1-3/7/8/V/M/ESC）共用；
+        # 设置界面修改后写 db 并刷新本属性（见 views/settings_view.py）
+        self.key_bindings = None
+        self._load_key_bindings()
+        # 小地图显示模式：False=周围视野（±MINIMAP_VIEW_RADIUS），True=全图（M 键切换）
+        self._minimap_full = False
         # 水井是否已首次开启（首次开箱掉落，之后回血加速）
         self._well_opened = False
         # 最近一次攻击距离
@@ -265,6 +274,21 @@ class GameView(arcade.View):
         # 角色等级数据缓存（等级/经验/待选升级/永久加成）：setup 读取、经验发放时刷新，
         # HUD 与升级面板（level_up_view）共用，避免每帧查库
         self._level_data = None
+
+    def _load_key_bindings(self):
+        """从 db settings 加载键位绑定（默认 config.KEY_BINDINGS），失败时回退默认
+
+        settings 表由 init_db() 创建（start_view 引导时已执行）；此处防御性兜底：
+        表不存在/读取异常时用默认绑定，保证任何时候进入游戏都不会因绑定缺失崩溃。
+        设置界面（settings_view）修改绑定后写 db 并调用本方法刷新。
+        """
+        from config import KEY_BINDINGS
+        try:
+            from db.database import get_key_bindings
+            self.key_bindings = get_key_bindings()
+        except Exception:
+            # 数据库尚未初始化或读取失败：回退默认绑定
+            self.key_bindings = dict(KEY_BINDINGS)
 
     def setup(self):
         gs = self.window.game_state
@@ -381,10 +405,10 @@ class GameView(arcade.View):
                 res._lifetime = None  # 地图初始资源永不消失
                 self.drops.append(res)
 
-        # 宝箱（每个房间1个）
+        # 宝箱（每个房间1个；按主题区分掉落池/等级，用户需求）
         self.chests = []
         for cx, cy in self.map_data.get("chest_positions", []):
-            chest = Chest(cx, cy)
+            chest = Chest(cx, cy, theme=theme)
             self.chests.append(chest)
             self.obstacle_list.append(chest)
 
@@ -598,6 +622,8 @@ class GameView(arcade.View):
 
         # 重置携带物
         gs.run_carried = {}
+        # 重置本局药水槽（run_potions：不占容量、上限 RUN_POTION_SLOTS）
+        gs.run_potions = {}
         # 重置局内免费拾取记录：free_equipped_item_ids 是会话级集合，若不随新一局清空，
         # 上一局免费拾取的 item_id 会残留，导致撤离时把「从仓库带入的同名装备」误判为
         # 局内拾取而重复入库（修复：撤离复制仓库装备 bug）
@@ -605,7 +631,8 @@ class GameView(arcade.View):
 
         # 摄像机控制器
         physics = arcade.PhysicsEngineSimple(self.player, self.obstacle_list)
-        self.controller = PlayerController(self.player, physics)
+        # 传入键位绑定：PlayerController 移动键查询绑定（设置界面重绑后同步生效）
+        self.controller = PlayerController(self.player, physics, key_bindings=self.key_bindings)
         self.controller.camera.position = (self.player.center_x, self.player.center_y)
 
         # 攻击 debuff 列表（从武器和装备的 buff 中收集，元素为 (效果ID, 效果等级) 元组）
@@ -642,6 +669,14 @@ class GameView(arcade.View):
         if w and w.get("debuff") and w["debuff"] not in [d[0] for d in self._attack_debuffs]:
             self._attack_debuffs.append((w["debuff"], 1))
         self.player.speed_mult = self.player.gear_speed_mult
+        # 新一局开始：重置药水 buff 状态（护盾/狂暴/持续回复不跨局残留）
+        self.player.shield = 0.0
+        self.player.shield_effect_timer = 0.0
+        self.player.power_mult = 1.0
+        self.player.power_effect_timer = 0.0
+        self.player.speed_effect_timer = 0.0
+        self.player.heal_duration = 0.0
+        self.player.heal_per_sec = 0.0
         # 缓存武器效果名，供 HUD 显示（效果等级>1 时传入 "id:level" 带等级显示）
         self._cached_weapon_effects = effects_label(
             [f"{e['id']}:{e['level']}" if e.get("level", 1) > 1 else e["id"] for e in weapon_effects]
@@ -780,10 +815,11 @@ class GameView(arcade.View):
                                              (150, 150, 150), speed=60, life=0.3, size=3)
                         # 仙人掌反伤：攻击者（客户端幽灵）受到反弹伤害（受防御减免）
                         if h.resource_type == "cactus":
-                            attacker.take_damage(CACTUS_THORN_DAMAGE)
+                            # 修复：用 take_damage 返回的实际伤害显示（护盾/防御减免后真实扣血量）
+                            actual = attacker.take_damage(CACTUS_THORN_DAMAGE)
                             floating_texts.add_damage(attacker.center_x,
                                                      attacker.center_y + 30,
-                                                     CACTUS_THORN_DAMAGE)
+                                                     actual)
                         # 环境物被击杀：掉落 + 移出障碍（env_destroyed/drop_spawn
                         # 由 _broadcast_map_changes 与 drop_spawn 广播统一同步到客户端）
                         if not h.alive:
@@ -1165,6 +1201,7 @@ class GameView(arcade.View):
             lobby._status = notice or "已回到房间，等待下一局"
             lobby._notice = notice
         gs.run_carried = {}  # 本局结束：携带物已结算/清空
+        gs.run_potions = {}  # 本局药水槽一并清空（未撤离不结算）
         self.window.show_view(lobby)
 
     def _apply_room_ended(self, payload: dict) -> None:
@@ -1187,67 +1224,102 @@ class GameView(arcade.View):
             gs.net_client = None
             gs.net_mode = "solo"
             gs.run_carried = {}  # 房间结束未撤离：本次携带物不结算清除
+            gs.run_potions = {}  # 本局药水槽一并清空
             from views.start_view import StartView
             self.window.show_view(StartView(self.window_ref))
             return
         # 本局结束但房间保留：回房等待（连接保持，等待主机再次开局）
         gs.run_carried = {}
+        gs.run_potions = {}  # 本局药水槽一并清空
         self._back_to_lobby(f"本局结束：{reason}")
 
     def _handle_potion_use(self, sender_id: int, payload: dict) -> None:
-        """主机确认客户端药水使用请求：查库验证 → 应用到对应玩家/幽灵 → 广播 POTION_ACK
+        """主机确认客户端药水使用请求：查库存 → 应用到对应玩家/幽灵 → 广播 POTION_ACK
 
-        - 药水数据/扣减经 db 层（use_potion），主机权威：各端 HP 经 PLAYER_SNAPSHOT 校准；
-        - 治疗数字随 POTION_ACK 广播，全端可见（Todo 16，B9 药水事件流）。
+        - potion_id 支持两种来源：
+          * "run:item_id"：本局药水槽（不占背包容量），从 equipment_defs.POTIONS 取效果，
+            无 DB 扣减；主机校验该玩家 run 药水库存并扣减；
+          * 普通药水 id：查库验证 → use_potion 扣减。
+        - 效果统一经 Player.apply_potion_effect（含瞬回修复/护盾/狂暴），主机权威：
+          各端 HP 经 PLAYER_SNAPSHOT 校准；治疗数字随 POTION_ACK 广播，全端可见。
+        - ACK 携带 effect/value/duration：客户端对本人本地即时生效（buff 不随快照同步）。
         """
         gs = self.window.game_state
         potion_id = payload.get("potion_id", "")
-        from db.database import get_potions, use_potion
-        potions = get_potions(sender_id)
-        pot = next((p for p in potions if p["id"] == potion_id), None)
-        if pot is None:
-            # 库存中无此药水：拒绝（accepted=False，客户端保持原状）
-            gs.net_server.broadcast(MsgType.POTION_ACK, {
-                "player_id": sender_id, "potion_id": potion_id,
-                "accepted": False, "heal_amount": 0.0,
-            })
-            return
-        effect_info = use_potion(sender_id, potion_id)
-        if not effect_info:
-            gs.net_server.broadcast(MsgType.POTION_ACK, {
-                "player_id": sender_id, "potion_id": potion_id,
-                "accepted": False, "heal_amount": 0.0,
-            })
-            return
+        from entities.equipment_defs import POTIONS
+        # 本局药水槽药水（run: 前缀，仅字符串）：效果来自 POTIONS 定义，扣减对应库存
+        if isinstance(potion_id, str) and potion_id.startswith("run:"):
+            item_id = potion_id[4:]
+            pdef = POTIONS.get(item_id)
+            if pdef is None:
+                self._reject_potion(sender_id, potion_id)
+                return
+            effect = pdef.get("effect", "heal")
+            value = pdef.get("value", 0)
+            duration = pdef.get("duration", 0)
+            # 校验并扣减该玩家的 run 药水库存：
+            # - 本人（主机）：gs.run_potions；
+            # - 客户端：_players_run_carried[sender_id]["potion"]（主机记录的拾取清单）。
+            if sender_id == getattr(gs, "net_player_id", None):
+                run_potions = getattr(gs, "run_potions", None) or {}
+                if run_potions.get(item_id, 0) <= 0:
+                    self._reject_potion(sender_id, potion_id)
+                    return
+                run_potions[item_id] -= 1
+                if run_potions[item_id] <= 0:
+                    del run_potions[item_id]
+            else:
+                carried = self._players_run_carried.setdefault(sender_id, {})
+                potion_slot = carried.setdefault("potion", {})
+                if potion_slot.get(item_id, 0) <= 0:
+                    self._reject_potion(sender_id, potion_id)
+                    return
+                potion_slot[item_id] -= 1
+                if potion_slot[item_id] <= 0:
+                    del potion_slot[item_id]
+        else:
+            # 仓库药水：查库验证 → use_potion 扣减
+            from db.database import get_potions, use_potion
+            potions = get_potions(sender_id)
+            pot = next((p for p in potions if p["id"] == potion_id), None)
+            if pot is None:
+                self._reject_potion(sender_id, potion_id)
+                return
+            effect_info = use_potion(sender_id, potion_id)
+            if not effect_info:
+                self._reject_potion(sender_id, potion_id)
+                return
+            effect = effect_info["effect"]
+            value = effect_info.get("value", 0)
+            duration = effect_info.get("duration", 0)
         # 目标玩家实体：主机本地玩家或客户端幽灵
         target = self.player if getattr(gs, "net_player_id", None) == sender_id \
             else self._ensure_ghost(sender_id)
-        effect = effect_info.get("effect")
-        value = effect_info.get("value", 0)
-        duration = effect_info.get("duration", 0)
-        heal_amount = 0.0
-        if effect == "heal":
-            target.apply_hot(value / max(1, duration), duration)
-            heal_amount = float(value)
-        elif effect == "speed":
-            target.speed_mult = value * target.gear_speed_mult
-            target.speed_effect_timer = duration
-        elif effect == "fruit":
-            target.heal(value)
-            target.speed_mult = FRUIT_SPEED_MULT * target.gear_speed_mult
-            target.speed_effect_timer = duration
-            heal_amount = float(value)
-        # 广播确认（含治疗数字，全端可见）
+        # 统一应用药水效果（heal 无 duration 时瞬回，见 Player.apply_potion_effect）
+        heal_amount = target.apply_potion_effect(effect, value, duration)
+        # 广播确认（含效果信息，客户端本地即时生效 + 全端可见治疗数字）
         gs.net_server.broadcast(MsgType.POTION_ACK, {
             "player_id": sender_id, "potion_id": potion_id,
             "accepted": True, "heal_amount": heal_amount,
+            "effect": effect, "value": value, "duration": duration,
+        })
+
+    def _reject_potion(self, sender_id: int, potion_id: str) -> None:
+        """广播药水使用被拒（库存不足/无效药水）：客户端保持原状"""
+        gs = self.window.game_state
+        gs.net_server.broadcast(MsgType.POTION_ACK, {
+            "player_id": sender_id, "potion_id": potion_id,
+            "accepted": False, "heal_amount": 0.0,
         })
 
     def _apply_potion_ack(self, payload: dict) -> None:
-        """客户端应用主机 POTION_ACK：治疗数字漂浮文字 + 本地即时生效
+        """客户端应用主机 POTION_ACK：本地即时生效 + 治疗数字漂浮文字
 
-        - 治疗数字全端可见（含幽灵头顶）；HP 权威值以 PLAYER_SNAPSHOT 校准为准；
-        - accepted=False（血量已满/库存不足）时仅提示，不做本地扣减。
+        - 本人：按 ACK 的 effect/value/duration 本地应用（speed/shield/power buff
+          不随快照同步，须本地即时生效；heal 瞬回/持续），HP 权威值以
+          PLAYER_SNAPSHOT 校准为准；
+        - 他人（幽灵）：效果已在主机侧应用到幽灵实体，仅显示治疗数字；
+        - accepted=False（库存不足/无效）时仅提示，不做本地扣减。
         """
         gs = self.window.game_state
         player_id = payload.get("player_id")
@@ -1258,11 +1330,38 @@ class GameView(arcade.View):
             floating_texts.add(self.player.center_x, self.player.center_y + 20,
                               "药水无效", arcade.color.RED)
             return
-        # 治疗数字：使用药水的玩家头顶显示（本地玩家或远端幽灵）
+        # 本人：本地即时应用效果（与主机对本人实体应用同口径）
         if my_id is not None and player_id == my_id:
-            floating_texts.add(self.player.center_x, self.player.center_y,
-                               f"+{int(heal_amount)} HP" if heal_amount else "加速!",
-                               arcade.color.GREEN if heal_amount else arcade.color.CYAN)
+            effect = payload.get("effect", "heal")
+            value = payload.get("value", 0)
+            duration = payload.get("duration", 0)
+            heal_amount = self.player.apply_potion_effect(effect, value, duration)
+            # 本局药水（run: 前缀）：本地同步扣减 run_potions（主机权威扣减后广播，
+            # 客户端据此保持本地槽位与主机一致；仓库药水已由主机 use_potion 扣减，无需处理）
+            potion_id = payload.get("potion_id", "")
+            if isinstance(potion_id, str) and potion_id.startswith("run:"):
+                item_id = potion_id[4:]
+                run_potions = getattr(gs, "run_potions", None)
+                if run_potions and run_potions.get(item_id, 0) > 0:
+                    run_potions[item_id] -= 1
+                    if run_potions[item_id] <= 0:
+                        del run_potions[item_id]
+            # 浮动文字：按效果显示对应文案
+            if heal_amount > 0:
+                floating_texts.add(self.player.center_x, self.player.center_y,
+                                   f"+{int(heal_amount)} HP", arcade.color.GREEN)
+            elif effect == "speed":
+                floating_texts.add(self.player.center_x, self.player.center_y,
+                                   "加速!", arcade.color.CYAN)
+            elif effect == "shield":
+                floating_texts.add(self.player.center_x, self.player.center_y,
+                                   f"护盾 +{int(value)}", (120, 160, 255))
+            elif effect == "power":
+                floating_texts.add(self.player.center_x, self.player.center_y,
+                                   f"狂暴! +{int((value - 1) * 100)}% 伤害", (255, 120, 40))
+            elif effect == "fruit":
+                floating_texts.add(self.player.center_x, self.player.center_y,
+                                   "果实加速!", arcade.color.GREEN)
         else:
             ghost = self.remote_players.get(player_id)
             if ghost is not None and heal_amount > 0:
@@ -1583,10 +1682,15 @@ class GameView(arcade.View):
         accepted = payload.get("accepted", False)
         reason = payload.get("reason")
         my_id = getattr(gs, "net_player_id", None)
-        # 本人请求被拒：回滚乐观拾取（恢复拾取前 run_carried 快照）
+        # 本人请求被拒：回滚乐观拾取（恢复拾取前 run_carried + run_potions 快照）
         if not accepted and my_id is not None and player_id == my_id:
             if self._pickup_snapshot is not None:
-                gs.run_carried = self._pickup_snapshot
+                snap = self._pickup_snapshot
+                # 兼容旧版单值快照（仅 run_carried）与新版 (carried, potions) 元组快照
+                if isinstance(snap, tuple):
+                    gs.run_carried, gs.run_potions = snap
+                else:
+                    gs.run_carried = snap
             if reason == "too_far":
                 # 物品仍在主机上：重建本地视觉掉落物（带主机权威 net_id/位置）
                 self._remove_drop_visual(net_id)
@@ -1632,6 +1736,9 @@ class GameView(arcade.View):
         run_carried = self._deserialize_evac_carried(payload.get("run_carried") or {})
         commit_run_to_warehouse(gs.player_id, run_carried)
         clear_run(gs.run_carried)
+        # 客户端本局药水已由主机记录进 EVAC_RESULT 载荷（run_carried 含 potion 键），
+        # 本地 run_potions 不再重复入库，直接清空即可
+        gs.run_potions = {}
         # 等级系统：客户端撤离成功经验（各端本地结算，客户端经 EVAC_RESULT 发放）
         _award_exp(self, EXP_EVAC)
         # 客户端撤离成功 → 进入观战模式（跟随主机幽灵继续观看）而非回房等待：
@@ -1749,8 +1856,8 @@ class GameView(arcade.View):
         handle_rocket_pad_interaction(self)
 
     def _scatter_drops(self, drops, center_x, center_y, radius=30):
-        """分散掉落物 - 委托给 entity_callbacks"""
-        scatter_drops(drops, center_x, center_y, radius)
+        """分散掉落物 - 委托给 entity_callbacks（带障碍物避让，防掉落物卡墙）"""
+        scatter_drops(drops, center_x, center_y, radius, obstacles=self.obstacle_list)
 
     def _sync_obstacles(self):
         """同步障碍物 - 委托给 entity_callbacks"""
@@ -2102,6 +2209,10 @@ class GameView(arcade.View):
 
     def on_show_view(self):
         self.window.background_color = (20, 25, 20)
+        # 修复：按 TAB 切走背包/升级面板时，按住的方向键释放事件发给了新视图，
+        # 本视图收不到导致 _pressed 残留；返回时清空按键状态，避免角色"卡住一直走"
+        if self.controller:
+            self.controller.clear_keys()
 
     def _hud_text(self, key, text, x, y, color, size=12, anchor_x="left",
                   anchor_y="baseline", bold=False):
@@ -2132,6 +2243,12 @@ class GameView(arcade.View):
     def on_draw(self):
         """渲染 - 委托给 rendering.render_game"""
         render_game(self)
+        # 新手教程（阶段 4）：游戏内引导横幅（HUD 逻辑坐标系下绘制）
+        tut = getattr(self.window.game_state, "tutorial", None)
+        if tut is not None and tut.active and tut.stage == 3:
+            from views.tutorial import draw_in_game_tutorial
+            self.window.default_camera.use()
+            draw_in_game_tutorial(self, self._tut_tc)
 
     def _apply_free_equip(self, d):
         """无背包拾取空槽位武器/装备/背包时，立即在局内生效（穿戴 / 加防御 / 获得容量）
@@ -2148,7 +2265,11 @@ class GameView(arcade.View):
             wdef = ALL_WEAPONS.get(d.item_id)
             if not wdef:
                 return
-            gs.equipped_weapon_id = d.item_id
+            # 修复：不写 gs.equipped_weapon_id —— 该字段语义是 weapons 表 DB row id（int），
+            # 局内免费拾取的武器尚无 DB 记录（撤离时才 create_weapon 入库）。
+            # 旧版误写 item_id 字符串会导致：撤离后 setup() 匹配不到 DB 武器（变拳头），
+            # 且 try_pickup 因该字段非 None 判定"已装备武器"→ 无背包时无法免费拾取武器。
+            # 局内"是否已装备武器"改由 current_weapon_item_id 承担（try_pickup 调用处已改）。
             gs.current_weapon_kind = wdef.get("kind", "melee")
             gs.current_weapon_id = d.item_id
             gs.current_weapon_item_id = d.item_id   # 供渲染视觉
@@ -2213,6 +2334,24 @@ class GameView(arcade.View):
                 "capacity": bdef.get("capacity", 0),
                 "level": 1, "effects": [],
             }
+
+    def _fold_run_potions(self, gs) -> None:
+        """撤离前将本局药水槽（run_potions）并入 run_carried["potion"] 以便入库
+
+        单机/主机本局拾取的药水存于 run_potions（不占容量、上限 RUN_POTION_SLOTS），
+        撤离时并入 run_carried 的 potion 键走统一入库口径（commit_run_to_warehouse）。
+        （联机客户端不走本函数：客户端药水拾取已被主机记录进 EVAC_RESULT 载荷，
+        本地 run_potions 直接清空即可，避免重复入库。）
+        """
+        run_potions = getattr(gs, "run_potions", None)
+        if not run_potions:
+            return
+        from entities.equipment_defs import POTIONS
+        potion_slot = gs.run_carried.setdefault("potion", {})
+        for item_id, qty in run_potions.items():
+            if item_id in POTIONS and qty > 0:
+                potion_slot[item_id] = potion_slot.get(item_id, 0) + qty
+        run_potions.clear()
 
     def _add_equipped_to_carried(self, gs):
         """撤离前将装备栏中**局内免费拾取**的物品加入 run_carried，以便 commit_run_to_warehouse 入库
@@ -2494,6 +2633,21 @@ class GameView(arcade.View):
                 # 药水效果结束，回到装备带来的基础移速倍率
                 self.player.speed_mult = self.player.gear_speed_mult
 
+        # 护盾药水计时器：到期清空临时护盾（护盾吸收结算在 take_damage）
+        if getattr(self.player, 'shield_effect_timer', 0) > 0:
+            self.player.shield_effect_timer -= dt
+            if self.player.shield_effect_timer <= 0:
+                self.player.shield = 0.0
+                self.player.shield_effect_timer = 0.0
+
+        # 狂暴药水计时器：到期恢复伤害倍率（攻击结算乘 power_mult，见
+        # character_skills.modify_attack_damage / combat.spawn_laser）
+        if getattr(self.player, 'power_effect_timer', 0) > 0:
+            self.player.power_effect_timer -= dt
+            if self.player.power_effect_timer <= 0:
+                self.player.power_mult = 1.0
+                self.player.power_effect_timer = 0.0
+
         # 持续回复（HoT）与装备自然回血结算：各端本地结算本人 HP——客户端是本人 HP 权威源
         # （本地加血后随 PLAYER_SNAPSHOT 上报主机，主机采纳并转发全房，主机本地玩家同理）。
         # 修复「客户端装备被动效果（regen 加成）不全生效」：旧版只在主机结算、客户端不本地
@@ -2761,6 +2915,8 @@ class GameView(arcade.View):
                     if dist < 80:  # 玩家在范围内，撤离成功
                         # 将装备栏中的物品加入 run_carried 以便入库
                         self._add_equipped_to_carried(gs)
+                        # 将本局药水槽并入 run_carried["potion"]（用户需求：本局药水可带出）
+                        self._fold_run_potions(gs)
                         # 修复：删除局部导入（顶部已导入），否则会让 commit_run_to_warehouse/clear_run
                         # 成为 on_update 的局部变量，未走此分支时第 814 行报 UnboundLocalError
                         commit_run_to_warehouse(gs.player_id, gs.run_carried)
@@ -2795,6 +2951,9 @@ class GameView(arcade.View):
                             self._clear_run_equipment(gs)
                             self._enter_spectate("dead")
                             return
+                        # 修复：单机火箭台撤离失败 = 死亡语义，与主机分支/超时一致，先清装备再跳失败页
+                        # （原实现漏调 _clear_run_equipment，导致单机撤离失败只丢金币、装备保留）
+                        self._clear_run_equipment(gs)
                         # 单机：跳转到撤离结果页面
                         from views.evac_result_view import EvacResultView
                         self.window.show_view(EvacResultView(self.window_ref, success=False))
@@ -2847,13 +3006,15 @@ class GameView(arcade.View):
                 # 快照只在“上一批请求已全部确认”后重新记录（_pending_pickup_count==0），
                 # 避免按住 E 期间逐帧覆盖快照 → 主机拒绝时回滚到已含本次拾取的状态。
                 if self._pending_pickup_count == 0:
-                    self._pickup_snapshot = old_carried
+                    # 快照覆盖 run_carried + run_potions：药水进入本局药水槽，被拒时一并回滚
+                    self._pickup_snapshot = (old_carried, dict(getattr(gs, "run_potions", {}) or {}))
                 picked, skipped_full, skipped_no_bag = try_pickup(
                     self.player, self.drops, gs.run_carried,
-                    equipped_weapon_id=gs.equipped_weapon_id,
+                    equipped_weapon_id=gs.equipped_weapon_id or gs.current_weapon_item_id,
                     equipped_helmet_id=gs.equipped_helmet_id,
                     equipped_armor_id=gs.equipped_armor_id,
-                    on_free_equip=self._apply_free_equip
+                    on_free_equip=self._apply_free_equip,
+                    run_potions=gs.run_potions,
                 )
                 for d in picked:
                     if getattr(d, "net_id", None):
@@ -2870,11 +3031,17 @@ class GameView(arcade.View):
                 # solo 或联机主机：本地权威拾取（主机 self.drops 即权威列表）
                 picked, skipped_full, skipped_no_bag = try_pickup(
                     self.player, self.drops, gs.run_carried,
-                    equipped_weapon_id=gs.equipped_weapon_id,
+                    equipped_weapon_id=gs.equipped_weapon_id or gs.current_weapon_item_id,
                     equipped_helmet_id=gs.equipped_helmet_id,
                     equipped_armor_id=gs.equipped_armor_id,
-                    on_free_equip=self._apply_free_equip
+                    on_free_equip=self._apply_free_equip,
+                    run_potions=gs.run_potions,
                 )
+                # 新手教程：拾取到物品 → 记录拾取数（游戏内引导推进用）
+                if picked:
+                    tut = getattr(gs, "tutorial", None)
+                    if tut is not None and tut.active and tut.stage == 3:
+                        tut.pickup_count += 1
                 if picked and gs.net_mode == "host" and gs.net_server is not None:
                     # 联机主机：主机本地拾取=权威结果 → 记录主机携带物（撤离结算用）
                     # + 广播 PICKUP_RESULT（accepted=True）让各客户端移除该视觉掉落物
@@ -2991,6 +3158,8 @@ class GameView(arcade.View):
             if evac_result == "evacuated":
                 # 将装备栏中的物品加入 run_carried 以便入库
                 self._add_equipped_to_carried(gs)
+                # 将本局药水槽并入 run_carried["potion"]（用户需求：本局药水可带出）
+                self._fold_run_potions(gs)
                 # 撤离成功：提交战利品到仓库
                 commit_run_to_warehouse(gs.player_id, gs.run_carried)
                 # 保存携带物品用于显示收益（先复制再清空）
@@ -3011,6 +3180,11 @@ class GameView(arcade.View):
                     self._enter_spectate("evac")
                     return
                 # 单机：跳转撤离结果页面（与火箭发射台撤离保持一致）
+                # 新手教程：撤离成功 → 撤离结果页展示火箭发射台教学（阶段 5 接管）
+                tut = getattr(gs, "tutorial", None)
+                if tut is not None and tut.active and tut.stage == 3:
+                    tut.stage = 4
+                    tut.page = 0
                 from views.evac_result_view import EvacResultView
                 self.window.show_view(EvacResultView(self.window_ref, success=True, run_carried=carried_copy))
                 return
@@ -3027,6 +3201,9 @@ class GameView(arcade.View):
         # 清空本次携带数据
         if hasattr(gs, 'run_carried'):
             gs.run_carried = {}
+        # 本局药水槽一并清空（死亡/撤离失败 = 药水随携带物丢失）
+        if hasattr(gs, 'run_potions'):
+            gs.run_potions = {}
         # 从数据库中删除装备（撤离失败 = 死亡，丢失所有装备）
         pid = gs.player_id
         if pid:

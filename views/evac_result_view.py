@@ -27,6 +27,30 @@ class EvacResultView(arcade.View):
         self.run_carried = run_carried or {}
         self.return_rect = arcade.XYWH(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - 180, 220, 50)
         self.return_hover = False
+        # 新手教程（阶段 5）：撤离成功后的火箭发射台图文教学页（无高亮，纯图文）
+        self.tut_pages = self._build_tutorial_pages()
+        self.tut_next_rect = None
+        self.tut_skip_rect = None
+        self.tut_next_hover = False
+
+    def _build_tutorial_pages(self):
+        """新手教程阶段 5：航天基地火箭发射台教学（撤离结算页上覆盖展示）"""
+        from views.tutorial import TutorialPage
+        return [
+            TutorialPage("航天基地 · 火箭发射台", [
+                "航天基地（极难地图）有火箭发射台：走近按 E 激活，召唤镇守 BOSS。",
+                "击败 BOSS 后二选一：",
+                "  · 按 7 炸毁发射台 → 立即获得大量奖励，随后地图毁灭需马上撤离",
+                "  · 按 8 启用发射台撤离 → 站上平台读条 3 秒撤离，同样带走战利品",
+                "本局你从普通撤离点撤离成功，战利品已入库。",
+            ], next_text="查看收益"),
+        ]
+
+    def _tut_showing(self):
+        """教程教学页是否正在本界面显示（阶段 5 且未翻完页）"""
+        tut = getattr(self.window.game_state, "tutorial", None)
+        return (tut is not None and tut.active and tut.stage == 4
+                and tut.page < len(self.tut_pages))
         
     def on_show_view(self):
         self.window.background_color = arcade.color.DARK_SLATE_GRAY
@@ -166,16 +190,61 @@ class EvacResultView(arcade.View):
             arcade.color.WHITE, size=18, anchor_x="center", anchor_y="center",
             bold=True,
         )
-        
+
+        # 新手教程（阶段 5）：火箭发射台教学页覆盖层（画在最上层）
+        if self._tut_showing():
+            from views.tutorial import draw_tutorial_page
+            tut = getattr(self.window.game_state, "tutorial", None)
+            page = self.tut_pages[tut.page]
+            self.tut_next_rect, self.tut_skip_rect = draw_tutorial_page(
+                self, page, tut.page, len(self.tut_pages),
+                self._tc, self.tut_next_hover)
+
+    def on_key_press(self, key, modifiers):
+        # 新手教程激活：ESC 立即跳过并标记完成
+        tut = getattr(self.window.game_state, "tutorial", None)
+        if tut is not None and tut.active:
+            if key == arcade.key.ESCAPE:
+                from views.tutorial import finish_tutorial
+                finish_tutorial(self.window)
+            return
+
     def on_mouse_motion(self, x, y, dx, dy):
+        # 新手教程教学页显示：只更新下一步按钮悬停态
+        if self._tut_showing():
+            self.tut_next_hover = bool(
+                self.tut_next_rect and self.tut_next_rect.point_in_rect((x, y)))
+            return
         self.return_hover = self.return_rect.point_in_rect((x, y))
-        
+
     def on_mouse_press(self, x, y, button, modifiers):
         if button == arcade.MOUSE_BUTTON_LEFT:
+            # 新手教程教学页显示：只响应 下一步/跳过
+            if self._tut_showing():
+                from views.tutorial import finish_tutorial
+                if self.tut_skip_rect and self.tut_skip_rect.point_in_rect((x, y)):
+                    finish_tutorial(self.window)
+                    return
+                if self.tut_next_rect and self.tut_next_rect.point_in_rect((x, y)):
+                    # 翻完教学：露出撤离结算页（查看收益后点返回按钮）
+                    tut = getattr(self.window.game_state, "tutorial", None)
+                    if tut is not None:
+                        tut.page = len(self.tut_pages)
+                    return
+                return
+
             if self.return_rect.point_in_rect((x, y)):
+                # 新手教程：看完撤离结算 → 引导进入市场买卖教学（阶段 6 接管）
+                gs = self.window.game_state
+                tut = getattr(gs, "tutorial", None)
+                if tut is not None and tut.active and tut.stage == 4:
+                    tut.stage = 5
+                    tut.page = 0
+                    from views.market_view import MarketView
+                    self.window.show_view(MarketView(self.window_ref))
+                    return
                 # 联机模式：撤离结果页仅单机路径可达（联机撤离/死亡均走回房等待），
                 # 防御性分流：联机回 LobbyView 复用连接，单机回 StartView
-                gs = self.window.game_state
                 if getattr(gs, "net_mode", "solo") != "solo":
                     from views.lobby_view import LobbyView
                     self.window.show_view(LobbyView(self.window_ref))

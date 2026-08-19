@@ -41,7 +41,33 @@ class MarketView(ScrollView):
         # 批量购买弹窗状态（None = 关闭）
         self._bulk_state = None
         self._input_cursor_timer = 0.0  # 输入框光标闪烁计时
+        # 新手教程（阶段 6）：市场买卖教学向导（教程最后一站，完成后标记）
+        self.tut_pages = self._build_tutorial_pages()
+        self.tut_next_rect = None
+        self.tut_skip_rect = None
+        self.tut_next_hover = False
         self._build_content()
+
+    def _build_tutorial_pages(self):
+        """新手教程阶段 6：市场买卖教学（2 页，完成后标记 tutorial_done）"""
+        from views.tutorial import TutorialPage
+        return [
+            TutorialPage("市场 · 买卖装备", [
+                "市场可购买武器/装备/药水，也可消耗材料升级装备，还能开神秘宝箱。",
+                "顶部『武器/装备/药水/宝箱』分类栏切换货架，右下角按钮购买或升级。",
+                "点『仓库』可存入/取出物品，市场与仓库是打怪战利品的集中管理地。",
+            ]),
+            TutorialPage("自由逛逛吧", [
+                "点击上方分类栏切换看看各个货架（可购买一件装备体验）。",
+                "结束后点左下角『返回大厅』即可完成新手教程！",
+            ], highlight=self.tab_rects["武器"], next_text="完成教程"),
+        ]
+
+    def _tut_showing(self):
+        """教程向导是否正在本界面显示（阶段 6 且未翻完页）"""
+        tut = getattr(self.window.game_state, "tutorial", None)
+        return (tut is not None and tut.active and tut.stage == 5
+                and tut.page < len(self.tut_pages))
 
     def _build_content(self):
         """构建当前分类页的内容列表，每项记录类型和逻辑Y坐标
@@ -540,9 +566,34 @@ class MarketView(ScrollView):
         # === 批量购买弹窗覆盖层 ===
         self._draw_bulk_overlay()
 
+        # === 新手教程（阶段 6）：买卖教学向导弹窗（画在最上层）===
+        if self._tut_showing():
+            from views.tutorial import draw_tutorial_page
+            tut = getattr(self.window.game_state, "tutorial", None)
+            page = self.tut_pages[tut.page]
+            self.tut_next_rect, self.tut_skip_rect = draw_tutorial_page(
+                self, page, tut.page, len(self.tut_pages),
+                self._tc, self.tut_next_hover)
+
     def on_mouse_press(self, x, y, button, modifiers):
         # 动画中禁止所有点击
         if self._box_opening:
+            return
+
+        # 新手教程向导显示：只响应 下一步/跳过（最后一页点完成后标记教程结束）
+        if self._tut_showing():
+            from views.tutorial import finish_tutorial
+            if self.tut_skip_rect and self.tut_skip_rect.point_in_rect((x, y)):
+                finish_tutorial(self.window)
+                return
+            if self.tut_next_rect and self.tut_next_rect.point_in_rect((x, y)):
+                tut = getattr(self.window.game_state, "tutorial", None)
+                if tut is not None and tut.page + 1 >= len(self.tut_pages):
+                    # 最后一页：完成教程并标记（留在市场可自由浏览/购买）
+                    finish_tutorial(self.window)
+                elif tut is not None:
+                    tut.page += 1
+                return
             return
 
         # 批量购买弹窗打开时：只处理弹窗交互，不穿透到下方列表
@@ -555,6 +606,11 @@ class MarketView(ScrollView):
 
         # 固定按钮
         if self.handle_back_click(x, y):
+            # 新手教程：市场是最后一站，点返回时确保标记完成（防中途未点完成按钮）
+            tut = getattr(self.window.game_state, "tutorial", None)
+            if tut is not None and tut.active and tut.stage == 5:
+                from views.tutorial import finish_tutorial
+                finish_tutorial(self.window)
             return
         if self.wh_rect.point_in_rect((x, y)):
             from views.warehouse_view import WarehouseView
@@ -706,6 +762,11 @@ class MarketView(ScrollView):
 
     def on_mouse_motion(self, x, y, dx, dy):
         """滚动条拖拽实时滚动；滑块拖拽时实时更新数量"""
+        # 新手教程向导显示：只更新下一步按钮悬停态
+        if self._tut_showing():
+            self.tut_next_hover = bool(
+                self.tut_next_rect and self.tut_next_rect.point_in_rect((x, y)))
+            return
         if self._scroll_dragging:
             self.update_scroll_drag(x, y)
             return
@@ -723,6 +784,13 @@ class MarketView(ScrollView):
 
     def on_key_press(self, symbol, modifiers):
         """弹窗键盘交互：Esc 取消、Enter 确认、输入态下支持数字与退格"""
+        # 新手教程激活：ESC 立即跳过并标记完成（优先于批量弹窗的 Esc 取消）
+        tut = getattr(self.window.game_state, "tutorial", None)
+        if tut is not None and tut.active:
+            if symbol == arcade.key.ESCAPE:
+                from views.tutorial import finish_tutorial
+                finish_tutorial(self.window)
+            return
         st = self._bulk_state
         if not st:
             return

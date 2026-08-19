@@ -15,6 +15,7 @@ from arcade.types import LBWH, LRBT
 from config import (
     PLAYER_SPEED, PLAYER_HP, PLAYER_SIZE, PLAYER_COLOR,
     MAP_WIDTH, MAP_HEIGHT, WINDOW_WIDTH, WINDOW_HEIGHT,
+    FRUIT_SPEED_MULT,
 )
 from entities.character_defs import CHARACTERS
 
@@ -45,6 +46,12 @@ class Player(arcade.SpriteSolidColor):
         self.defense = self.base_defense         # 总防御力（角色基础 + 头盔 + 护甲）
         self.speed_mult = 1.0                    # 移速倍率（药水效果）
         self.speed_effect_timer = 0.0            # 疾跑药水剩余时间
+        # 护盾药水状态：临时护盾先于防御结算吸收伤害
+        self.shield = 0.0                        # 当前护盾值（0 = 无护盾）
+        self.shield_effect_timer = 0.0           # 护盾剩余时间（归零护盾清空）
+        # 狂暴药水状态：攻击伤害倍率（攻击结算时乘算，见 character_skills.modify_attack_damage）
+        self.power_mult = 1.0                    # 伤害倍率（1.0 = 无加成）
+        self.power_effect_timer = 0.0            # 狂暴剩余时间（归零恢复 1.0）
         # 角色基础移速倍率 = 角色速度 / 标准玩家速度（法师 3.6/4=0.9、骑士 3.4/4=0.85、刺客 4.8/4=1.2）
         self.char_speed_mult = char["speed"] / PLAYER_SPEED
         # 技能状态（F 键释放；无技能角色恒为不可用）
@@ -75,17 +82,26 @@ class Player(arcade.SpriteSolidColor):
         self.center_x = max(half, min(MAP_WIDTH - half, self.center_x))
         self.center_y = max(half, min(MAP_HEIGHT - half, self.center_y))
 
-    def take_damage(self, amount: int):
-        """受到伤害，先扣防御（至少造成 1 点伤害）
+    def take_damage(self, amount: int) -> int:
+        """受到伤害，先扣防御（至少造成 1 点伤害），返回实际扣除的血量
 
         角色被动修正（见 entities/character_defs.py）：
         - 骑士「钢铁之躯」：受到伤害额外 -5（防御结算后再减）
         - 骑士「圣盾庇护」激活期间：伤害再乘 (1 - 减伤比例 70%)
+
+        返回实际伤害值：护盾吸收后的最终扣血量。
+        修复：仙人掌反伤等显示与血条扣血不一致——旧版调用方以原始伤害
+        显示浮动文字，护盾/防御减免后实际扣血更少。现以返回值显示真实伤害。
         """
         # 圣盾庇护激活：先按比例减伤（70% 减伤 → 仅承受 30%）
         if self.skill_active > 0 and self.character_def.get("skill"):
             reduce = self.character_def["skill"].get("damage_reduce", 0.0)
             amount = int(amount * (1.0 - reduce))
+        # 护盾药水：临时护盾先于防御结算吸收伤害（吸收后剩余伤害继续走防御减免）
+        if self.shield > 0:
+            absorbed = min(self.shield, amount)
+            self.shield = round(self.shield - absorbed, 2)
+            amount = int(amount - absorbed)
         # 角色被动：钢铁之躯 受到伤害额外 -5
         passive = self.character_def.get("passive") or {}
         flat_reduce = passive.get("flat_reduce", 0)
@@ -96,6 +112,7 @@ class Player(arcade.SpriteSolidColor):
         # 单机/客户端模式为 None 直接跳过，零开销，行为与旧版完全一致。
         if self.on_take_damage is not None:
             self.on_take_damage(actual)
+        return actual
 
     def heal(self, amount: int):
         """回复生命（不超过最大生命值）"""
@@ -105,6 +122,40 @@ class Player(arcade.SpriteSolidColor):
         """施加持续回复效果（新效果覆盖旧效果）"""
         self.heal_per_sec = heal_per_sec
         self.heal_duration = duration
+
+    def apply_potion_effect(self, effect: str, value: float, duration: float) -> float:
+        """应用药水效果（本地玩家/联机幽灵共用入口），返回治疗量（非治疗返回 0）
+
+        效果分支（effect 见 entities/equipment_defs.py POTIONS）：
+        - heal:   回复生命。duration>0 走持续回复（HoT）；duration<=0 瞬间回复——
+                  修复：旧版无 duration 字段的治疗药水 apply_hot(value, 0) 永不生效
+        - speed:  移速倍率提升（乘算在装备倍率之上）
+        - fruit:  组合效果：瞬回 + 移速提升（仙人掌果实）
+        - shield: 获得临时护盾（先于防御结算吸收伤害，见 take_damage）
+        - power:  攻击伤害倍率提升（攻击结算乘算，见 character_skills.modify_attack_damage）
+        """
+        heal_amount = 0.0
+        if effect == "heal":
+            if duration > 0:
+                self.apply_hot(value / duration, duration)
+            else:
+                self.heal(int(value))
+                heal_amount = float(value)
+        elif effect == "speed":
+            self.speed_mult = value * self.gear_speed_mult
+            self.speed_effect_timer = duration
+        elif effect == "fruit":
+            self.heal(int(value))
+            self.speed_mult = FRUIT_SPEED_MULT * self.gear_speed_mult
+            self.speed_effect_timer = duration
+            heal_amount = float(value)
+        elif effect == "shield":
+            self.shield = float(value)
+            self.shield_effect_timer = duration
+        elif effect == "power":
+            self.power_mult = float(value)
+            self.power_effect_timer = duration
+        return heal_amount
 
     def apply_debuff(self, effect_id: str, level: int = 1):
         """施加附加效果（中毒/燃烧/冰冻/减速/眩晕），同类刷新持续时间
@@ -200,7 +251,7 @@ class PlayerController:
     2. 根据按键计算玩家速度
     3. 更新物理引擎和相机位置
     """
-    def __init__(self, player: Player, physics_engine):
+    def __init__(self, player: Player, physics_engine, key_bindings=None):
         self.player = player
         self.physics_engine = physics_engine
         self.camera = arcade.Camera2D(
@@ -221,6 +272,40 @@ class PlayerController:
         self.follow_player = True
         # 追踪当前按下的键，解决对侧键冲突（如同时按 A 和 D）
         self._pressed = set()
+        # 键位绑定：{动作名: [键码, ...]}，由 GameView 传入（默认 config.KEY_BINDINGS）。
+        # 移动方向查询绑定键码，实现设置界面重绑后移动键同步生效。
+        self._bindings = self._resolve_bindings(key_bindings)
+
+    @staticmethod
+    def _resolve_bindings(key_bindings):
+        """把键位绑定（动作名 -> [arcade.key 属性名]）解析为 {动作名: [键码, ...]}
+
+        传入 None 时使用 config.KEY_BINDINGS 默认值；键名解析失败（异常/未知属性）
+        时跳过该键，保证配置数据损坏也不会崩溃。
+        """
+        from config import KEY_BINDINGS
+        src = key_bindings or KEY_BINDINGS
+        result = {}
+        for action, names in src.items():
+            codes = []
+            for n in names:
+                code = getattr(arcade.key, n, None)
+                if code is not None:
+                    codes.append(code)
+            result[action] = codes
+        return result
+
+    def _has_key(self, action):
+        """当前按下的键中是否包含指定动作的任一绑定键"""
+        return any(k in self._pressed for k in self._bindings.get(action, []))
+
+    def refresh_bindings(self, key_bindings=None):
+        """设置界面重绑后刷新移动键绑定（无需重建 controller）
+
+        传入新的键位绑定 dict（或 None 回退默认）；已按住的键保留，
+        新绑定从下一帧 _recalc_velocity 生效。
+        """
+        self._bindings = self._resolve_bindings(key_bindings)
 
     def on_key_press(self, key):
         """按键按下"""
@@ -230,6 +315,12 @@ class PlayerController:
     def on_key_release(self, key):
         """按键释放"""
         self._pressed.discard(key)
+        self._recalc_velocity()
+
+    def clear_keys(self):
+        """清空全部按键状态（视图切换时按键释放事件会发给新视图而丢失，
+        返回本视图须主动复位，否则角色会残留移动方向一直走）"""
+        self._pressed.clear()
         self._recalc_velocity()
 
     def _recalc_velocity(self):
@@ -245,16 +336,17 @@ class PlayerController:
             p.change_y = 0
             return
         # X 轴（effective_speed_mult：药水/装备倍率 × debuff 减速倍率）
-        if arcade.key.A in self._pressed and arcade.key.D not in self._pressed:
+        # 移动键从键位绑定查询（设置界面重绑后此处同步生效）
+        if self._has_key("move_left") and not self._has_key("move_right"):
             p.change_x = -PLAYER_SPEED * p.effective_speed_mult
-        elif arcade.key.D in self._pressed and arcade.key.A not in self._pressed:
+        elif self._has_key("move_right") and not self._has_key("move_left"):
             p.change_x = PLAYER_SPEED * p.effective_speed_mult
         else:
             p.change_x = 0
         # Y 轴
-        if arcade.key.W in self._pressed and arcade.key.S not in self._pressed:
+        if self._has_key("move_up") and not self._has_key("move_down"):
             p.change_y = PLAYER_SPEED * p.effective_speed_mult
-        elif arcade.key.S in self._pressed and arcade.key.W not in self._pressed:
+        elif self._has_key("move_down") and not self._has_key("move_up"):
             p.change_y = -PLAYER_SPEED * p.effective_speed_mult
         else:
             p.change_y = 0

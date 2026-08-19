@@ -49,6 +49,29 @@ class CharacterSelectView(arcade.View):
         self.back_hover = False
         # 是否已主动选定角色：False 时不显示「进入地图」按钮（选定后才出现）
         self._picked = False
+        # 新手教程（阶段 2）：角色选择向导
+        self.tut_pages = self._build_tutorial_pages()
+        self.tut_next_rect = None
+        self.tut_skip_rect = None
+        self.tut_next_hover = False
+
+    def _build_tutorial_pages(self):
+        """新手教程阶段 2：角色选择向导（介绍角色系统，引导选初始角色）"""
+        from views.tutorial import TutorialPage
+        return [
+            TutorialPage("选择角色", [
+                "4 个角色可选：初始角色免费，法师/骑士/刺客可金币购买解锁。",
+                "每个角色有专属技能（游戏中按 F 释放）和被动加成。",
+                "新手先用免费的【初始角色】即可，点击卡片选中它，",
+                "再点击底部【进入地图】按钮。",
+            ], highlight=self.cards[0]),
+        ]
+
+    def _tut_showing(self):
+        """教程向导是否正在本界面显示（阶段 2 且未翻完页）"""
+        tut = getattr(self.window.game_state, "tutorial", None)
+        return (tut is not None and tut.active and tut.stage == 1
+                and tut.page < len(self.tut_pages))
 
     def on_show_view(self):
         self.window.background_color = arcade.color.DARK_SLATE_GRAY
@@ -230,7 +253,30 @@ class CharacterSelectView(arcade.View):
             arcade.color.WHITE, size=14, anchor_x="center", anchor_y="center",
         )
 
+        # 新手教程（阶段 2）：向导弹窗覆盖层（画在最上层）
+        if self._tut_showing():
+            from views.tutorial import draw_tutorial_page
+            tut = getattr(self.window.game_state, "tutorial", None)
+            page = self.tut_pages[tut.page]
+            self.tut_next_rect, self.tut_skip_rect = draw_tutorial_page(
+                self, page, tut.page, len(self.tut_pages),
+                self._tc, self.tut_next_hover)
+
+    def on_key_press(self, key, modifiers):
+        # 新手教程激活：ESC 立即跳过并标记完成
+        tut = getattr(self.window.game_state, "tutorial", None)
+        if tut is not None and tut.active:
+            if key == arcade.key.ESCAPE:
+                from views.tutorial import finish_tutorial
+                finish_tutorial(self.window)
+            return
+
     def on_mouse_motion(self, x, y, dx, dy):
+        # 新手教程向导显示：只更新下一步按钮悬停态
+        if self._tut_showing():
+            self.tut_next_hover = bool(
+                self.tut_next_rect and self.tut_next_rect.point_in_rect((x, y)))
+            return
         self.hovered = -1
         self.purchase_hover = -1
         for i, rect in enumerate(self.cards):
@@ -247,6 +293,20 @@ class CharacterSelectView(arcade.View):
     def on_mouse_press(self, x, y, button, modifiers):
         gs = self.window.game_state
 
+        # 新手教程向导显示：只响应 下一步/跳过
+        if self._tut_showing():
+            from views.tutorial import finish_tutorial
+            if self.tut_skip_rect and self.tut_skip_rect.point_in_rect((x, y)):
+                finish_tutorial(self.window)
+                return
+            if self.tut_next_rect and self.tut_next_rect.point_in_rect((x, y)):
+                # 翻完向导：隐藏，让玩家自行选角色（点击卡片 → 底部进入地图）
+                tut = getattr(self.window.game_state, "tutorial", None)
+                if tut is not None:
+                    tut.page = len(self.tut_pages)
+                return
+            return
+
         # 返回按钮
         if self.back_rect.point_in_rect((x, y)):
             from views.start_view import StartView
@@ -256,6 +316,11 @@ class CharacterSelectView(arcade.View):
         # 进入地图按钮（需已选定角色后才可用，正常必有）
         if self._picked and self.enter_rect.point_in_rect((x, y)):
             if self.selected in self._unlocked:
+                # 新手教程：角色已选定 → 进入地图选择（阶段 3 接管）
+                tut = getattr(self.window.game_state, "tutorial", None)
+                if tut is not None and tut.active and tut.stage == 1:
+                    tut.stage = 2
+                    tut.page = 0
                 from views.map_select_view import MapSelectView
                 self.window.show_view(MapSelectView(self.window_ref))
             else:

@@ -16,7 +16,7 @@ import random
 import arcade
 from config import (
     ZOMBIE_LOOT_TABLE, SKELETON_LOOT_TABLE, MUMMY_LOOT_TABLE, CAMEL_LOOT_TABLE, BOSS_LOOT_TABLE,
-    SPACE_BOSS_LOOT_TABLE, DROP_PICKUP_RADIUS, DROP_LIFETIME,
+    SPACE_BOSS_LOOT_TABLE, DROP_PICKUP_RADIUS, DROP_LIFETIME, RUN_POTION_SLOTS,
 )
 from entities.resource_defs import RESOURCES
 
@@ -41,6 +41,10 @@ class DropItem(arcade.SpriteSolidColor):
             from entities.equipment_defs import HELMETS, ARMORS
             defs = HELMETS if item_type == "helmet" else ARMORS
             color = defs.get(item_id, {}).get("color", (150, 150, 150))
+        elif item_type == "backpack":
+            # 背包掉落（宝箱掉落修复后背包可被地面拾取，颜色取背包定义）
+            from entities.equipment_defs import BACKPACKS
+            color = BACKPACKS.get(item_id, {}).get("color", (100, 70, 40))
         elif item_type == "potion":
             from entities.equipment_defs import POTIONS
             color = POTIONS.get(item_id, {}).get("color", (200, 255, 100))
@@ -144,11 +148,14 @@ def try_pickup(player, drops: list[DropItem], run_carried: dict,
                equipped_weapon_id: int | None = None,
                equipped_helmet_id: str | None = None,
                equipped_armor_id: str | None = None,
-               on_free_equip: callable | None = None) -> tuple[list[DropItem], list[DropItem], list[DropItem]]:
+               on_free_equip: callable | None = None,
+               run_potions: dict | None = None) -> tuple[list[DropItem], list[DropItem], list[DropItem]]:
     """玩家拾取附近掉落物，更新 run_carried。
 
     拾取规则：
     - 金币：直接增加，不需要背包
+    - 药水：传入 run_potions 时进入本局药水槽（不占背包容量、无需背包即可使用，
+      上限 RUN_POTION_SLOTS）；未传入（旧调用方）则按旧逻辑占容量存入 run_carried
     - 资源：需要背包，检查容量
     - 武器/头盔/护甲：需要背包，检查容量
       * 如果玩家缺少该类型的装备（没装备且run_carried中没有），直接装备到当前栏位，不占容量
@@ -203,6 +210,17 @@ def try_pickup(player, drops: list[DropItem], run_carried: dict,
             picked.append(d)
             if on_free_equip is not None:
                 on_free_equip(d)
+            continue
+
+        # 本局药水（run_potions）：不占背包容量、无需背包即可使用，上限 RUN_POTION_SLOTS。
+        # 用户需求：水果/新药水本局即可用（TAB 背包药水槽），不再受背包限制。
+        if d.item_type == "potion" and run_potions is not None:
+            current_count = sum(run_potions.values())
+            if current_count + d.quantity > RUN_POTION_SLOTS:
+                skipped_full.append(d)
+                continue
+            run_potions[d.item_id] = run_potions.get(d.item_id, 0) + d.quantity
+            picked.append(d)
             continue
 
         # 需要背包的物品：无背包一律不能拾取

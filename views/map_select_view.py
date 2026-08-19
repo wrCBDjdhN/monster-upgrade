@@ -57,6 +57,29 @@ class MapSelectView(arcade.View):
             rect = arcade.XYWH(start_x + i * (card_w + spacing), start_y, card_w, card_h)
             self.cards.append(rect)
 
+        # 新手教程（阶段 3）：地图选择向导（须在 cards 定义后构建，高亮需卡片矩形）
+        self.tut_pages = self._build_tutorial_pages()
+        self.tut_next_rect = None
+        self.tut_skip_rect = None
+        self.tut_next_hover = False
+
+    def _build_tutorial_pages(self):
+        """新手教程阶段 3：地图选择向导（介绍地图，引导选幽暗森林）"""
+        from views.tutorial import TutorialPage
+        return [
+            TutorialPage("选择地图", [
+                "3 张地图，难度递增：",
+                "【幽暗森林】普通 · 【沙漠荒地】困难 · 【航天基地】极难",
+                "新手先挑战【幽暗森林】，点击卡片右下角的【进入】按钮。",
+            ], highlight=self.cards[0]),
+        ]
+
+    def _tut_showing(self):
+        """教程向导是否正在本界面显示（阶段 3 且未翻完页）"""
+        tut = getattr(self.window.game_state, "tutorial", None)
+        return (tut is not None and tut.active and tut.stage == 2
+                and tut.page < len(self.tut_pages))
+
     def on_show_view(self):
         self.window.background_color = arcade.color.BLACK
 
@@ -123,7 +146,30 @@ class MapSelectView(arcade.View):
             arcade.color.WHITE, size=14, anchor_x="center", anchor_y="center",
         )
 
+        # 新手教程（阶段 3）：向导弹窗覆盖层（画在最上层）
+        if self._tut_showing():
+            from views.tutorial import draw_tutorial_page
+            tut = getattr(self.window.game_state, "tutorial", None)
+            page = self.tut_pages[tut.page]
+            self.tut_next_rect, self.tut_skip_rect = draw_tutorial_page(
+                self, page, tut.page, len(self.tut_pages),
+                self._tc, self.tut_next_hover)
+
+    def on_key_press(self, key, modifiers):
+        # 新手教程激活：ESC 立即跳过并标记完成
+        tut = getattr(self.window.game_state, "tutorial", None)
+        if tut is not None and tut.active:
+            if key == arcade.key.ESCAPE:
+                from views.tutorial import finish_tutorial
+                finish_tutorial(self.window)
+            return
+
     def on_mouse_motion(self, x, y, dx, dy):
+        # 新手教程向导显示：只更新下一步按钮悬停态
+        if self._tut_showing():
+            self.tut_next_hover = bool(
+                self.tut_next_rect and self.tut_next_rect.point_in_rect((x, y)))
+            return
         self.hovered_map = -1
         for i, rect in enumerate(self.cards):
             if rect.point_in_rect((x, y)):
@@ -131,6 +177,20 @@ class MapSelectView(arcade.View):
                 break
 
     def on_mouse_press(self, x, y, button, modifiers):
+        # 新手教程向导显示：只响应 下一步/跳过
+        if self._tut_showing():
+            from views.tutorial import finish_tutorial
+            if self.tut_skip_rect and self.tut_skip_rect.point_in_rect((x, y)):
+                finish_tutorial(self.window)
+                return
+            if self.tut_next_rect and self.tut_next_rect.point_in_rect((x, y)):
+                # 翻完向导：隐藏，让玩家自行点击幽暗森林卡片进入
+                tut = getattr(self.window.game_state, "tutorial", None)
+                if tut is not None:
+                    tut.page = len(self.tut_pages)
+                return
+            return
+
         # 返回按钮（单机流程：角色选择 → 地图选择，返回时回角色选择页）
         back_rect = arcade.XYWH(80, 40, 100, 36)
         if back_rect.point_in_rect((x, y)):
@@ -146,6 +206,11 @@ class MapSelectView(arcade.View):
                 self.window.game_state.current_map_seed = random.randint(1, 999999)
                 # 记录地图主题，供 GameView 生成对应主题地图
                 self.window.game_state.map_theme = MAPS[i].get("theme", "forest")
+                # 新手教程：地图已选定 → 进入游戏内引导（阶段 4 接管）
+                tut = getattr(self.window.game_state, "tutorial", None)
+                if tut is not None and tut.active and tut.stage == 2:
+                    tut.stage = 3
+                    tut.page = 0
                 from views.game_view import GameView
                 gv = GameView(self.window_ref)
                 gv.setup()

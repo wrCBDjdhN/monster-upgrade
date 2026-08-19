@@ -269,6 +269,9 @@ class CombatSystem:
         if not self.can_attack(attacker_id):
             return None
         self._cooldowns[attacker_id] = duration + 0.3
+        # 狂暴药水：激光伤害不经过 modify_attack_damage（那是弹丸/挥砍入口），
+        # 在此独立应用 power_mult，保证陨星炮同样享受狂暴加成
+        damage = damage * getattr(player, "power_mult", 1.0)
         beam = LaserBeam(player, damage, length, width, duration, mouse_x, mouse_y,
                          debuffs=debuffs, owner_net_id=attacker_id)
         self.lasers.append(beam)

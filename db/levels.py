@@ -103,12 +103,16 @@ def choose_bonus(pid: int, character_id: str, bonus_key: str) -> dict:
     """
     if bonus_key not in _BONUS_COLUMNS:
         raise ValueError(f"未知升级加成: {bonus_key}")
+    # 取该加成的配置数值（LEVEL_BONUS_POOL 的 value）。
+    # 修复：旧版硬编码 +1 导致写库数值错误——升级面板当场生效 +20、DB 只记 +1，
+    # 下一局 setup 时只补 1 血 → 血上限变成 101（HP=101 bug）。damage/defense/speed/atk_speed 同理。
+    bonus_value = next((b["value"] for b in LEVEL_BONUS_POOL if b["key"] == bonus_key), 1)
     with _conn() as c:
         # WHERE 追加 pending_choices>0 保证无待选时不会误扣为负
         c.execute(
-            f"UPDATE character_levels SET {bonus_key}={bonus_key}+1,"
+            f"UPDATE character_levels SET {bonus_key}={bonus_key}+?,"
             " pending_choices=pending_choices-1"
             " WHERE player_id=? AND character_id=? AND pending_choices>0",
-            (pid, character_id),
+            (bonus_value, pid, character_id),
         )
     return get_character_levels(pid, character_id)

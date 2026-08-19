@@ -94,6 +94,14 @@ class BackpackView(ScrollView):
         else:
             y -= 30
 
+        # 本局药水槽区域（run_potions：不占背包容量，热键 1-N 优先使用）
+        run_potions = getattr(gs, 'run_potions', {})
+        if run_potions:
+            y -= 32  # 标题行
+            y -= 30 * len(run_potions)
+        else:
+            y -= 30
+
         self.content_height = max(y_start - y + 120, WINDOW_HEIGHT)
 
     def get_bg_color(self):
@@ -223,7 +231,7 @@ class BackpackView(ScrollView):
         self._build_content()
 
     def _spawn_drop(self, item_type: str, item_id: str, level: int = 1):
-        """在玩家周围生成地面掉落物"""
+        """在玩家周围生成地面掉落物（避让墙壁等障碍物，修复丢弃卡墙无法拾取）"""
         if not self.game_view or not hasattr(self.game_view, 'player') or not self.game_view.player:
             return
         import random as _rand
@@ -234,7 +242,33 @@ class BackpackView(ScrollView):
         drop_x = player.center_x + dist * math.cos(angle)
         drop_y = player.center_y + dist * math.sin(angle)
         drop = DropItem(drop_x, drop_y, item_type, item_id, 1, level=level)
+        self._place_drop_near_player(drop)
         self.game_view.drops.append(drop)
+
+    def _place_drop_near_player(self, drop):
+        """把丢弃的掉落物放到玩家周围的无障碍位置（修复丢弃靠墙时物品卡墙无法拾取）
+
+        丢弃位置原为玩家周围 50~120px 随机点，若玩家靠墙则可能落在墙内；
+        这里复用 game.entity_callbacks 的 _place_drop_avoiding（撞障碍物沿原方向
+        缩短半径重试）避让墙壁/环境物/未开宝箱（game_view.obstacle_list），
+        多次随机角度尝试，全部失败才回退玩家脚下（玩家所在位置必定可通行）。
+        """
+        if not self.game_view or not hasattr(self.game_view, 'player') or not self.game_view.player:
+            return False
+        import random as _rand
+        from game.entity_callbacks import _drop_collides, _place_drop_avoiding
+        player = self.game_view.player
+        obstacles = getattr(self.game_view, 'obstacle_list', None)
+        for _ in range(8):
+            angle = _rand.uniform(0, 6.2832)  # 2π
+            dist = _rand.uniform(50, 120)
+            _place_drop_avoiding(drop, player.center_x, player.center_y, angle, dist, obstacles)
+            if not _drop_collides(drop, obstacles):
+                return True
+        # 全部尝试仍碰撞：回退玩家脚下（玩家所在位置必定可通行，物品不会卡墙）
+        drop.center_x = player.center_x
+        drop.center_y = player.center_y
+        return True
 
     def _discard_item(self, item_type: str, item_id: str, level: int = 1):
         """丢弃指定物品：从 run_carried 移除，并在玩家周围生成地面掉落物
@@ -245,6 +279,28 @@ class BackpackView(ScrollView):
         carried = getattr(gs, 'run_carried', {})
         if item_type == "gold":
             return  # 金币不可丢弃
+
+        # 本局药水槽（run_potions）丢弃：减 1，生成本局药水掉落物（拾取后重回药水槽）
+        if item_type == "run_potion":
+            run_potions = getattr(gs, 'run_potions', {})
+            if run_potions.get(item_id, 0) <= 0:
+                return
+            run_potions[item_id] -= 1
+            if run_potions[item_id] <= 0:
+                del run_potions[item_id]
+            if self.game_view and hasattr(self.game_view, 'player') and self.game_view.player:
+                import random as _rand
+                from game.loot import DropItem
+                player = self.game_view.player
+                angle = _rand.uniform(0, 6.2832)
+                dist = _rand.uniform(50, 90)
+                drop_x = player.center_x + dist * math.cos(angle)
+                drop_y = player.center_y + dist * math.sin(angle)
+                drop = DropItem(drop_x, drop_y, "potion", item_id, 1)
+                self._place_drop_near_player(drop)
+                self.game_view.drops.append(drop)
+            self._build_content()
+            return
 
         # 如果丢弃背包，同时丢弃所有物品
         if item_type == "backpack":
@@ -266,7 +322,7 @@ class BackpackView(ScrollView):
         else:
             del slot[key]
 
-        # 在玩家周围生成地面掉落物（避免立即被拾取）
+        # 在玩家周围生成地面掉落物（避免立即被拾取，且避让墙壁不卡墙）
         if self.game_view and hasattr(self.game_view, 'player') and self.game_view.player:
             import random as _rand
             from game.loot import DropItem
@@ -277,6 +333,7 @@ class BackpackView(ScrollView):
             drop_x = player.center_x + dist * math.cos(angle)
             drop_y = player.center_y + dist * math.sin(angle)
             drop = DropItem(drop_x, drop_y, item_type, item_id, qty_to_drop, level=level)
+            self._place_drop_near_player(drop)
             self.game_view.drops.append(drop)
 
         # 重新构建内容
@@ -333,13 +390,20 @@ class BackpackView(ScrollView):
             for _ in range(qty):
                 items_to_drop.append(("potion", item_id, 1))
 
-        # 在玩家周围生成地面掉落物
+        # 本局药水槽（run_potions：不占背包容量，丢弃背包时一并丢弃）
+        run_potions = getattr(gs, 'run_potions', {})
+        for item_id, qty in run_potions.items():
+            for _ in range(qty):
+                items_to_drop.append(("potion", item_id, 1))
+
+        # 在玩家周围生成地面掉落物（避让墙壁等障碍物，修复丢弃卡墙无法拾取）
         for item_type, item_id, level in items_to_drop:
             angle = _rand.uniform(0, 6.2832)  # 2π
             dist = _rand.uniform(50, 120)
             drop_x = player.center_x + dist * math.cos(angle)
             drop_y = player.center_y + dist * math.sin(angle)
             drop = DropItem(drop_x, drop_y, item_type, item_id, 1, level=level)
+            self._place_drop_near_player(drop)
             self.game_view.drops.append(drop)
 
         # 清空 run_carried 中的所有物品（保留金币）
@@ -347,6 +411,8 @@ class BackpackView(ScrollView):
         saved_gold = carried.get("gold", 0)
         carried.clear()
         carried["gold"] = saved_gold
+        # 清空本局药水槽
+        run_potions.clear()
 
         # 重新构建内容
         self._build_content()
@@ -535,6 +601,25 @@ class BackpackView(ScrollView):
         else:
             self._tc.text("pack_empty", "(空)", 60, y, arcade.color.GRAY, 12)
             y -= 32
+
+        # ── 本局药水槽（run_potions：不占背包容量，无需背包即可拾取/使用，热键1-N优先）──
+        self._tc.text("runpot_title", "本局药水 (不占容量):", 50, y, arcade.color.WHITE, 16)
+        y -= 32
+        run_potions = getattr(gs, 'run_potions', {})
+        if run_potions:
+            from entities.equipment_defs import POTIONS
+            for i, (item_id, qty) in enumerate(run_potions.items()):
+                pdef = POTIONS.get(item_id, {})
+                name = pdef.get("name", item_id)
+                self._tc.text(f"runpot_{i}", f"{name} x{qty}", 60, y,
+                              arcade.color.CYAN, 14)
+                btn = arcade.XYWH(WINDOW_WIDTH - 80, y + 8, 80, 24)
+                # 丢弃本局药水：item_type="run_potion"（_discard_item 特殊处理）
+                self.discard_buttons.append((btn, "carry", "run_potion", item_id, 1))
+                y -= 30
+        else:
+            self._tc.text("runpot_empty", "(空)", 60, y, arcade.color.GRAY, 12)
+            y -= 30
 
         # 绘制丢弃按钮（rect 坐标已含 scroll_offset，直接使用即可）
         for i, btn in enumerate(self.discard_buttons):

@@ -97,22 +97,18 @@ def upgrade_weapon(pid: int, wid: int) -> bool:
 def sell_weapon(pid: int, wid: int) -> int:
     """售卖武器，返回获得金币数
 
-    售卖价 = 累计升级成本 × SELL_COST_RECOVERY_RATIO（避免卖价远大于锻造成本）。
-    累计升级成本 = UPGRADE_BASE_COST × (level-1) × level / 2（等差求和）。
-    Lv.1 无升级成本，下限 1 金币避免白嫖。
+    修复：售卖价以仓库页显示价为准（显示 = 伤害 × 2），不再按升级成本折算，
+    保证玩家在仓库页看到的售价与实际售得金币一致。
     """
-    from config import UPGRADE_BASE_COST, SELL_COST_RECOVERY_RATIO
     with _conn() as c:
         w = c.execute(
-            "SELECT level FROM weapons WHERE id=? AND player_id=?",
+            "SELECT damage FROM weapons WHERE id=? AND player_id=?",
             (wid, pid),
         ).fetchone()
         if not w:
             return 0
-        level = w[0]
-        # 累计升级成本（从 Lv1 升至当前等级的标准升级费用总和）
-        upgrade_cost = UPGRADE_BASE_COST * (level - 1) * level // 2
-        gold_earned = max(1, round(upgrade_cost * SELL_COST_RECOVERY_RATIO))
+        # 售卖价 = 伤害 × 2（与仓库页显示价同一口径）
+        gold_earned = int(w[0]) * 2
         c.execute("DELETE FROM weapons WHERE id=?", (wid,))
         c.execute("UPDATE players SET gold=gold+? WHERE id=?", (gold_earned, pid))
         return gold_earned

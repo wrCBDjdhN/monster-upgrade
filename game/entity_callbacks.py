@@ -82,7 +82,7 @@ def _on_rocket_boss_defeated(view, boss, pad):
     drops.append(DropItem(boss.center_x, boss.center_y + 20, "gold", "gold", 50))
     drops.append(DropItem(boss.center_x + 30, boss.center_y, "resource", "ore", 5))
     # 分散掉落物位置
-    scatter_drops(drops, boss.center_x, boss.center_y)
+    scatter_drops(drops, boss.center_x, boss.center_y, obstacles=view.obstacle_list)
     view.drops.extend(drops)
     floating_texts.add(pad.center_x, pad.center_y + 50,
                        "BOSS 已击败! 按7炸毁 | 按8启用撤离",
@@ -91,6 +91,10 @@ def _on_rocket_boss_defeated(view, boss, pad):
 
 def on_monster_death(view, monster):
     """怪物死亡回调"""
+    # 新手教程：记录击杀数（游戏内引导推进用）
+    tut = getattr(view.window.game_state, "tutorial", None)
+    if tut is not None and tut.active and tut.stage == 3:
+        tut.kill_count += 1
     # 死亡音效
     sound_manager.play_death()
 
@@ -134,7 +138,7 @@ def on_monster_death(view, monster):
         loot.append(drop)
 
     # 分散掉落物位置，避免重叠
-    scatter_drops(loot, monster.center_x, monster.center_y)
+    scatter_drops(loot, monster.center_x, monster.center_y, obstacles=view.obstacle_list)
     view.drops.extend(loot)
 
     # 等级经验：击杀怪物经验（各端本地结算，归属判定见 _award_kill_exp）
@@ -185,8 +189,9 @@ def handle_harvestable_combat(view, dt):
                     particle_system.emit(h.center_x, h.center_y, 5, (150, 150, 150), speed=60, life=0.3, size=3)
                     # 仙人掌反伤：攻击者自身受到伤害（受防御减免）
                     if h.resource_type == "cactus":
-                        view.player.take_damage(CACTUS_THORN_DAMAGE)
-                        floating_texts.add_damage(view.player.center_x, view.player.center_y + 30, CACTUS_THORN_DAMAGE)
+                        # 修复：用 take_damage 返回的实际伤害显示（护盾/防御减免后真实扣血量）
+                        actual = view.player.take_damage(CACTUS_THORN_DAMAGE)
+                        floating_texts.add_damage(view.player.center_x, view.player.center_y + 30, actual)
                     # 如果击杀，掉落资源
                     if not h.alive:
                         on_harvestable_destroyed(view, h)
@@ -205,8 +210,9 @@ def handle_harvestable_combat(view, dt):
                 particle_system.emit(h.center_x, h.center_y, 5, (150, 150, 150), speed=60, life=0.3, size=3)
                 # 仙人掌反伤：攻击者自身受到伤害（受防御减免）
                 if h.resource_type == "cactus":
-                    view.player.take_damage(CACTUS_THORN_DAMAGE)
-                    floating_texts.add_damage(view.player.center_x, view.player.center_y + 30, CACTUS_THORN_DAMAGE)
+                    # 修复：用 take_damage 返回的实际伤害显示（护盾/防御减免后真实扣血量）
+                    actual = view.player.take_damage(CACTUS_THORN_DAMAGE)
+                    floating_texts.add_damage(view.player.center_x, view.player.center_y + 30, actual)
                 proj.remove_from_sprite_lists()
                 if not h.alive:
                     # 采集经验按攻击者归属：客户端弹丸（owner_net_id!=0）不发给本端主机
@@ -224,8 +230,9 @@ def handle_harvestable_combat(view, dt):
             particle_system.emit(h.center_x, h.center_y, 5, (150, 150, 150), speed=60, life=0.3, size=3)
             # 仙人掌反伤：攻击者自身受到伤害（受防御减免）
             if h.resource_type == "cactus":
-                view.player.take_damage(CACTUS_THORN_DAMAGE)
-                floating_texts.add_damage(view.player.center_x, view.player.center_y + 30, CACTUS_THORN_DAMAGE)
+                # 修复：用 take_damage 返回的实际伤害显示（护盾/防御减免后真实扣血量）
+                actual = view.player.take_damage(CACTUS_THORN_DAMAGE)
+                floating_texts.add_damage(view.player.center_x, view.player.center_y + 30, actual)
             if not h.alive:
                 # 采集经验按攻击者归属：客户端激光（owner_net_id!=0）不发给本端主机
                 on_harvestable_destroyed(view, h, award_exp=(beam.owner_net_id == 0))
@@ -293,7 +300,8 @@ def handle_well_interaction(view):
     if not getattr(view, "_well_opened", False):
         view._well_opened = True
         from game.chest import Chest
-        tmp_chest = Chest(well[0], well[1])
+        # 水井仅沙漠主题生成（map_gen 铁律），复用宝箱掉落逻辑并传 desert 主题
+        tmp_chest = Chest(well[0], well[1], theme="desert")
         loot = tmp_chest.open_chest()
         spawn_chest_loot(view, tmp_chest, loot)
     else:
@@ -449,12 +457,20 @@ def spawn_chest_loot(view, chest, loot):
         item_id, slot, level = entry if len(entry) == 3 else (*entry, 1)
         drop = DropItem(chest.center_x, chest.center_y, slot, item_id, 1, level=level)
         chest_drops.append(drop)
+    # 背包（格式: item_id 或 None；修复原逻辑生成 loot["backpack"] 却未消费、背包永不掉落的 bug）
+    if loot.get("backpack"):
+        drop = DropItem(chest.center_x, chest.center_y, "backpack", loot["backpack"], 1)
+        chest_drops.append(drop)
+    # 药水（格式: [item_id, ...]，用户需求宝箱 45% 药水）
+    for pot_id in loot.get("potions", []):
+        drop = DropItem(chest.center_x, chest.center_y, "potion", pot_id, 1)
+        chest_drops.append(drop)
     # 金币
     if loot.get("gold", 0) > 0:
         drop = DropItem(chest.center_x, chest.center_y, "gold", "gold", loot["gold"])
         chest_drops.append(drop)
     # 分散掉落物位置，避免重叠
-    scatter_drops(chest_drops, chest.center_x, chest.center_y)
+    scatter_drops(chest_drops, chest.center_x, chest.center_y, obstacles=view.obstacle_list)
     view.drops.extend(chest_drops)
 
 
@@ -487,20 +503,46 @@ def get_drop_display_name(drop) -> str:
     return item_id
 
 
-def scatter_drops(drops: list, center_x: float, center_y: float, radius: float = 30):
-    """将掉落物以圆形分散，避免重叠。每个物品围绕中心点均匀分布。"""
+def _drop_collides(drop, obstacles) -> bool:
+    """掉落物是否与障碍物（墙壁/宝箱/环境物）重叠
+
+    obstacles 为 None/空时不做检测（兼容旧调用方）。
+    """
+    if not obstacles:
+        return False
+    return bool(arcade.check_for_collision_with_list(drop, obstacles))
+
+
+def _place_drop_avoiding(drop, center_x: float, center_y: float,
+                         angle: float, radius: float, obstacles):
+    """放置单个掉落物：优先按 (angle, radius) 定位，撞障碍物则沿原方向
+    缩短半径重试，全部失败则回退中心点（怪物/宝箱所在处可通行）"""
+    for r in (radius, radius * 0.6, radius * 0.3, 0.0):
+        drop.center_x = center_x + math.cos(angle) * r
+        drop.center_y = center_y + math.sin(angle) * r
+        if not _drop_collides(drop, obstacles):
+            return
+
+
+def scatter_drops(drops: list, center_x: float, center_y: float, radius: float = 30,
+                  obstacles=None):
+    """将掉落物以圆形分散，避免重叠。每个物品围绕中心点均匀分布。
+
+    障碍物避让（修复掉落物卡墙无法拾取）：分散位置若与障碍物（墙壁等）
+    重叠，则沿原方向缩短半径重试，失败则回退中心点。
+    """
     if not drops:
         return
     if len(drops) == 1:
-        # 单个物品不需要偏移
+        # 单个物品不需要偏移（但仍需避让障碍物）
+        _place_drop_avoiding(drops[0], center_x, center_y, 0.0, 0.0, obstacles)
         return
     for i, drop in enumerate(drops):
         # 均匀分布在圆周上
         angle = (2 * math.pi * i) / len(drops)
         # 随机化半径，避免过于规律
         r = radius * (0.6 + 0.4 * (i % 3) / 2)
-        drop.center_x = center_x + math.cos(angle) * r
-        drop.center_y = center_y + math.sin(angle) * r
+        _place_drop_avoiding(drop, center_x, center_y, angle, r, obstacles)
 
 
 def sync_obstacles(view):

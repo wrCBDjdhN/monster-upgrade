@@ -6,6 +6,7 @@ from config import (
     WINDOW_WIDTH, WINDOW_HEIGHT, PLAYER_COLOR, PLAYER_SIZE,
     EVAC_COLOR, EVAC_RADIUS, DESERT_THEME,
     SPACE_THEME, ACTION_TIME_SPACE, ACTION_TIME_FOREST, ACTION_TIME_DESERT,
+    MAP_WIDTH, MAP_HEIGHT, MINIMAP_SIZE, MINIMAP_PADDING, MINIMAP_VIEW_RADIUS,
 )
 
 # 可破坏环境物中文名映射
@@ -25,6 +26,7 @@ from game.render_helpers import (
     draw_player_base_equipment, draw_player_weapon, draw_drop_icon,
 )
 from entities.weapon_defs import get_weapon_visual
+from entities.equipment_defs import POTIONS
 # 怪物武器颜色从 monster_defs.py 统一读取（原 MONSTER_WEAPON_COLOR 已并入 MONSTER_METADATA）
 from entities.monster_defs import MONSTER_METADATA
 from game.entity_callbacks import get_drop_display_name
@@ -541,23 +543,23 @@ def render_game(view):
                     view._cached_weapon_name = w["name"]
                     break
 
-    # HUD 文本
+    # HUD 文本（玩家状态/装备全部左对齐 x=10；从上到下：等级→HP→金币→武器→药水→效果→装备→debuff→技能）
     view._hud_text("hp", f"HP: {round(view.player.hp)}/{round(view.player.max_hp)}",
-                   10, WINDOW_HEIGHT - 30, arcade.color.WHITE, 12)
+                   10, WINDOW_HEIGHT - 60, arcade.color.WHITE, 12)
     view._hud_text("gold", f"金币: {total_gold} (携带:{carried_gold})",
-                   10, WINDOW_HEIGHT - 50, arcade.color.YELLOW, 12)
+                   10, WINDOW_HEIGHT - 80, arcade.color.YELLOW, 12)
     wep_effect_txt = ""
     if getattr(view, "_cached_weapon_effects", "无") != "无":
         wep_effect_txt = f" | 效果:{view._cached_weapon_effects}"
     view._hud_text("weapon",
                    f"武器: {view._cached_weapon_name} | 伤害:{round(gs.weapon_damage)} | 距离:{round(gs.weapon_range)}{wep_effect_txt}",
-                   10, WINDOW_HEIGHT - 70, arcade.color.ORANGE, 12)
+                   10, WINDOW_HEIGHT - 100, arcade.color.ORANGE, 12)
     view._hud_text("hint",
-                   "WASD移动 | 鼠标攻击 | 靠近按E拾取物品 | 1-3药水 | E开宝箱 | TAB背包",
+                   "WASD移动 | 鼠标攻击 | 靠近按E拾取物品 | 1-3药水 | E开宝箱 | TAB背包 | M地图 | ESC设置",
                    10, 10, arcade.color.GRAY, 12)
 
     # 角色技能栏（F 键）：技能名 + 冷却/就绪状态（无技能角色如"初始"不显示）
-    # 位置：右侧右对齐（WINDOW_WIDTH-10, -85），避免夹在左侧武器/药水提示之间
+    # 位置：左侧 debuff 下方（原右侧右对齐，现随玩家状态全部左移，为小地图腾出右上角）
     skill_def = getattr(view.player, "character_def", {}).get("skill")
     if skill_def:
         skill_cd = max(0.0, getattr(view.player, "skill_cd", 0.0))
@@ -567,28 +569,46 @@ def render_game(view):
         else:
             skill_txt = f"技能[{skill_def['name']}] 就绪 (F)"
             skill_color = arcade.color.GOLD
-        view._hud_text("skill", skill_txt, WINDOW_WIDTH - 10, WINDOW_HEIGHT - 85,
-                       skill_color, 11, anchor_x="right")
+        view._hud_text("skill", skill_txt, 10, WINDOW_HEIGHT - 330,
+                       skill_color, 11)
     else:
         # 空串也会重绘，保证切换角色后旧文本被清除
-        view._hud_text("skill", "", WINDOW_WIDTH - 10, WINDOW_HEIGHT - 85,
-                       arcade.color.GOLD, 11, anchor_x="right")
+        view._hud_text("skill", "", 10, WINDOW_HEIGHT - 330,
+                       arcade.color.GOLD, 11)
 
-    # 药水显示
-    if potions:
-        view._hud_text("pot_title", "药水:", 10, WINDOW_HEIGHT - 90,
+    # 药水显示：合并本局药水槽（run_potions）+ 仓库药水，顺序与热键 1-3 一致
+    # （热键候选 = run 药水在前，仓库药水在后，见 input_handler.handle_key_press）
+    run_potions = getattr(gs, "run_potions", None) or {}
+    _pot_entries = []  # (名称, 数量)
+    for item_id, qty in run_potions.items():
+        if qty > 0:
+            pdef = POTIONS.get(item_id, {})
+            _pot_entries.append((pdef.get("name", item_id), qty))
+    _pot_entries.extend((p["name"], p["quantity"]) for p in potions)
+    if _pot_entries:
+        view._hud_text("pot_title", "药水:", 10, WINDOW_HEIGHT - 122,
                        arcade.color.LIGHT_GRAY, 11)
-        for i, pot in enumerate(potions[:3]):
+        for i, (pname, pqty) in enumerate(_pot_entries[:3]):
             view._hud_text(f"pot{i}",
-                           f"[{i+1}] {pot['name']} x{pot['quantity']}",
-                           70, WINDOW_HEIGHT - 90 - i * 15, arcade.color.CYAN, 11)
+                           f"[{i+1}] {pname} x{pqty}",
+                           70, WINDOW_HEIGHT - 122 - i * 15, arcade.color.CYAN, 11)
 
-    # 药水/效果剩余时间显示（速度加速、持续回复）
-    eff_y = WINDOW_HEIGHT - 138
+    # 药水/效果剩余时间显示（速度加速、护盾、狂暴、持续回复）
+    eff_y = WINDOW_HEIGHT - 168
     if view.player.speed_effect_timer > 0:
         view._hud_text("eff_speed",
                        f"移速加速: {view.player.speed_effect_timer:.1f}s",
                        10, eff_y, arcade.color.CYAN, 11)
+        eff_y -= 15
+    if getattr(view.player, "shield_effect_timer", 0) > 0:
+        view._hud_text("eff_shield",
+                       f"护盾: {view.player.shield:.0f} ({view.player.shield_effect_timer:.1f}s)",
+                       10, eff_y, (120, 160, 255), 11)
+        eff_y -= 15
+    if getattr(view.player, "power_effect_timer", 0) > 0:
+        view._hud_text("eff_power",
+                       f"狂暴: {view.player.power_effect_timer:.1f}s",
+                       10, eff_y, (255, 120, 40), 11)
         eff_y -= 15
     if view.player.heal_duration > 0:
         view._hud_text("eff_heal",
@@ -602,7 +622,7 @@ def render_game(view):
     draw_level_hud(view)
 
     # ── 联机状态条 E3（host/client 显示；solo 不绘制）──
-    # 位置：右上角，显示房间号/玩家数/RTT；solo 模式零开销（不进入分支）
+    # 位置：右上角小地图正下方（原 H-20 处让位给小地图），右对齐
     if gs.net_mode in ("host", "client"):
         if gs.net_mode == "host":
             n_players = max(1, len(getattr(gs, "net_roster", {}) or {}))
@@ -612,11 +632,13 @@ def render_game(view):
             rtt_ms = getattr(view, "_net_rtt_ms", 0.0)
             net_txt = f"联机(客户端) 房间:{getattr(gs, 'net_room_id', '?')} RTT:{rtt_ms:.0f}ms"
             net_color = arcade.color.LIGHT_BLUE
-        view._hud_text("netbar", net_txt, WINDOW_WIDTH - 10, WINDOW_HEIGHT - 20,
+        from config import MINIMAP_SIZE, MINIMAP_PADDING
+        view._hud_text("netbar", net_txt, WINDOW_WIDTH - 10,
+                       WINDOW_HEIGHT - MINIMAP_SIZE - MINIMAP_PADDING - 20,
                        net_color, 11, anchor_x="right")
 
-    # 装备显示
-    equip_y = WINDOW_HEIGHT - 160
+    # 装备显示（左移布局：位于效果区下方，H-205 起往下排）
+    equip_y = WINDOW_HEIGHT - 205
     if "helmet" in equip:
         view._hud_text("eq_helmet", f"头盔: {equip['helmet']['name']}", 10,
                        equip_y, arcade.color.LIGHT_BLUE, 11)
@@ -633,18 +655,25 @@ def render_game(view):
                        f"背包: {equip['backpack']['name']} ({used_cap}/{total_cap})",
                        10, equip_y, arcade.color.LIGHT_BLUE, 11)
 
-    # 玩家 debuff 显示（中毒/燃烧/冰冻/减速/眩晕）
+    # 玩家 debuff 显示（中毒/燃烧/冰冻/减速/眩晕，含剩余时间）
     _DEBUFF_NAMES = {"poison": "中毒", "burn": "燃烧", "freeze": "冰冻",
                      "slow": "减速", "stun": "眩晕"}
-    _active_debuffs = view.player.get_active_debuffs()
+    _active_debuffs = getattr(view.player, "debuffs", None)
     if _active_debuffs:
-        _debuff_txt = " | ".join(_DEBUFF_NAMES.get(d, d) for d in _active_debuffs)
+        # 逐条显示效果名 + 剩余秒数（duration 由 _update_debuffs 每帧递减）
+        _debuff_txt = " | ".join(
+            f"{_DEBUFF_NAMES.get(d['id'], d['id'])}{d.get('duration', 0):.1f}s"
+            for d in _active_debuffs
+        )
         view._hud_text("debuffs", f"状态: {_debuff_txt}", 10, equip_y - 15,
                        arcade.color.RED_ORANGE, 11)
     else:
         # 空串也会重绘，保证状态消失后旧文本被清除
         view._hud_text("debuffs", "", 10, equip_y - 15,
                        arcade.color.RED_ORANGE, 11)
+
+    # ── 右上角小地图（房间/宝箱/撤离点 + 玩家；M 键切换周围视野/全图）──
+    draw_minimap(view)
 
     # 消息提示
     if view._message_timer > 0:
@@ -723,8 +752,9 @@ def draw_action_timer(view):
 def draw_level_hud(view):
     """绘制角色等级 HUD：等级文本 + 经验条 + 待选升级闪烁提示
 
-    - 位置：右上角（联机状态条 E3 下方），等级/经验随 _level_data 缓存刷新
-      （经验发放时同步更新，见 game/entity_callbacks.py _award_exp）；
+    - 位置：左上角（等级文本 y=H-30、经验条 y=H-44；原右上角让位给小地图，
+      HP/金币/武器等玩家状态已整体左移，等级 HUD 跟随并入左侧玩家信息区）；
+    - 等级/经验随 _level_data 缓存刷新（经验发放时同步更新，见 game/entity_callbacks.py _award_exp）；
     - 待选升级（pending_choices>0）时在屏幕上方居中闪烁提示「按 TAB 选择加成」，
       升级面板（views/level_up_view.py）由 input_handler TAB 打开；
     - 无 player_id / 无等级数据时零开销跳过（客户端未初始化前安全）。
@@ -740,19 +770,19 @@ def draw_level_hud(view):
     exp = ld.get("exp", 0)
     need = exp_needed_for_level(level)
 
-    # 等级 + 经验文本（右上角，右对齐；位于联机状态条 E3 下方）
+    # 等级 + 经验文本（左上角，左对齐；位于 HP 上方，玩家信息区最顶部）
     if need == 0:
         lvl_txt = f"Lv.{level}（已满级）"
     else:
         lvl_txt = f"Lv.{level}  经验 {exp}/{need}"
-    view._hud_text("lvl", lvl_txt, WINDOW_WIDTH - 10, WINDOW_HEIGHT - 50,
-                   arcade.color.GOLD, 12, anchor_x="right", bold=True)
+    view._hud_text("lvl", lvl_txt, 10, WINDOW_HEIGHT - 30,
+                   arcade.color.GOLD, 12, anchor_x="left", bold=True)
 
-    # 经验条（未满级时绘制，右对齐紧贴文本下方）
+    # 经验条（未满级时绘制，左对齐紧贴文本下方）
     if need > 0:
         bar_w, bar_h = 170, 8
-        bx = WINDOW_WIDTH - 10 - bar_w
-        by = WINDOW_HEIGHT - 62
+        bx = 10
+        by = WINDOW_HEIGHT - 44
         arcade.draw_rect_filled(arcade.XYWH(bx + bar_w // 2, by + bar_h // 2, bar_w, bar_h),
                                 (50, 55, 65))
         fill = min(1.0, exp / need)
@@ -768,3 +798,116 @@ def draw_level_hud(view):
         view._hud_text("lvl_pending", "升级！按 TAB 选择加成",
                        WINDOW_WIDTH // 2, WINDOW_HEIGHT - 120,
                        hint_color, 16, anchor_x="center", bold=True)
+
+
+def draw_minimap(view):
+    """绘制右上角小地图：房间/宝箱/撤离点（space 用发射台）+ 玩家位置
+
+    - 位置：右上角 MINIMAP_SIZE x MINIMAP_SIZE 区域（MINIMAP_PADDING 边距），
+      固定不透明实心填充（渲染铁律：禁空心/线框绘制防闪烁）；
+    - 两种模式（M 键切换，见 input_handler minimap_zoom 绑定）：
+      * 默认「周围视野」：以玩家为中心 ±MINIMAP_VIEW_RADIUS 的世界范围映射；
+      * view._minimap_full=True 时「全图」：整张 MAP_WIDTH x MAP_HEIGHT 映射。
+    - 数据源全部来自 view.map_data（rooms/chest_positions/evac_points/rocket_pads），
+      与主渲染共用同一份地图数据，无需额外生成。
+    """
+    if not view.map_data or not view.player:
+        return
+    # 小地图左下角（arcade 左下原点，右上角区域 = 屏幕顶部右侧）
+    mm_x = WINDOW_WIDTH - MINIMAP_SIZE - MINIMAP_PADDING
+    mm_y = WINDOW_HEIGHT - MINIMAP_SIZE - MINIMAP_PADDING
+
+    # 世界坐标 → 小地图坐标的映射范围（周围视野 / 全图）
+    full = getattr(view, "_minimap_full", False)
+    if full:
+        min_x, min_y = 0.0, 0.0
+        span_x, span_y = float(MAP_WIDTH), float(MAP_HEIGHT)
+    else:
+        px, py = view.player.center_x, view.player.center_y
+        r = MINIMAP_VIEW_RADIUS
+        min_x = max(0.0, px - r)
+        min_y = max(0.0, py - r)
+        span_x = min(MAP_WIDTH, px + r) - min_x
+        span_y = min(MAP_HEIGHT, py + r) - min_y
+    scale_x = MINIMAP_SIZE / span_x if span_x > 0 else 0
+    scale_y = MINIMAP_SIZE / span_y if span_y > 0 else 0
+
+    def _mm(wx, wy):
+        """世界坐标 → 小地图局部坐标（未加 mm_x/mm_y 偏移）"""
+        return (wx - min_x) * scale_x, (wy - min_y) * scale_y
+
+    # 背景（不透明实心）
+    arcade.draw_rect_filled(
+        arcade.XYWH(mm_x + MINIMAP_SIZE / 2, mm_y + MINIMAP_SIZE / 2,
+                    MINIMAP_SIZE, MINIMAP_SIZE),
+        (18, 22, 18))
+
+    # 边框（不透明实心：外圈画一圈深灰，四边各 2px）
+    # 必须先画边框再画内容：若画在内容之后，196x196 内层背景会覆盖掉
+    # 房间/宝箱/玩家（修复小地图空白 bug）
+    arcade.draw_rect_filled(
+        arcade.XYWH(mm_x + MINIMAP_SIZE / 2, mm_y + MINIMAP_SIZE / 2,
+                    MINIMAP_SIZE, MINIMAP_SIZE),
+        (95, 105, 100))
+    arcade.draw_rect_filled(
+        arcade.XYWH(mm_x + MINIMAP_SIZE / 2, mm_y + MINIMAP_SIZE / 2,
+                    MINIMAP_SIZE - 4, MINIMAP_SIZE - 4),
+        (18, 22, 18))
+
+    # 房间（浅灰矩形，超出小地图范围的部分裁剪到边界内）
+    for room in view.map_data.get("rooms", []):
+        rx, ry = _mm(room.x, room.y)
+        rw, rh = room.w * scale_x, room.h * scale_y
+        # 裁剪：与小地图区域求交
+        cx1 = max(rx, 0.0)
+        cy1 = max(ry, 0.0)
+        cx2 = min(rx + rw, MINIMAP_SIZE)
+        cy2 = min(ry + rh, MINIMAP_SIZE)
+        if cx2 > cx1 and cy2 > cy1:
+            arcade.draw_rect_filled(
+                arcade.XYWH(mm_x + (cx1 + cx2) / 2, mm_y + (cy1 + cy2) / 2,
+                            cx2 - cx1, cy2 - cy1),
+                (60, 66, 60))
+
+    # 宝箱（黄色小方块）
+    for cx, cy in view.map_data.get("chest_positions", []):
+        sx, sy = _mm(cx, cy)
+        if 0 <= sx <= MINIMAP_SIZE and 0 <= sy <= MINIMAP_SIZE:
+            arcade.draw_rect_filled(
+                arcade.XYWH(mm_x + sx, mm_y + sy, 4, 4),
+                (230, 200, 60))
+
+    # 撤离点（绿色小方块）；space 主题无撤离点，改绘火箭发射台（青色）
+    evac_pts = view.map_data.get("evac_points", [])
+    if view.map_data.get("theme") == "space":
+        evac_pts = view.map_data.get("rocket_pads", [])
+        evac_color = (120, 200, 255)
+    else:
+        evac_color = (80, 230, 120)
+    for ex, ey in evac_pts:
+        sx, sy = _mm(ex, ey)
+        if 0 <= sx <= MINIMAP_SIZE and 0 <= sy <= MINIMAP_SIZE:
+            arcade.draw_rect_filled(
+                arcade.XYWH(mm_x + sx, mm_y + sy, 4, 4),
+                evac_color)
+
+    # 玩家（白色实心方块，居中于小地图中心附近；小地图外不绘制）
+    px, py = view.player.center_x, view.player.center_y
+    sx, sy = _mm(px, py)
+    if 0 <= sx <= MINIMAP_SIZE and 0 <= sy <= MINIMAP_SIZE:
+        arcade.draw_rect_filled(
+            arcade.XYWH(mm_x + sx, mm_y + sy, 5, 5),
+            arcade.color.WHITE)
+
+    # 联机远端玩家（橙色方块）：其他玩家的幽灵位置由主机快照权威同步
+    # （客户端上报本人快照 → 主机更新幽灵 → 主机广播全房玩家位置），
+    # 已撤离/阵亡（alive=False）的幽灵不显示，避免小地图残留静止标记。
+    # solo 模式 remote_players 恒为空，零开销。
+    for ghost in getattr(view, "remote_players", {}).values():
+        if not getattr(ghost, "alive", True):
+            continue
+        gx, gy = _mm(ghost.center_x, ghost.center_y)
+        if 0 <= gx <= MINIMAP_SIZE and 0 <= gy <= MINIMAP_SIZE:
+            arcade.draw_rect_filled(
+                arcade.XYWH(mm_x + gx, mm_y + gy, 5, 5),
+                (255, 150, 60))

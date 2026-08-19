@@ -209,22 +209,20 @@ def upgrade_equipment(pid: int, equip_id: int = None, material_id: int = None) -
 def sell_equipment(pid: int, equip_id: int) -> int:
     """售卖装备（头盔/护甲/背包），返回获得金币数
 
-    售卖价 = 累计升级成本 × SELL_COST_RECOVERY_RATIO（避免卖价远大于锻造成本）。
-    累计升级成本 = UPGRADE_BASE_COST × (level-1) × level / 2（等差求和，与武器统一口径）。
-    Lv.1 无升级成本，下限 1 金币避免白嫖。
+    修复：售卖价以仓库页显示价为准（显示 = 背包容量/其余防御 × 2），不再按升级成本折算，
+    保证玩家在仓库页看到的售价与实际售得金币一致。
     """
-    from config import UPGRADE_BASE_COST, SELL_COST_RECOVERY_RATIO
     with _conn() as c:
         row = c.execute(
-            "SELECT level FROM equipment WHERE id=? AND player_id=?",
+            "SELECT slot, defense, capacity FROM equipment WHERE id=? AND player_id=?",
             (equip_id, pid),
         ).fetchone()
         if not row:
             return 0
-        level = row[0]
-        # 累计升级成本（从 Lv1 升至当前等级的标准升级费用总和）
-        upgrade_cost = UPGRADE_BASE_COST * (level - 1) * level // 2
-        gold_earned = max(1, round(upgrade_cost * SELL_COST_RECOVERY_RATIO))
+        slot, defense, capacity = row
+        # 售卖价 = 基础值（背包取容量，其余取防御）× 2（与仓库页显示价同一口径）
+        base = capacity if slot == "backpack" else defense
+        gold_earned = int(base) * 2
         c.execute("DELETE FROM equipment WHERE id=?", (equip_id,))
         c.execute("UPDATE players SET gold=gold+? WHERE id=?", (gold_earned, pid))
         return gold_earned

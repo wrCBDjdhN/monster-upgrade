@@ -221,6 +221,46 @@ POTIONS = {
         "description": "回复25点生命并提升移速30%持续30秒",
         "stackable": True,
     },
+    # === 新药水（用户需求 4 种）===
+    "heal_potion_xl": {
+        "name": "超级治疗药水",
+        "effect": "heal",
+        "value": 120,  # 瞬间回复量（无 duration → 走瞬回分支，修复 duration=0 不生效）
+        "price": 60,
+        "color": (255, 80, 80),
+        "description": "瞬间回复120点生命",
+        "stackable": True,
+    },
+    "speed_potion_l": {
+        "name": "疾风药水",
+        "effect": "speed",
+        "value": 1.8,  # 移速倍率
+        "duration": 45.0,  # 持续秒数
+        "price": 50,
+        "color": (80, 200, 255),
+        "description": "移速提升80%，持续45秒",
+        "stackable": True,
+    },
+    "shield_potion": {
+        "name": "护盾药水",
+        "effect": "shield",  # 临时护盾：先于防御结算吸收伤害
+        "value": 50,  # 护盾值
+        "duration": 20.0,  # 持续秒数
+        "price": 45,
+        "color": (120, 160, 255),
+        "description": "获得50点护盾，持续20秒",
+        "stackable": True,
+    },
+    "power_potion": {
+        "name": "狂暴药水",
+        "effect": "power",  # 伤害倍率：攻击结算乘算
+        "value": 1.5,  # 伤害倍率
+        "duration": 15.0,  # 持续秒数
+        "price": 55,
+        "color": (255, 120, 40),
+        "description": "攻击伤害提升50%，持续15秒",
+        "stackable": True,
+    },
 }
 
 # ── 怪物可穿戴护甲（掉落用）──

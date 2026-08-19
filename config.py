@@ -115,22 +115,87 @@ BOSS_GEAR_LEVEL_RANGE = (20, 30)        # Boss 持有头盔/护甲等级范围
 MONSTER_MUMMY_ARMOR_CHANCE = 0.35   # 沙漠怪穿戴木乃伊护甲概率
 MONSTER_MUMMY_HELMET_CHANCE = 0.35  # 沙漠怪穿戴木乃伊头盔概率
 
-# ── 宝箱/水井开出武器装备的等级分布（用户需求）──
-# 每项为 (概率, 最低等级, 最高等级)，先按概率选档再在区间内取整：
-#   Lv1~10 概率 80%、Lv10~20 概率 10%、Lv20~50 概率 9%、Lv50~100 概率 1%
-# 说明：边界等级（10/20/50）会同时落在相邻两档，仅使该单点等级概率略高，属设计取舍
-CHEST_LEVEL_RANGES = [
-    (0.80, 1, 10),
-    (0.10, 10, 20),
-    (0.09, 20, 50),
-    (0.01, 50, 100),
-]
+# ── 开箱系统（按主题区分掉落池，用户需求 2026-08）──
+# 每主题配置项：
+#   main_chance / potion_chance / elite_chance / artifact_chance：主掉落各档概率（合计 1.0）
+#   main_level / elite_level / artifact_level：(min, max) 各档装备等级区间（区间内均匀随机）
+#   main_pool / elite_pool：[(slot, item_id), ...] 装备池（slot ∈ weapon/helmet/armor/backpack）
+# 神器池不写死：为 None 时由 chest.py 动态筛取 artifact 标记物品（新增神器自动纳入）
+# 各主题掉落规则：
+#   幽暗森林：45% 常规装备(1-5级) / 45% 药水 / 10% 高级装备(1级)，不掉落神器
+#   沙漠荒地：45% 常规装备(1-5级) / 45% 药水 / 10% 高级装备(1级)，不掉落神器
+#   航天基地：60% 常规装备(5-50级) / 20% 药水 / 20% 神器(5-10级)
+CHEST_THEME_CONFIGS = {
+    "forest": {
+        "main_chance": 0.45,
+        "potion_chance": 0.45,
+        "elite_chance": 0.10,
+        "artifact_chance": 0.0,
+        "main_level": (1, 5),
+        "elite_level": (1, 1),
+        "artifact_level": (5, 10),
+        # 常规装备池：皮质/铁质/金质 + 木剑铁剑石锤 + 弓杖 + 背包（用户需求）
+        "main_pool": [
+            ("helmet", "leather_helm"), ("armor", "leather_armor"),   # 皮质
+            ("helmet", "iron_helm"), ("armor", "chain_mail"),         # 铁质
+            ("helmet", "golden_helm"), ("armor", "plate_armor"),      # 金质
+            ("weapon", "wood_sword"), ("weapon", "iron_sword"), ("weapon", "stone_mace"),
+            ("weapon", "short_bow"), ("weapon", "long_bow"), ("weapon", "fire_staff"),
+            ("backpack", "small_bag"), ("backpack", "medium_bag"), ("backpack", "large_bag"),
+        ],
+        # 高级装备池：枪械 + 木乃伊/航天套装（固定 1 级，用户需求）
+        "elite_pool": [
+            ("weapon", "sniper"), ("weapon", "pistol"), ("weapon", "rifle"),
+            ("helmet", "mummy_helmet"), ("armor", "mummy_armor"),
+            ("helmet", "space_helmet"), ("armor", "space_armor"),
+        ],
+    },
+    "desert": {
+        "main_chance": 0.45,
+        "potion_chance": 0.45,
+        "elite_chance": 0.10,
+        "artifact_chance": 0.0,
+        "main_level": (1, 5),
+        "elite_level": (1, 1),
+        "artifact_level": (5, 10),
+        # 常规装备池：枪械 + 木乃伊/航天套装 + 背包（用户需求）
+        "main_pool": [
+            ("weapon", "sniper"), ("weapon", "pistol"), ("weapon", "rifle"),
+            ("helmet", "mummy_helmet"), ("armor", "mummy_armor"),
+            ("helmet", "space_helmet"), ("armor", "space_armor"),
+            ("backpack", "medium_bag"), ("backpack", "large_bag"), ("backpack", "huge_bag"),
+        ],
+        # 高级装备池：沙漠特色强力武器（固定 1 级，用户需求）
+        "elite_pool": [
+            ("weapon", "rocket_launcher"), ("weapon", "laser_gun"),
+            ("weapon", "cursed_scimitar"), ("weapon", "scepter"),
+        ],
+    },
+    "space": {
+        "main_chance": 0.60,
+        "potion_chance": 0.20,
+        "elite_chance": 0.0,
+        "artifact_chance": 0.20,
+        "main_level": (5, 50),
+        "elite_level": (5, 10),
+        "artifact_level": (5, 10),
+        # 常规装备池：沙漠+航天全部特色装备 + 背包（用户需求）
+        "main_pool": [
+            ("weapon", "rocket_launcher"), ("weapon", "laser_gun"),
+            ("weapon", "cursed_scimitar"), ("weapon", "scepter"),
+            ("weapon", "sniper"), ("weapon", "pistol"), ("weapon", "rifle"),
+            ("helmet", "mummy_helmet"), ("armor", "mummy_armor"),
+            ("helmet", "space_helmet"), ("armor", "space_armor"),
+            ("backpack", "large_bag"), ("backpack", "huge_bag"),
+        ],
+    },
+}
+# 宝箱必定掉落金币数量范围（所有主题一致）
+CHEST_GOLD_MIN = 5
+CHEST_GOLD_MAX = 15
 
-# ── 开箱系统 ──
-# 宝箱掉落概率（原 chest.py 硬编码值，集中到配置便于调平衡）
-CHEST_EQUIPMENT_CHANCE = 0.5    # 50% 概率掉落装备（头盔/护甲）
-CHEST_BACKPACK_CHANCE = 0.25    # 25% 概率掉落背包
-CHEST_GOLD_CHANCE = 0.3         # 30% 概率掉落金币（5~15）
+# ── 本局药水槽（run_potions）──
+RUN_POTION_SLOTS = 5             # 本局可携带药水上限（不占背包容量，热键 1-3 优先使用）
 # 武器箱：所有武器池（根据等级区间决定开出的武器等级）
 ALL_WEAPON_IDS = [
     "wood_sword", "iron_sword", "stone_mace",
@@ -268,6 +333,13 @@ SPACE_THEME = {
 BANDIT_GROUP_COUNT_MIN = 3        # 土匪每次刷新最少数量
 BANDIT_GROUP_COUNT_MAX = 5        # 土匪每次刷新最多数量
 ROCKET_TROOP_AOE_RADIUS = 60      # 火箭兵 AOE 爆炸半径
+# 索敌距离配置：
+# - MONSTER_AGGRO_RANGE_MULT：在 monster_defs.py 各怪物 aggro_range 基础上放大的倍率
+# - MONSTER_AGGRO_RANGE_BASE：索敌保底距离（≈屏幕半对角线，保证"玩家能看到怪物→怪物就能索敌"）
+# 实际索敌距离 = max(BASE, aggro_range × MULT)；配合视线检测（隔墙不索敌）与边缘视线
+# （拐角露出部分身体即可被看到），实现 360° 视野被墙遮挡的索敌模型
+MONSTER_AGGRO_RANGE_MULT = 2.2
+MONSTER_AGGRO_RANGE_BASE = 700
 
 # ── 航天基地掉落表 ──
 SNIPER_LOOT_TABLE = [
@@ -360,6 +432,31 @@ def roll_level_up_options(count=3):
     """随机抽取 count 个不重复的升级加成选项（升级 3 选 1 面板使用）"""
     return random.sample(LEVEL_BONUS_POOL, k=min(count, len(LEVEL_BONUS_POOL)))
 
+
+# ── 按键绑定（默认键位，settings_view 可重绑并持久化到 db settings 表）──
+# 键名 = arcade.key 的属性名（字符串），运行时 getattr(arcade.key, name) 解析；
+# 每个动作一个键（移动动作 WASD 各自独立），方向键暂未实现移动（保持现状）。
+KEY_BINDINGS = {
+    "move_up": ["W"],       # 向上移动
+    "move_down": ["S"],     # 向下移动
+    "move_left": ["A"],     # 向左移动
+    "move_right": ["D"],    # 向右移动
+    "interact": ["E"],      # 交互（宝箱/水井/发射台/拾取）
+    "skill": ["F"],         # 角色技能
+    "backpack": ["TAB"],    # 背包/升级面板
+    "potion_1": ["KEY_1"],   # 药水快捷键 1
+    "potion_2": ["KEY_2"],   # 药水快捷键 2
+    "potion_3": ["KEY_3"],   # 药水快捷键 3
+    "rocket_destroy": ["KEY_7"],  # 发射台菜单-炸毁
+    "rocket_evac": ["KEY_8"],     # 发射台菜单-启用撤离
+    "spectate": ["V"],      # 观战视角切换
+    "minimap_zoom": ["M"],  # 小地图放大（周围视野 ⇄ 全图）
+}
+
+# ── 小地图（游戏 HUD 右上角）──
+MINIMAP_SIZE = 200             # 小地图边长（像素）
+MINIMAP_PADDING = 20           # 距屏幕右/上边缘间距（像素）
+MINIMAP_VIEW_RADIUS = 700      # 小地图默认「周围视野」半径（世界像素，±700px）
 
 # ── 联机网络 ──
 NET_SNAPSHOT_HZ = 20                # 状态快照广播频率（Hz）

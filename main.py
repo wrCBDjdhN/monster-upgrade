@@ -145,6 +145,27 @@ class GameWindow(arcade.Window):
         return super().dispatch_event(event_type, *args)
 
 
+class TutorialState:
+    """新手教程运行状态（仅首次启动启用）
+
+    - active：教程是否激活（DB settings 未标记 tutorial_done 时首次启动为 True）
+    - stage：当前阶段（0=开始界面 1=角色选择 2=地图选择 3=游戏内
+             4=撤离结算+航天基地教学 5=市场教学 6=完成）
+    - page：当前阶段内的向导页码
+    - kill_count / pickup_count：游戏内引导的击杀/拾取计数（阶段 3 检测用）
+    - minimap_taught：小地图是否已讲解（避免重复弹讲解）
+    - 教程中途退出（关游戏）不写 tutorial_done，下次启动从头开始
+    """
+
+    def __init__(self, active: bool):
+        self.active = active
+        self.stage = 0
+        self.page = 0
+        self.kill_count = 0
+        self.pickup_count = 0
+        self.minimap_taught = False
+
+
 class GameState:
     """各 View 共享的运行时状态
     
@@ -156,6 +177,8 @@ class GameState:
         self.player_name: str = "hero"              # 玩家名称（默认 "hero"）
         self.character_id: str = "initial"          # 当前选择角色（initial/mage/knight/assassin，单机/联机共用）
         self.run_carried: dict = {}                 # 本次携带物: {"resource": {id: qty}, "gold": int, "weapon": {id: qty}}
+        self.run_potions: dict = {}                 # 本局拾取的药水: {item_id: qty}（上限 RUN_POTION_SLOTS，
+                                                    # 不占背包容量、无需背包即可使用；撤离时随 run_carried 一并入库）
         self.current_weapon_kind: str = "melee"     # 当前武器类型: "melee"(近战) 或 "ranged"(远程)
         self.current_weapon_id: int | None = None   # 当前武器数据库 ID
         self.current_weapon_item_id: str | None = None  # 当前武器物品ID（如 "iron_sword"），用于渲染
@@ -188,6 +211,8 @@ class GameState:
         self.net_wait_reason: str = ""          # 客户端撤离/死亡后回房等待的原因（evac/dead），大厅提示用
         self.net_characters: dict = {}          # 联机玩家角色映射 {player_id: character_id}，主机权威维护，
                                                 # 开局前由 SET_CHARACTER 上报更新，ROOM_START 打包下发全房
+        # 新手教程状态（首次启动 active=True；跳过/完成后 active=False）
+        self.tutorial: TutorialState | None = None
 
 
 def main():
@@ -197,6 +222,12 @@ def main():
     """
     window = GameWindow()
     window.game_state = GameState()
+
+    # 首次启动教程：读取 DB 教程完成标记（tutorial_done），未完成则启用教程
+    from db.database import init_db
+    from db.settings import is_tutorial_done
+    init_db()
+    window.game_state.tutorial = TutorialState(active=not is_tutorial_done())
 
     # 延迟导入避免循环依赖（start_view 会导入其他视图）
     from views.start_view import StartView

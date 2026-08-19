@@ -25,7 +25,7 @@ AI 行为：
 
 import math
 import arcade
-from config import MAP_WIDTH, MAP_HEIGHT, TILE_SIZE, PROJECTILE_SIZE, PROJECTILE_LIFETIME
+from config import MAP_WIDTH, MAP_HEIGHT, TILE_SIZE, PROJECTILE_SIZE, PROJECTILE_LIFETIME, MONSTER_AGGRO_RANGE_MULT, MONSTER_AGGRO_RANGE_BASE, PLAYER_SIZE
 from entities.monster_defs import MONSTER_CONFIGS
 
 
@@ -65,14 +65,19 @@ class _WallGrid:
 _wall_grid_cache = None  # (walls, _WallGrid) | None
 
 
-def _can_move_to(new_x, new_y, size, walls):
-    """检查怪物能否移动到 (new_x, new_y)，不穿墙，不限制房间（可通过门离开）"""
+def _get_wall_grid(walls):
+    """获取（并缓存）墙体空间索引：同一 walls 列表只构建一次，供碰撞与视线检测复用"""
     global _wall_grid_cache
-    half = size
-    # 空间索引：只检查目标位置附近网格内的墙（性能优化，行为与原全量遍历一致）
     if _wall_grid_cache is None or _wall_grid_cache[0] is not walls:
         _wall_grid_cache = (walls, _WallGrid(walls))
-    for wx, wy, ww, wh in _wall_grid_cache[1].nearby(new_x, new_y):
+    return _wall_grid_cache[1]
+
+
+def _can_move_to(new_x, new_y, size, walls):
+    """检查怪物能否移动到 (new_x, new_y)，不穿墙，不限制房间（可通过门离开）"""
+    half = size
+    # 空间索引：只检查目标位置附近网格内的墙（性能优化，行为与原全量遍历一致）
+    for wx, wy, ww, wh in _get_wall_grid(walls).nearby(new_x, new_y):
         if (new_x + half > wx and new_x - half < wx + ww and
             new_y + half > wy and new_y - half < wy + wh):
             return False
@@ -81,6 +86,81 @@ def _can_move_to(new_x, new_y, size, walls):
         return False
     if new_y - half < 0 or new_y + half > MAP_HEIGHT:
         return False
+    return True
+
+
+def _segment_intersects_rect(x0, y0, x1, y1, rx, ry, rw, rh):
+    """线段 (x0,y0)-(x1,y1) 与轴对齐矩形是否相交（slab 法，精确无漏检）
+
+    端点相切（t0/t1 落在 [0,1] 边界）视为相交：怪物贴墙站立时，视线从
+    墙面出发即为被挡，符合物理直觉。返回 True = 线段穿过/触及该墙。
+    """
+    dx = x1 - x0
+    dy = y1 - y0
+    t0, t1 = 0.0, 1.0
+    # 依次对 X、Y 两个轴做 slab 裁剪
+    for p, d, lo, hi in ((x0, dx, rx, rx + rw), (y0, dy, ry, ry + rh)):
+        if abs(d) < 1e-9:
+            # 线段与轴平行：若起点在该轴投影之外则无交集
+            if p < lo or p > hi:
+                return False
+        else:
+            ta = (lo - p) / d
+            tb = (hi - p) / d
+            if ta > tb:
+                ta, tb = tb, ta
+            t0 = max(t0, ta)
+            t1 = min(t1, tb)
+            if t0 > t1:
+                return False
+    return True
+
+
+def _has_line_of_sight(x0, y0, x1, y1, walls, r0=0, r1=0):
+    """检查两点之间是否有视线（连线未被墙壁阻挡）
+
+    修复"怪物隔墙索敌"：怪物与玩家之间隔着墙时不得索敌/追击/攻击。
+    修复"拐角误判卡住"：r0/r1 为起点/终点实体半径，检测改为"怪物表面→玩家表面"
+    （两端各向内侧缩进半径），玩家在墙角只露出部分身体即算可见——360° 视野被墙
+    遮挡后，拐角方向仍保留下来的视野部分可以看到玩家。
+    实现：沿线以 TILE_SIZE/2 步长采样网格坐标收集候选墙（配合 _WallGrid 空间索引），
+    再用 slab 法做精确线段-矩形相交判定（避免稀疏采样漏检导致隔墙误判）。
+    """
+    dx = x1 - x0
+    dy = y1 - y0
+    dist = math.hypot(dx, dy)
+    if dist <= 0:
+        return True
+    # 两端向内侧缩进各自半径（不越过线段中点），把"中心连线"变为"边缘连线"
+    inset0 = min(r0, dist * 0.5)
+    inset1 = min(r1, dist * 0.5)
+    sx = x0 + dx / dist * inset0
+    sy = y0 + dy / dist * inset0
+    ex = x1 - dx / dist * inset1
+    ey = y1 - dy / dist * inset1
+    seg_dx = ex - sx
+    seg_dy = ey - sy
+    seg_len = math.hypot(seg_dx, seg_dy)
+    if seg_len <= 0:
+        return True
+    # 沿缩进后的线段采样网格坐标，收集线段经过的所有候选墙（去重）
+    grid = _get_wall_grid(walls)
+    step = TILE_SIZE / 2
+    n = max(1, int(seg_len / step) + 1)  # 向上取整，保证采样步长 ≤ TILE_SIZE/2，不漏网格
+    candidates = []
+    seen = set()
+    for i in range(n + 1):
+        t = i / n
+        px = sx + seg_dx * t
+        py = sy + seg_dy * t
+        for w in grid.nearby(px, py):
+            if w not in seen:
+                seen.add(w)
+                candidates.append(w)
+    # 对候选墙做精确线段-矩形相交判定
+    for wx, wy, ww, wh in candidates:
+        if _segment_intersects_rect(sx, sy, ex, ey, wx, wy, ww, wh):
+            return False
     return True
 
 
@@ -188,7 +268,9 @@ class _MeleeMonsterBase(arcade.SpriteSolidColor):
         self.required_weapon_level = required_weapon_level
         # 行为参数
         self._size = size
-        self._aggro_range = aggro_range
+        # 索敌距离 = max(保底, 配置值 × 倍率)：保底覆盖玩家可视范围（屏幕半对角），
+        # 保证"玩家能看到怪物→怪物就能索敌"；远程/狙击/BOSS 保留更远的个体差异
+        self._aggro_range = max(MONSTER_AGGRO_RANGE_BASE, int(aggro_range * MONSTER_AGGRO_RANGE_MULT))
         self._attack_delay = attack_delay
 
     def set_on_death(self, cb):
@@ -229,7 +311,12 @@ class _MeleeMonsterBase(arcade.SpriteSolidColor):
         if dist > self._aggro_range or dist == 0:
             self._attack_timer = max(0, self._attack_timer - delta_time)
             return
-        # 直接冲向玩家
+        # 隔墙（无视线）不索敌：边缘视线（怪物表面→玩家表面），拐角露出部分身体即可看到
+        if not _has_line_of_sight(self.center_x, self.center_y, player_x, player_y, self._walls,
+                                  self._size, PLAYER_SIZE):
+            self._attack_timer = max(0, self._attack_timer - delta_time)
+            return
+        # 直接冲向玩家；撞墙时沿轴滑动（分轴尝试），避免卡在门口墙角
         move_x = (dx / dist) * self.speed * self._debuff_speed_mult * delta_time
         move_y = (dy / dist) * self.speed * self._debuff_speed_mult * delta_time
         new_x = self.center_x + move_x
@@ -237,6 +324,12 @@ class _MeleeMonsterBase(arcade.SpriteSolidColor):
         if _can_move_to(new_x, new_y, self._size, self._walls):
             self.center_x = new_x
             self.center_y = new_y
+        else:
+            # 整体移动被挡：分轴尝试，允许怪物沿墙滑行绕过墙角进入门洞
+            if _can_move_to(new_x, self.center_y, self._size, self._walls):
+                self.center_x = new_x
+            if _can_move_to(self.center_x, new_y, self._size, self._walls):
+                self.center_y = new_y
         self._attack_timer = max(0, self._attack_timer - delta_time)
 
     def try_attack(self, player=None, players=None) -> bool:
@@ -379,7 +472,9 @@ class _RangedMonsterBase(arcade.SpriteSolidColor):
         self.required_weapon_level = required_weapon_level
         # 行为参数
         self._size = size
-        self._aggro_range = aggro_range
+        # 索敌距离 = max(保底, 配置值 × 倍率)：保底覆盖玩家可视范围（屏幕半对角），
+        # 保证"玩家能看到怪物→怪物就能索敌"；远程/狙击/BOSS 保留更远的个体差异
+        self._aggro_range = max(MONSTER_AGGRO_RANGE_BASE, int(aggro_range * MONSTER_AGGRO_RANGE_MULT))
         self._attack_delay = attack_delay
 
     def set_on_death(self, cb):
@@ -419,7 +514,12 @@ class _RangedMonsterBase(arcade.SpriteSolidColor):
         if dist > self._aggro_range or dist == 0:
             self._attack_timer = max(0, self._attack_timer - delta_time)
             return
-        # 保持距离 120~200
+        # 隔墙（无视线）不索敌：边缘视线（怪物表面→玩家表面），拐角露出部分身体即可看到
+        if not _has_line_of_sight(self.center_x, self.center_y, player_x, player_y, self._walls,
+                                  self._size, PLAYER_SIZE):
+            self._attack_timer = max(0, self._attack_timer - delta_time)
+            return
+        # 保持距离 120~200；撞墙时沿轴滑动（分轴尝试），避免卡在门口墙角
         move_x, move_y = 0, 0
         if dist > 200:
             move_x = (dx / dist) * self.speed * self._debuff_speed_mult * delta_time
@@ -433,6 +533,12 @@ class _RangedMonsterBase(arcade.SpriteSolidColor):
             if _can_move_to(new_x, new_y, self._size, self._walls):
                 self.center_x = new_x
                 self.center_y = new_y
+            else:
+                # 整体移动被挡：分轴尝试，允许怪物沿墙滑行绕过墙角进入门洞
+                if _can_move_to(new_x, self.center_y, self._size, self._walls):
+                    self.center_x = new_x
+                if _can_move_to(self.center_x, new_y, self._size, self._walls):
+                    self.center_y = new_y
         self._attack_timer = max(0, self._attack_timer - delta_time)
 
     def try_attack(self, player=None, players=None) -> Projectile | None:
@@ -453,7 +559,10 @@ class _RangedMonsterBase(arcade.SpriteSolidColor):
             # 无目标（多目标模式下无存活玩家，或单目标未传入玩家）无法攻击
             return None
         dist = math.hypot(player.center_x - self.center_x, player.center_y - self.center_y)
-        if dist < self._aggro_range and self._attack_timer <= 0:
+        # 隔墙（无视线）不开火：与索敌规则一致（边缘视线），防止远程怪隔着墙射击
+        if dist < self._aggro_range and self._attack_timer <= 0 and _has_line_of_sight(
+                self.center_x, self.center_y, player.center_x, player.center_y, self._walls,
+                self._size, PLAYER_SIZE):
             self._attack_timer = self._attack_delay
             return Projectile(
                 self.center_x, self.center_y,
@@ -625,7 +734,10 @@ class RocketTroop(_RangedMonsterBase):
             # 无目标（多目标模式下无存活玩家，或单目标未传入玩家）无法攻击
             return None
         dist = math.hypot(player.center_x - self.center_x, player.center_y - self.center_y)
-        if dist < self._aggro_range and self._attack_timer <= 0:
+        # 隔墙（无视线）不开火：与索敌规则一致（边缘视线），防止火箭兵隔着墙射击
+        if dist < self._aggro_range and self._attack_timer <= 0 and _has_line_of_sight(
+                self.center_x, self.center_y, player.center_x, player.center_y, self._walls,
+                self._size, PLAYER_SIZE):
             self._attack_timer = self._attack_delay
             return Projectile(
                 self.center_x, self.center_y,
