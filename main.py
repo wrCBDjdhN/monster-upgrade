@@ -150,10 +150,11 @@ class TutorialState:
 
     - active：教程是否激活（DB settings 未标记 tutorial_done 时首次启动为 True）
     - stage：当前阶段（0=开始界面 1=角色选择 2=地图选择 3=游戏内
-             4=撤离结算+航天基地教学 5=市场教学 6=完成）
+         4=撤离结算+航天基地教学 5=市场教学 6=完成）
     - page：当前阶段内的向导页码
     - kill_count / pickup_count：游戏内引导的击杀/拾取计数（阶段 3 检测用）
     - minimap_taught：小地图是否已讲解（避免重复弹讲解）
+    - boss_taught：BOSS房间是否已讲解（避免重复弹讲解）
     - 教程中途退出（关游戏）不写 tutorial_done，下次启动从头开始
     """
 
@@ -164,6 +165,7 @@ class TutorialState:
         self.kill_count = 0
         self.pickup_count = 0
         self.minimap_taught = False
+        self.boss_taught = False
 
 
 class GameState:
@@ -230,8 +232,9 @@ def main():
     window.game_state.tutorial = TutorialState(active=not is_tutorial_done())
 
     # 延迟导入避免循环依赖（start_view 会导入其他视图）
-    from views.start_view import StartView
-    window.show_view(StartView(window))
+    # 启动时先显示开屏动画（品牌展示+光效过渡），完成后进入开始界面
+    from views.splash_view import SplashView
+    window.show_view(SplashView(window))
     arcade.run()
 
 
