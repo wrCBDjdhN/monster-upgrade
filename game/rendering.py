@@ -312,13 +312,15 @@ def render_game(view):
 
     # 金字塔 BOSS 建筑塔尖标记（装饰性，建筑本体由 walls 渲染）
     boss_spawn = view.map_data.get("boss_spawn")
-    if boss_spawn and theme == "desert" and view._in_view(boss_spawn[0], boss_spawn[1]):
+    if boss_spawn and view._in_view(boss_spawn[0], boss_spawn[1]):
         bx_, by_ = boss_spawn[0], boss_spawn[1]
         tri = [(bx_, by_ - 34), (bx_ - 14, by_ - 16), (bx_ + 14, by_ - 16)]
         if wb is not None:
             wb.poly(tri, (200, 160, 90))
         else:
             arcade.draw_polygon_filled(tri, (200, 160, 90))
+        # minimap 图例标签：Boss 房间标记
+        view._world_labels.append((bx_, by_ - 50, "Boss", (255, 215, 0), 12))
 
     # 怪物（本地权威 + 联机远端快照）
     for m in view.monsters:
@@ -548,11 +550,9 @@ def render_game(view):
                    10, WINDOW_HEIGHT - 60, arcade.color.WHITE, 12)
     view._hud_text("gold", f"金币: {total_gold} (携带:{carried_gold})",
                    10, WINDOW_HEIGHT - 80, arcade.color.YELLOW, 12)
-    wep_effect_txt = ""
-    if getattr(view, "_cached_weapon_effects", "无") != "无":
-        wep_effect_txt = f" | 效果:{view._cached_weapon_effects}"
+    # 已取消武器特殊效果显示（用户需求：左侧HUD简化，不再显示吸血/散射/光环等效果文本）
     view._hud_text("weapon",
-                   f"武器: {view._cached_weapon_name} | 伤害:{round(gs.weapon_damage)} | 距离:{round(gs.weapon_range)}{wep_effect_txt}",
+                   f"武器: {view._cached_weapon_name} | 伤害:{round(gs.weapon_damage)} | 距离:{round(gs.weapon_range)}",
                    10, WINDOW_HEIGHT - 100, arcade.color.ORANGE, 12)
     view._hud_text("hint",
                    "WASD移动 | 鼠标攻击 | 靠近按E拾取物品 | 1-3药水 | E开宝箱 | TAB背包 | M地图 | ESC设置",
@@ -890,6 +890,15 @@ def draw_minimap(view):
             arcade.draw_rect_filled(
                 arcade.XYWH(mm_x + sx, mm_y + sy, 4, 4),
                 evac_color)
+
+    # BOSS 建筑（金色小方块）：沙漠金字塔 BOSS 区域在小地图上标记为金色
+    boss_spawn = view.map_data.get("boss_spawn")
+    if boss_spawn:
+        sx, sy = _mm(boss_spawn[0], boss_spawn[1])
+        if 0 <= sx <= MINIMAP_SIZE and 0 <= sy <= MINIMAP_SIZE:
+            arcade.draw_rect_filled(
+                arcade.XYWH(mm_x + sx, mm_y + sy, 6, 6),
+                (255, 215, 0))
 
     # 玩家（白色实心方块，居中于小地图中心附近；小地图外不绘制）
     px, py = view.player.center_x, view.player.center_y

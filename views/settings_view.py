@@ -87,10 +87,11 @@ class SettingsView(arcade.View):
     COLS = 2                      # 按键列表分两列
     COL_GAP = 40
 
-    def __init__(self, window, game_view=None):
+    def __init__(self, window, game_view=None, from_game=True):
         super().__init__()
         self.window_ref = window
         self.game_view = game_view
+        self._from_game = from_game  # True=游戏内ESC设置 / False=主页面设置
         self._tc = TextCache()
         # 音量/静音（db 读取，应用到 SoundManager）
         from db.database import get_volume, get_sound_enabled
@@ -110,7 +111,7 @@ class SettingsView(arcade.View):
         self._close_rect = arcade.XYWH(0, 0, 140, 40)
         self._row_rects: dict[str, arcade.XYWH] = {}
         self._hover_row: str | None = None
-        self._hover_btn: str | None = None   # "mute"/"reset"/"close"
+        self._hover_btn: str | None = None   # "mute"/"reset"/"close"/"abandon"
 
     # ── 布局计算 ──
     def _layout(self):
@@ -136,9 +137,10 @@ class SettingsView(arcade.View):
             rx = x0 + col * (self.ROW_W + self.COL_GAP)
             ry = y_top - row * (self.ROW_H + self.ROW_GAP)
             self._row_rects[action] = arcade.XYWH(rx, ry, self.ROW_W, self.ROW_H)
-        # 底部按钮：恢复默认 / 返回
-        self._reset_rect = arcade.XYWH(cx - 170, 40, 150, 40)
-        self._close_rect = arcade.XYWH(cx + 20, 40, 140, 40)
+        # 底部按钮：恢复默认 / 返回 / 放弃行动（仅游戏中）
+        self._reset_rect = arcade.XYWH(cx - 240, 40, 150, 40)
+        self._close_rect = arcade.XYWH(cx - 70, 40, 140, 40)
+        self._abandon_rect = arcade.XYWH(cx + 110, 40, 150, 40)
 
     # ── 绘制 ──
     def on_show_view(self):
@@ -217,13 +219,25 @@ class SettingsView(arcade.View):
                           rect.right - 10, rect.center_y,
                           key_color, 12, anchor_x="right", anchor_y="center")
 
-        # 底部按钮：恢复默认 / 返回
+        # 底部按钮：恢复默认 / 返回 / 放弃行动
         arcade.draw_rect_filled(self._reset_rect, (70, 60, 90) if self._hover_btn != "reset" else (100, 85, 130))
         self._tc.text("set_reset", "恢复默认键位", self._reset_rect.center_x, self._reset_rect.center_y,
                       arcade.color.WHITE, 13, anchor_x="center", anchor_y="center")
         arcade.draw_rect_filled(self._close_rect, arcade.color.DARK_BLUE if self._hover_btn != "close" else (70, 100, 160))
         self._tc.text("set_close", "返回游戏", self._close_rect.center_x, self._close_rect.center_y,
                       arcade.color.WHITE, 14, anchor_x="center", anchor_y="center")
+        # 放弃行动按钮：仅在游戏内显示，视为撤离失败
+        # 主页面设置显示"退出游戏"，直接关闭窗口
+        if self.game_view is not None:
+            abandon_color = (140, 40, 40) if self._hover_btn != "abandon" else (180, 55, 55)
+            arcade.draw_rect_filled(self._abandon_rect, abandon_color)
+            self._tc.text("set_abandon", "放弃行动", self._abandon_rect.center_x, self._abandon_rect.center_y,
+                          arcade.color.WHITE, 14, anchor_x="center", anchor_y="center")
+        elif not self._from_game:
+            quit_color = (120, 40, 40) if self._hover_btn != "abandon" else (160, 55, 55)
+            arcade.draw_rect_filled(self._abandon_rect, quit_color)
+            self._tc.text("set_quit", "退出游戏", self._abandon_rect.center_x, self._abandon_rect.center_y,
+                          arcade.color.WHITE, 14, anchor_x="center", anchor_y="center")
 
         # 底部提示（ESC 关闭）
         self._tc.text("set_esc_hint", "ESC 关闭设置（重绑中按 ESC 取消）",
@@ -239,6 +253,8 @@ class SettingsView(arcade.View):
             self._hover_btn = "reset"
         elif self._close_rect.point_in_rect((x, y)):
             self._hover_btn = "close"
+        elif (self.game_view is not None or not self._from_game) and self._abandon_rect.point_in_rect((x, y)):
+            self._hover_btn = "abandon"
         else:
             for action, rect in self._row_rects.items():
                 if rect.point_in_rect((x, y)):
@@ -266,6 +282,14 @@ class SettingsView(arcade.View):
         # 返回游戏
         if self._close_rect.point_in_rect((x, y)):
             self._close()
+            return
+        # 放弃行动（游戏内）：视为撤离失败，清空装备后回主页面
+        if self.game_view is not None and self._abandon_rect.point_in_rect((x, y)):
+            self.game_view._fail_run("放弃行动")
+            return
+        # 退出游戏（主页面设置）：直接关闭窗口
+        if not self._from_game and self._abandon_rect.point_in_rect((x, y)):
+            self.window.close()
             return
         # 点击动作行：进入重绑状态（再点同一行取消）
         for action, rect in self._row_rects.items():

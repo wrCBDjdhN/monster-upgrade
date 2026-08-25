@@ -197,13 +197,14 @@ def _select_target(players, center_x, center_y):
 
 class Projectile(arcade.SpriteSolidColor):
     """远程弹丸"""
-    def __init__(self, center_x, center_y, target_x, target_y, speed, damage, color=(255, 100, 50), debuff_id=None, size=PROJECTILE_SIZE, special=None):
+    def __init__(self, center_x, center_y, target_x, target_y, speed, damage, color=(255, 100, 50), debuff_id=None, size=PROJECTILE_SIZE, special=None, debuffs=None):
         super().__init__(size, size, color=color)
         self.center_x = center_x
         self.center_y = center_y
         self.damage = damage
         self._lifetime = PROJECTILE_LIFETIME
         self.debuff_id = debuff_id  # 命中时附加的 debuff（木乃伊远程毒弹/骷髅BOSS冰冻弹）
+        self.debuffs = debuffs or []  # 武器附加效果列表 [(效果ID, 效果等级), ...]（怪物装备武器带来的额外效果）
         self.special = special  # 弹丸特殊属性（火箭兵弹丸 special="explosive" 爆炸）
         dx = target_x - center_x
         dy = target_y - center_y
@@ -266,6 +267,8 @@ class _MeleeMonsterBase(arcade.SpriteSolidColor):
         # BOSS 标记（用于刷新排除与 Lv5+ 装备门槛）
         self.is_boss = is_boss
         self.required_weapon_level = required_weapon_level
+        # 装备被动效果：回血速度（由 assign_monster_* 按装备效果累加）
+        self.regen_per_sec = 0.0
         # 行为参数
         self._size = size
         # 索敌距离 = max(保底, 配置值 × 倍率)：保底覆盖玩家可视范围（屏幕半对角），
@@ -292,6 +295,9 @@ class _MeleeMonsterBase(arcade.SpriteSolidColor):
             self._hit_flash = max(0, self._hit_flash - delta_time)
         # 附加效果结算（中毒/燃烧掉血、冰冻/减速、眩晕）
         self._update_debuffs(delta_time)
+        # 装备被动回血（自然恢复等效果）
+        if self.regen_per_sec > 0 and self.hp < self.max_hp:
+            self.hp = min(self.max_hp, self.hp + self.regen_per_sec * delta_time)
         if self._stunned:
             # 眩晕：无法移动和攻击
             self._attack_timer = max(0, self._attack_timer - delta_time)
@@ -352,23 +358,54 @@ class _MeleeMonsterBase(arcade.SpriteSolidColor):
         dist = math.hypot(player.center_x - self.center_x, player.center_y - self.center_y)
         if dist < self._size + 20 and self._attack_timer <= 0:
             self._attack_timer = self._attack_delay
+            # 汇总本次攻击的全部附带效果：怪物自带 debuff + 武器携带效果
+            combined_debuffs = []
+            if self.debuff_id:
+                combined_debuffs.append((self.debuff_id, 1))
+            # 武器效果（assign_monster_weapon 已复制 effects/debuff 到 weapon 字典）
+            wdebuff = (self.weapon or {}).get("debuff")
+            if wdebuff:
+                combined_debuffs.append((wdebuff, 1))
+            for eid, lvl in (self.weapon or {}).get("effects", []):
+                if eid not in ("max_hp", "regen", "speed", "defense", "damage", "lifesteal", "thorns", "crit_chance"):  # 跳过被动效果，只传 debuff
+                    combined_debuffs.append((eid, lvl))
             # 记录本次攻击附带效果：受击钩子（联机 PLAYER_HURT 广播）据此把 debuff+等级
             # 一并下发客户端（修复客户端玩家被怪物攻击时特殊效果未生效）
-            player._pending_debuff = self.debuff_id
-            player._pending_debuff_level = 1
+            # 联机同步：优先使用第一个 debuff，其余效果在客户端 apply_debuff 逐个施加
+            first_debuff = combined_debuffs[0][0] if combined_debuffs else None
+            player._pending_debuff = first_debuff
+            player._pending_debuff_level = combined_debuffs[0][1] if combined_debuffs else 1
+            player._pending_debuff_effects = combined_debuffs  # 全部效果列表（联机广播用）
             player.take_damage(self.damage)
-            # 附加效果（如木乃伊攻击附加中毒）
-            if self.debuff_id and hasattr(player, "apply_debuff"):
-                player.apply_debuff(self.debuff_id)
+            # 逐个施加全部效果（含怪物自带 + 武器 debuff）
+            for eid, lvl in combined_debuffs:
+                if hasattr(player, "apply_debuff"):
+                    player.apply_debuff(eid, lvl)
             return True
         return False
 
-    def take_damage(self, amount: int):
-        """受到伤害，先扣头盔和护甲"""
+    def take_damage(self, amount: int, vulnerable: float = 0.0):
+        """受到伤害，先扣头盔和护甲，再考虑易伤增幅
+
+        vulnerable：外部传入的易伤比例（来自 debuff），叠加后增加受到的伤害
+        """
         helmet_def = self.helmet.get("defense", 0) if self.helmet else 0
         armor_def = self.armor.get("defense", 0) if self.armor else 0
         total_def = helmet_def + armor_def
-        actual = max(1, amount - total_def)  # 至少1点伤害
+        # 破甲 debuff 减少防御
+        for d in self.debuffs:
+            if d["id"] == "armor_break":
+                from entities.effects_defs import effect_params
+                total_def -= effect_params("armor_break", d.get("level", 1)).get("armor_break", 0)
+        total_def = max(0, total_def)  # 防御不低于0
+        actual = max(1, amount - total_def)
+        # 易伤增幅（debuff 传入 + debuffs 列表累加）
+        vuln_mult = 1.0 + vulnerable
+        for d in self.debuffs:
+            if d["id"] == "vulnerable":
+                from entities.effects_defs import effect_params
+                vuln_mult += effect_params("vulnerable", d.get("level", 1)).get("vulnerable", 0)
+        actual = max(1, round(actual * vuln_mult))
         self.hp -= actual
         self._hit_flash = 0.15
         if self.hp <= 0 and self._on_death_cb:
@@ -380,9 +417,22 @@ class _MeleeMonsterBase(arcade.SpriteSolidColor):
         effect = effect_params(effect_id, level)
         if not effect or effect.get("type") != "debuff":
             return
+        # 流血可叠加（最多3层），同类刷新时长
+        if effect.get("stacks"):
+            stack_count = sum(1 for d in self.debuffs if d["id"] == effect_id)
+            if stack_count < 3:
+                self.debuffs.append({"id": effect_id, "level": level, "duration": effect.get("duration", 3.0)})
+            else:
+                # 已达上限：刷新最早一层的时长
+                for d in self.debuffs:
+                    if d["id"] == effect_id:
+                        d["duration"] = effect.get("duration", 3.0)
+                        d["level"] = max(d.get("level", 1), level)
+                        break
+            self._recalc_debuffs()
+            return
         for d in self.debuffs:
             if d["id"] == effect_id:
-                # 同类效果刷新时长，并同步效果等级（取较高者）
                 d["duration"] = effect.get("duration", 1.0)
                 d["level"] = max(d.get("level", 1), level)
                 return
@@ -391,7 +441,7 @@ class _MeleeMonsterBase(arcade.SpriteSolidColor):
 
     def _recalc_debuffs(self):
         """重算减速倍率与眩晕状态"""
-        from entities.effects_defs import EFFECTS, effect_params
+        from entities.effects_defs import effect_params
         self._debuff_speed_mult = 1.0
         self._stunned = False
         for d in self.debuffs:
@@ -403,18 +453,22 @@ class _MeleeMonsterBase(arcade.SpriteSolidColor):
                 self._stunned = True
 
     def _update_debuffs(self, delta_time: float):
-        """每 0.5 秒结算一次持续伤害，递减剩余时长"""
+        """每 0.5 秒结算一次持续伤害（含流血叠加），递减剩余时长"""
         if not self.debuffs:
             return
         self._debuff_tick -= delta_time
         if self._debuff_tick <= 0:
             self._debuff_tick = 0.5
-            from entities.effects_defs import EFFECTS, effect_params
+            from entities.effects_defs import effect_params
+            # 按效果 id 汇总层数后统一结算（流血多层合并伤害）
+            dot_damage = {}  # {effect_id: total_dmg_per_tick}
             for d in list(self.debuffs):
                 effect = effect_params(d["id"], d.get("level", 1))
                 dmg = effect.get("value", 0)
-                if dmg > 0:
-                    self.take_damage(dmg)
+                if dmg > 0 and effect.get("type") == "debuff":
+                    dot_damage[d["id"]] = dot_damage.get(d["id"], 0) + dmg
+            for eid, total_dmg in dot_damage.items():
+                self.take_damage(total_dmg)
         for d in list(self.debuffs):
             d["duration"] -= delta_time
             if d["duration"] <= 0:
@@ -470,6 +524,8 @@ class _RangedMonsterBase(arcade.SpriteSolidColor):
         # BOSS 标记
         self.is_boss = is_boss
         self.required_weapon_level = required_weapon_level
+        # 装备被动效果：回血速度（由 assign_monster_* 按装备效果累加）
+        self.regen_per_sec = 0.0
         # 行为参数
         self._size = size
         # 索敌距离 = max(保底, 配置值 × 倍率)：保底覆盖玩家可视范围（屏幕半对角），
@@ -496,6 +552,9 @@ class _RangedMonsterBase(arcade.SpriteSolidColor):
             self._hit_flash = max(0, self._hit_flash - delta_time)
         # 附加效果结算
         self._update_debuffs(delta_time)
+        # 装备被动回血（自然恢复等效果）
+        if self.regen_per_sec > 0 and self.hp < self.max_hp:
+            self.hp = min(self.max_hp, self.hp + self.regen_per_sec * delta_time)
         if self._stunned:
             self._attack_timer = max(0, self._attack_timer - delta_time)
             return
@@ -564,20 +623,42 @@ class _RangedMonsterBase(arcade.SpriteSolidColor):
                 self.center_x, self.center_y, player.center_x, player.center_y, self._walls,
                 self._size, PLAYER_SIZE):
             self._attack_timer = self._attack_delay
+            # 汇总弹丸附带效果：怪物自带 debuff + 武器携带效果
+            combined_debuffs = []
+            if self.debuff_id:
+                combined_debuffs.append((self.debuff_id, 1))
+            wdebuff = (self.weapon or {}).get("debuff")
+            if wdebuff:
+                combined_debuffs.append((wdebuff, 1))
+            for eid, lvl in (self.weapon or {}).get("effects", []):
+                if eid not in ("max_hp", "regen", "speed"):
+                    combined_debuffs.append((eid, lvl))
             return Projectile(
                 self.center_x, self.center_y,
                 player.center_x, player.center_y,
                 self._proj_speed, self.damage,
                 color=self._proj_color, debuff_id=self.debuff_id, size=self._proj_size,
+                debuffs=combined_debuffs,
             )
         return None
 
-    def take_damage(self, amount: int):
-        """受到伤害，先扣头盔和护甲"""
+    def take_damage(self, amount: int, vulnerable: float = 0.0):
+        """受到伤害，先扣头盔和护甲，再考虑易伤增幅"""
         helmet_def = self.helmet.get("defense", 0) if self.helmet else 0
         armor_def = self.armor.get("defense", 0) if self.armor else 0
         total_def = helmet_def + armor_def
-        actual = max(1, amount - total_def)  # 至少1点伤害
+        for d in self.debuffs:
+            if d["id"] == "armor_break":
+                from entities.effects_defs import effect_params
+                total_def -= effect_params("armor_break", d.get("level", 1)).get("armor_break", 0)
+        total_def = max(0, total_def)
+        actual = max(1, amount - total_def)
+        vuln_mult = 1.0 + vulnerable
+        for d in self.debuffs:
+            if d["id"] == "vulnerable":
+                from entities.effects_defs import effect_params
+                vuln_mult += effect_params("vulnerable", d.get("level", 1)).get("vulnerable", 0)
+        actual = max(1, round(actual * vuln_mult))
         self.hp -= actual
         self._hit_flash = 0.15
         if self.hp <= 0 and self._on_death_cb:
@@ -589,16 +670,29 @@ class _RangedMonsterBase(arcade.SpriteSolidColor):
         effect = effect_params(effect_id, level)
         if not effect or effect.get("type") != "debuff":
             return
+        if effect.get("stacks"):
+            stack_count = sum(1 for d in self.debuffs if d["id"] == effect_id)
+            if stack_count < 3:
+                self.debuffs.append({"id": effect_id, "level": level, "duration": effect.get("duration", 3.0)})
+            else:
+                for d in self.debuffs:
+                    if d["id"] == effect_id:
+                        d["duration"] = effect.get("duration", 3.0)
+                        d["level"] = max(d.get("level", 1), level)
+                        break
+            self._recalc_debuffs()
+            return
         for d in self.debuffs:
             if d["id"] == effect_id:
                 d["duration"] = effect.get("duration", 1.0)
+                d["level"] = max(d.get("level", 1), level)
                 return
-        self.debuffs.append({"id": effect_id, "duration": effect.get("duration", 1.0)})
+        self.debuffs.append({"id": effect_id, "level": level, "duration": effect.get("duration", 1.0)})
         self._recalc_debuffs()
 
     def _recalc_debuffs(self):
         """重算减速倍率与眩晕状态"""
-        from entities.effects_defs import EFFECTS, effect_params
+        from entities.effects_defs import effect_params
         self._debuff_speed_mult = 1.0
         self._stunned = False
         for d in self.debuffs:
@@ -610,18 +704,21 @@ class _RangedMonsterBase(arcade.SpriteSolidColor):
                 self._stunned = True
 
     def _update_debuffs(self, delta_time: float):
-        """每 0.5 秒结算一次持续伤害，递减剩余时长"""
+        """每 0.5 秒结算一次持续伤害（含流血叠加），递减剩余时长"""
         if not self.debuffs:
             return
         self._debuff_tick -= delta_time
         if self._debuff_tick <= 0:
             self._debuff_tick = 0.5
-            from entities.effects_defs import EFFECTS, effect_params
+            from entities.effects_defs import effect_params
+            dot_damage = {}
             for d in list(self.debuffs):
                 effect = effect_params(d["id"], d.get("level", 1))
                 dmg = effect.get("value", 0)
-                if dmg > 0:
-                    self.take_damage(dmg)
+                if dmg > 0 and effect.get("type") == "debuff":
+                    dot_damage[d["id"]] = dot_damage.get(d["id"], 0) + dmg
+            for eid, total_dmg in dot_damage.items():
+                self.take_damage(total_dmg)
         for d in list(self.debuffs):
             d["duration"] -= delta_time
             if d["duration"] <= 0:
@@ -739,12 +836,23 @@ class RocketTroop(_RangedMonsterBase):
                 self.center_x, self.center_y, player.center_x, player.center_y, self._walls,
                 self._size, PLAYER_SIZE):
             self._attack_timer = self._attack_delay
+            # 汇总弹丸附带效果：怪物自带 debuff + 武器携带效果
+            combined_debuffs = []
+            if self.debuff_id:
+                combined_debuffs.append((self.debuff_id, 1))
+            wdebuff = (self.weapon or {}).get("debuff")
+            if wdebuff:
+                combined_debuffs.append((wdebuff, 1))
+            for eid, lvl in (self.weapon or {}).get("effects", []):
+                if eid not in ("max_hp", "regen", "speed"):
+                    combined_debuffs.append((eid, lvl))
             return Projectile(
                 self.center_x, self.center_y,
                 player.center_x, player.center_y,
                 self._proj_speed, self.damage,
                 color=self._proj_color, debuff_id=self.debuff_id, size=self._proj_size,
                 special="explosive",  # 火箭弹丸爆炸属性
+                debuffs=combined_debuffs,
             )
         return None
 

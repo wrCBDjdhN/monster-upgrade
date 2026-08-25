@@ -37,70 +37,62 @@ class BackpackView(ScrollView):
         self._build_content()
 
     def _build_content(self):
-        """构建内容并计算高度"""
-        self._tc.clear()  # 内容结构变化，清空文本缓存防止旧 key 残留
+        """构建内容并计算高度（与 on_draw 各区域 y 偏移严格一致）"""
+        self._tc.clear()
         self.discard_buttons = []
         gs = self.window_ref.game_state
         carried = getattr(gs, 'run_carried', {})
 
-        # 计算内容高度
         y_start = WINDOW_HEIGHT - 120
         y = y_start
 
-        # 装备栏区域（固定：标题 + 4个槽位 + 间距）
-        y -= 32  # 标题行
-        y -= 32 * 4  # 4个槽位
-        y -= 20  # 间距
+        # 装备栏（标题 + 4 槽 + 间距）
+        y -= 32          # 标题
+        y -= 32 * 4      # 4 个槽位
+        y -= 20          # 间距
 
-        # 金币区域
-        y -= 30
+        # 金币
+        y -= 40
 
-        # 资源区域
+        # 资源（标题 + 列表 + 间距）
         resources = carried.get("resource", {})
-        if resources:
-            y -= 30 * len(resources)
-        else:
-            y -= 30
+        y -= 30  # 标题
+        y -= 30 * max(len(resources), 1)
         y -= 20  # 间距
 
-        # 武器区域
+        # 武器（标题 + 列表 + 间距）
         weapons = carried.get("weapon", {})
-        if weapons:
-            y -= 32 * len(weapons)
-        else:
-            y -= 30
-        y -= 20
+        y -= 32  # 标题
+        y -= 32 * max(len(weapons), 1)
+        y -= 20  # 间距
 
-        # 头盔区域
+        # 头盔（标题 + 列表 + 间距）
         helmets = carried.get("helmet", {})
-        if helmets:
-            y -= 32 * len(helmets)
-        else:
-            y -= 30
-        y -= 20
+        y -= 32  # 标题
+        y -= 32 * max(len(helmets), 1)
+        y -= 20  # 间距
 
-        # 护甲区域
+        # 护甲（标题 + 列表 + 间距）
         armors = carried.get("armor", {})
-        if armors:
-            y -= 32 * len(armors)
-        else:
-            y -= 30
-        y -= 20
+        y -= 32  # 标题
+        y -= 32 * max(len(armors), 1)
+        y -= 20  # 间距
 
-        # 背包区域
+        # 背包（标题 + 列表，无间距）
         backpacks = carried.get("backpack", {})
-        if backpacks:
-            y -= 32 * len(backpacks)
-        else:
-            y -= 30
+        y -= 32  # 标题
+        y -= 32 * max(len(backpacks), 1)
 
-        # 本局药水槽区域（run_potions：不占背包容量，热键 1-N 优先使用）
+        # 药水（标题 + 合并列表）
         run_potions = getattr(gs, 'run_potions', {})
-        if run_potions:
-            y -= 32  # 标题行
-            y -= 30 * len(run_potions)
+        from db.database import get_potions
+        db_potions = get_potions(gs.player_id) if gs.player_id else []
+        all_potions_count = len(run_potions) + len(db_potions)
+        y -= 32  # 标题
+        if all_potions_count > 0:
+            y -= 46 * all_potions_count  # 每条：名称行 + 效果描述行
         else:
-            y -= 30
+            y -= 30  # "(空)" 占位
 
         self.content_height = max(y_start - y + 120, WINDOW_HEIGHT)
 
@@ -302,6 +294,29 @@ class BackpackView(ScrollView):
             self._build_content()
             return
 
+        # 仓库药水（db_potion）丢弃：从数据库删除 1 瓶，生成地面掉落物
+        if item_type == "db_potion":
+            from db.database import remove_potion
+            pid = gs.player_id
+            if not pid:
+                return
+            # level 参数复用为 potion DB row id
+            potion_db_id = level
+            remove_potion(pid, potion_db_id)
+            if self.game_view and hasattr(self.game_view, 'player') and self.game_view.player:
+                import random as _rand
+                from game.loot import DropItem
+                player = self.game_view.player
+                angle = _rand.uniform(0, 6.2832)
+                dist = _rand.uniform(50, 90)
+                drop_x = player.center_x + dist * math.cos(angle)
+                drop_y = player.center_y + dist * math.sin(angle)
+                drop = DropItem(drop_x, drop_y, "potion", item_id, 1)
+                self._place_drop_near_player(drop)
+                self.game_view.drops.append(drop)
+            self._build_content()
+            return
+
         # 如果丢弃背包，同时丢弃所有物品
         if item_type == "backpack":
             self._discard_all_items()
@@ -396,6 +411,15 @@ class BackpackView(ScrollView):
             for _ in range(qty):
                 items_to_drop.append(("potion", item_id, 1))
 
+        # 仓库药水（db_potions：丢弃背包时一并删除数据库记录并生成掉落物）
+        pid = gs.player_id
+        if pid:
+            from db.database import get_potions, remove_potion
+            db_potions = get_potions(pid)
+            for p in db_potions:
+                items_to_drop.append(("potion", p["item_id"], 1))
+                remove_potion(pid, p["id"])
+
         # 在玩家周围生成地面掉落物（避让墙壁等障碍物，修复丢弃卡墙无法拾取）
         for item_type, item_id, level in items_to_drop:
             angle = _rand.uniform(0, 6.2832)  # 2π
@@ -422,6 +446,7 @@ class BackpackView(ScrollView):
         gs = self.window_ref.game_state
         carried = getattr(gs, 'run_carried', {})
         offset = self.scroll_offset
+        from db.database import get_potions  # 药水合并显示需要
 
         # 固定头部
         self._tc.text("header_title", "背 包", WINDOW_WIDTH // 2, WINDOW_HEIGHT - 50,
@@ -602,23 +627,43 @@ class BackpackView(ScrollView):
             self._tc.text("pack_empty", "(空)", 60, y, arcade.color.GRAY, 12)
             y -= 32
 
-        # ── 本局药水槽（run_potions：不占背包容量，无需背包即可拾取/使用，热键1-N优先）──
-        self._tc.text("runpot_title", "本局药水 (不占容量):", 50, y, arcade.color.WHITE, 16)
+        # ── 药水区域（合并显示本局药水 + 仓库药水）──
+        self._tc.text("pot_title", "药水:", 50, y, arcade.color.WHITE, 16)
         y -= 32
         run_potions = getattr(gs, 'run_potions', {})
-        if run_potions:
+        db_potions = get_potions(gs.player_id) if gs.player_id else []
+        if run_potions or db_potions:
             from entities.equipment_defs import POTIONS
+            # 先显示本局药水（cyan 标识，不占容量，热键优先）
             for i, (item_id, qty) in enumerate(run_potions.items()):
                 pdef = POTIONS.get(item_id, {})
                 name = pdef.get("name", item_id)
-                self._tc.text(f"runpot_{i}", f"{name} x{qty}", 60, y,
+                desc = pdef.get("description", "")
+                self._tc.text(f"runpot_{i}", f"  [本局] {name} x{qty}", 60, y,
                               arcade.color.CYAN, 14)
+                if desc:
+                    self._tc.text(f"runpot_desc_{i}", f"      {desc}", 70, y - 16,
+                                  arcade.color.GRAY, 11)
                 btn = arcade.XYWH(WINDOW_WIDTH - 80, y + 8, 80, 24)
-                # 丢弃本局药水：item_type="run_potion"（_discard_item 特殊处理）
                 self.discard_buttons.append((btn, "carry", "run_potion", item_id, 1))
-                y -= 30
+                y -= 46
+            # 再显示仓库药水（light_green 标识，从 DB 读取）
+            for i, p in enumerate(db_potions):
+                item_id = p["item_id"]
+                name = p["name"]
+                qty = p["quantity"]
+                pdef = POTIONS.get(item_id, {})
+                desc = pdef.get("description", "")
+                self._tc.text(f"dbpot_{i}", f"  [仓库] {name} x{qty}", 60, y,
+                              arcade.color.LIGHT_GREEN, 14)
+                if desc:
+                    self._tc.text(f"dbpot_desc_{i}", f"      {desc}", 70, y - 16,
+                                  arcade.color.GRAY, 11)
+                btn = arcade.XYWH(WINDOW_WIDTH - 80, y + 8, 80, 24)
+                self.discard_buttons.append((btn, "carry", "db_potion", item_id, p["id"]))
+                y -= 46
         else:
-            self._tc.text("runpot_empty", "(空)", 60, y, arcade.color.GRAY, 12)
+            self._tc.text("pot_empty", "(空，击杀怪物或市场购买获取)", 60, y, arcade.color.GRAY, 12)
             y -= 30
 
         # 绘制丢弃按钮（rect 坐标已含 scroll_offset，直接使用即可）

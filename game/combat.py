@@ -17,6 +17,7 @@
 """
 
 import math
+import random
 import arcade
 from config import (
     ATTACK_COOLDOWN, MELEE_RANGE, MELEE_ARC_DEGREES,
@@ -81,11 +82,12 @@ class CombatSystem:
         """
         return self._cooldowns.get(attacker_id, 0.0) <= 0
 
-    def melee_attack(self, player, monsters: arcade.SpriteList, weapon_damage: float, weapon_range: float, mouse_x: float = 0, mouse_y: float = 0, weapon_speed: float = 1.0, attacker_id: int = 0, lifesteal: float = 0.0) -> list:
+    def melee_attack(self, player, monsters: arcade.SpriteList, weapon_damage: float, weapon_range: float, mouse_x: float = 0, mouse_y: float = 0, weapon_speed: float = 1.0, attacker_id: int = 0, lifesteal: float = 0.0, debuffs: list = None) -> list:
         """近战攻击：扇形命中检测，返回被击中的怪物列表
 
         attacker_id：攻击者标识（联机时各玩家独立冷却），默认 0 = 单人模式
         lifesteal：吸血比例（0~1），命中造成实际伤害的该比例转化为攻击者生命回复
+        debuffs：武器附加效果列表（元素为 (效果ID, 效果等级) 元组），命中时施加给怪物
         """
         if not self.can_attack(attacker_id):
             return []
@@ -96,6 +98,17 @@ class CombatSystem:
         # 角色被动攻击修正（法师+20%/骑士低血+30%/刺客暴击，见 character_skills.py）
         from game.character_skills import modify_attack_damage  # 延迟导入避免循环依赖
         weapon_damage = modify_attack_damage(player, weapon_damage)
+
+        # 暴击判定：从玩家装备 passive 效果 crit_chance 获取暴击率
+        from entities.effects_defs import effect_params
+        crit_chance = getattr(player, "crit_chance", 0.0)
+        is_crit = random.random() < crit_chance
+        if is_crit:
+            weapon_damage *= 1.5  # 暴击伤害 ×1.5
+
+        # 装备吸血：从玩家装备 passive 效果 lifesteal 获取吸血比例
+        equip_lifesteal = getattr(player, "equip_lifesteal", 0.0)
+        total_lifesteal = max(lifesteal, equip_lifesteal)
 
         # 获取鼠标方向角度
         dx = mouse_x - player.center_x
@@ -118,9 +131,35 @@ class CombatSystem:
                 m.last_attacker_id = attacker_id
                 actual = m.take_damage(round(weapon_damage))
                 hit.append((m, actual))
+                # 近战命中施加武器效果（debuff 列表，如中毒/燃烧/冰冻/减速/眩晕）
+                for eid, lvl in (debuffs or []):
+                    if hasattr(m, "apply_debuff"):
+                        m.apply_debuff(eid, lvl)
+                # 虹吸效果：从 debuff 列表中提取 leech 按实际伤害回复生命
+                for eid, lvl in (debuffs or []):
+                    if eid == "leech":
+                        leech_params = effect_params("leech", lvl)
+                        leech_pct = leech_params.get("value", 0.08)
+                        leech_heal = round(actual * leech_pct)
+                        if leech_heal > 0 and hasattr(player, "heal"):
+                            player.heal(leech_heal)
+                # 荆棘反伤：怪物穿戴荆棘装备时，被近战攻击反弹伤害给攻击者
+                thorns_pct = 0.0
+                for eq_slot in ("helmet", "armor"):
+                    eq = getattr(m, eq_slot, None)
+                    if eq:
+                        for e in eq.get("effects", []):
+                            from entities.effects_defs import parse_effect_item
+                            peid, plvl = parse_effect_item(e)
+                            if peid == "thorns":
+                                thorns_pct += effect_params("thorns", plvl).get("value", 0.10)
+                if thorns_pct > 0:
+                    thorns_dmg = max(1, round(actual * thorns_pct))
+                    if hasattr(player, "take_damage"):
+                        player.take_damage(thorns_dmg)
         # 吸血：按全部命中造成的实际伤害合计回血（如吸血剑 lifesteal=0.15）
-        if lifesteal > 0 and hit:
-            heal_amount = round(sum(actual for _, actual in hit) * lifesteal)
+        if total_lifesteal > 0 and hit:
+            heal_amount = round(sum(actual for _, actual in hit) * total_lifesteal)
             if heal_amount > 0 and hasattr(player, "heal"):
                 player.heal(heal_amount)
         return hit
@@ -228,12 +267,24 @@ class CombatSystem:
                 if proj.special != "penetrating" and proj in self.projectiles:
                     proj.remove_from_sprite_lists()
             # 吸血：本弹丸命中造成实际伤害后，按比例回复攻击者生命（如吸血剑）
-            if getattr(proj, "lifesteal", 0) > 0 and proj_hits:
+            # 同时检查虹吸 debuff（武器效果）和装备吸血 passive
+            proj_lifesteal = getattr(proj, "lifesteal", 0)
+            # 虹吸 debuff：从弹丸 debuffs 中提取 leech 比例
+            for eid, lvl in getattr(proj, "debuffs", []):
+                if eid == "leech":
+                    from entities.effects_defs import effect_params
+                    proj_lifesteal = max(proj_lifesteal, effect_params("leech", lvl).get("value", 0.08))
+            # 装备吸血 passive：从发射者玩家属性中获取
+            owner = getattr(proj, "owner_player", None)
+            if owner:
+                equip_ls = getattr(owner, "equip_lifesteal", 0)
+                proj_lifesteal = max(proj_lifesteal, equip_ls)
+            if proj_lifesteal > 0 and proj_hits:
                 heal_amount = round(
-                    sum(actual for _, actual in proj_hits) * proj.lifesteal
+                    sum(actual for _, actual in proj_hits) * proj_lifesteal
                 )
-                if heal_amount > 0 and getattr(proj, "owner_player", None) is not None:
-                    proj.owner_player.heal(heal_amount)
+                if heal_amount > 0 and owner is not None and hasattr(owner, "heal"):
+                    owner.heal(heal_amount)
         return hit_monsters
 
     def check_projectile_aoe(self, player, aoe_radius: float = ROCKET_TROOP_AOE_RADIUS) -> list:

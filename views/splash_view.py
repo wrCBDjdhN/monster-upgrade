@@ -73,6 +73,22 @@ class SplashView(arcade.View):
         self._glow_rings = []      # 光环列表
         self._rays = []            # 射线列表
 
+        # 持久 Text 对象（避免 arcade.draw_text 每帧重建纹理）
+        cx = WINDOW_WIDTH // 2
+        cy = WINDOW_HEIGHT // 2
+        self._text_title_shadow = arcade.Text(
+            "打怪升级", cx + 3, cy + 63,
+            (*arcade.color.BLACK[:3], 0), 48, anchor_x="center", bold=True)
+        self._text_title = arcade.Text(
+            "打怪升级", cx, cy + 60,
+            (*arcade.color.GOLD[:3], 0), 48, anchor_x="center", bold=True)
+        self._text_subtitle = arcade.Text(
+            "2D Action RPG", cx, cy + 10,
+            (*arcade.color.LIGHT_GRAY[:3], 0), 18, anchor_x="center")
+        self._text_skip = arcade.Text(
+            "按任意键跳过", WINDOW_WIDTH - 20, 20,
+            (*arcade.color.GRAY[:3], 0), 12, anchor_x="right")
+
     def _init_particles(self):
         """初始化粒子系统"""
         self._particles = []
@@ -289,31 +305,16 @@ class SplashView(arcade.View):
         # 绘制标题 "打怪升级"
         if self._logo_alpha > 0:
             # 标题阴影
-            arcade.draw_text(
-                "打怪升级",
-                WINDOW_WIDTH // 2 + 3,
-                WINDOW_HEIGHT // 2 + 63,
-                (*arcade.color.BLACK[:3], int(self._logo_alpha * 0.5)),
-                48, anchor_x="center", bold=True
-            )
+            self._text_title_shadow.color = (*arcade.color.BLACK[:3], int(self._logo_alpha * 0.5))
+            self._text_title_shadow.draw()
             # 主标题
-            arcade.draw_text(
-                "打怪升级",
-                WINDOW_WIDTH // 2,
-                WINDOW_HEIGHT // 2 + 60,
-                (*arcade.color.GOLD[:3], self._logo_alpha),
-                48, anchor_x="center", bold=True
-            )
+            self._text_title.color = (*arcade.color.GOLD[:3], self._logo_alpha)
+            self._text_title.draw()
 
         # 绘制副标题 "2D Action RPG"
         if self._subtitle_alpha > 0:
-            arcade.draw_text(
-                "2D Action RPG",
-                WINDOW_WIDTH // 2,
-                WINDOW_HEIGHT // 2 + 10,
-                (*arcade.color.LIGHT_GRAY[:3], self._subtitle_alpha),
-                18, anchor_x="center"
-            )
+            self._text_subtitle.color = (*arcade.color.LIGHT_GRAY[:3], self._subtitle_alpha)
+            self._text_subtitle.draw()
 
         # 绘制光效覆盖层（多层渐变）
         if self._glow_alpha > 0:
@@ -339,13 +340,8 @@ class SplashView(arcade.View):
 
         # 绘制跳过提示（右下角）
         if self._skip_hint_alpha > 0:
-            arcade.draw_text(
-                "按任意键跳过",
-                WINDOW_WIDTH - 20,
-                20,
-                (*arcade.color.GRAY[:3], self._skip_hint_alpha),
-                12, anchor_x="right"
-            )
+            self._text_skip.color = (*arcade.color.GRAY[:3], self._skip_hint_alpha)
+            self._text_skip.draw()
 
     def _draw_decorations(self):
         """绘制装饰元素（简化版图标轮廓）"""

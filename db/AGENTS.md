@@ -1,6 +1,6 @@
 # db/ - SQLite 数据层
 
-**Updated:** 2026-08-17 | **Files:** 9 | **Lines:** ~850
+**Updated:** 2026-08-25 | **Files:** 11 | **Lines:** ~825
 
 ## OVERVIEW
 sqlite3 stdlib 数据访问层。**业务方只 `from db.database import ...`**（全量 re-export 兼容层），子模块间只经 `db.connection._conn` 交互。`db/game.db` 为数据文件（pyright 已排除）。
@@ -17,6 +17,7 @@ sqlite3 stdlib 数据访问层。**业务方只 `from db.database import ...`**�
 | 药水 | potions.py（叠加数量 + 使用） |
 | 角色（创建/读取/更新角色） | characters.py（解锁/查询已解锁角色） |
 | 等级（升级曲线、经验获取） | levels.py（经验累积/自动升级/选择永久加成） |
+| 设置键值表（v1.2.0 新增） | settings.py（get/set_setting 通用 KV + get/set_volume + get/set_sound_enabled + get/set/reset_key_bindings + is_tutorial_done/mark_tutorial_done） |
 
 ## CONVENTIONS
 - 统一 `with _conn() as c:` —— sqlite3 Connection 的 with 只做 **commit/rollback，不关闭连接**（靠 GC）；取插入 ID 用 `c.execute("SELECT last_insert_rowid()").fetchone()[0]`
@@ -26,7 +27,7 @@ sqlite3 stdlib 数据访问层。**业务方只 `from db.database import ...`**�
 - `effects` 列 = `"id:level"` 逗号分隔字符串（纯 id 视为 Lv1），与 `entities/effects_defs.py` 的 serialize/parse 配套
 - 定价口径从 config 取：`UPGRADE_BASE_COST` / `upgrade_mult_for_level` / `SELL_COST_RECOVERY_RATIO` 等
 
-## 表结构速查（7 张表，init_db() 创建）
+## 表结构速查（8 张表，init_db() 创建）
 ```
 players            id PK, name UNIQUE, gold=50, created_at
 warehouse_items    id PK, player_id FK, item_type CHECK('resource','weapon'), item_id, quantity
@@ -35,6 +36,7 @@ equipment          id PK, player_id FK, slot CHECK('helmet','armor','backpack'),
 potions            id PK, player_id FK, item_id, name, effect, value, duration, quantity
 character_unlocks  id PK, player_id FK, character_id, unlocked_at, UNIQUE(player_id, character_id)
 character_levels   id PK, player_id FK, character_id, level=1, exp=0, pending_choices=0, bonus_hp/damage/defense/speed/atk_speed, UNIQUE(player_id, character_id)
+settings           key TEXT PK, value TEXT（音量/静音/键位 JSON/tutorial_done 标记；重启保留）
 ```
 
 ## ANTI-PATTERNS

@@ -463,8 +463,14 @@ class MarketView(ScrollView):
                               arcade.color.WHITE, 10, anchor_x="center", anchor_y="center")
 
             elif item_type == "buy_potion":
-                self._tc.text(f"buy_potion_{i}", f"{data['name']}  {data['desc']}", 60, screen_y,
-                              arcade.color.GREEN, 12)
+                # 第一行：药水名
+                self._tc.text(f"buy_potion_{i}", f"{data['name']}", 60, screen_y,
+                              arcade.color.GREEN, 13)
+                # 第二行：效果介绍（从 POTIONS 定义取 description）
+                effect_desc = data.get("desc", "")
+                if effect_desc:
+                    self._tc.text(f"buy_potion_desc_{i}", f"    {effect_desc}", 70, screen_y - 16,
+                                  arcade.color.LIGHT_GRAY, 11)
                 btn_color = arcade.color.DARK_GREEN if data["can_buy"] else (60, 60, 60)
                 btn = arcade.XYWH(WINDOW_WIDTH - 100, screen_y + 5, 90, 26)
                 arcade.draw_rect_filled(btn, btn_color)

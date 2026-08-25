@@ -66,9 +66,23 @@ class WarehouseView(ScrollView):
             resource_count = len([i for i in wh if i["item_type"] == "resource"])
             total = header_height + 30 + max(resource_count, 1) * 30 + 36 * resource_count  # 标题 + 列表 + 售卖按钮
         elif self._tab == "武器":
-            total = header_height + 50 + max(len(weapons), 1) * 32 + 100  # 标题 + 列表 + 底部空间
+            from entities.weapon_defs import ALL_WEAPONS  # 延迟导入
+            # 神器武器每条占两行（名称行+特效行=48px），普通武器一行（32px）
+            normal_count = len([w for w in weapons if not ALL_WEAPONS.get(w["item_id"], {}).get("artifact")])
+            artifact_count = len([w for w in weapons if ALL_WEAPONS.get(w["item_id"], {}).get("artifact")])
+            total = header_height + 50 + normal_count * 32 + artifact_count * 48 + 100
         else:  # 装备
-            total = header_height + 50 + max(len(equipment), 1) * 32 + 100  # 标题 + 列表 + 底部空间
+            from entities.equipment_defs import HELMETS, ARMORS, BACKPACKS  # 延迟导入
+            # 神器装备每条占两行（名称行+特效行=48px），普通装备一行（32px）
+            normal_count = 0
+            artifact_count = 0
+            for eq in equipment:
+                edef = HELMETS.get(eq["item_id"]) or ARMORS.get(eq["item_id"]) or BACKPACKS.get(eq["item_id"])
+                if edef and edef.get("artifact"):
+                    artifact_count += 1
+                else:
+                    normal_count += 1
+            total = header_height + 50 + normal_count * 32 + artifact_count * 48 + 100
         return max(total, WINDOW_HEIGHT)
 
     def get_bg_color(self):
@@ -133,7 +147,8 @@ class WarehouseView(ScrollView):
                               arcade.color.WHITE, 11, anchor_x="center", anchor_y="center")
 
         elif self._tab == "武器":
-            # ── 武器列表 ──
+            # ── 武器列表（神器武器在名称下方追加特效描述行）──
+            from entities.weapon_defs import ALL_WEAPONS  # 延迟导入
             self.equip_buttons = []
             self.weapon_sell_buttons = []
             equipped_id = gs.equipped_weapon_id
@@ -142,9 +157,11 @@ class WarehouseView(ScrollView):
                 is_equipped = (w["id"] == equipped_id)
                 label_color = arcade.color.GOLD if is_equipped else arcade.color.CORNFLOWER_BLUE
                 prefix = ">> " if is_equipped else "   "
+                is_artifact = ALL_WEAPONS.get(w["item_id"], {}).get("artifact")
+                name_prefix = "★ " if is_artifact else ""
                 self._tc.text(
                     f"wep_{i}",
-                    f"{prefix}[{kind_label}] {w['name']}  伤害:{w['damage']:.0f}  距离:{self._get_range(w)}  Lv.{w['level']}",
+                    f"{prefix}{name_prefix}[{kind_label}] {w['name']}  伤害:{w['damage']:.0f}  距离:{self._get_range(w)}  Lv.{w['level']}",
                     60, y, label_color, 13,
                 )
                 # 装备按钮
@@ -163,12 +180,20 @@ class WarehouseView(ScrollView):
                 self._tc.text(f"wep_sell_{i}", f"卖{sell_price}G", sv_btn.center_x, sv_btn.center_y,
                               arcade.color.WHITE, 10, anchor_x="center", anchor_y="center")
                 y -= 32
+                # 神器武器：在名称下方追加特效描述行
+                if is_artifact:
+                    wdef = ALL_WEAPONS[w["item_id"]]
+                    desc = self._artifact_effect_desc(wdef)
+                    self._tc.text(f"wep_art_{i}", f"    特效: {desc}", 70, y,
+                                  arcade.color.LIGHT_GRAY, 11)
+                    y -= 16
 
             if not weapons:
                 self._tc.text("wep_empty", "(无武器，击杀怪物获取)", 60, y, arcade.color.GRAY, 12)
 
-        else:  # 装备
-            # ── 装备列表 ──
+        elif self._tab == "装备":
+            # ── 装备列表（神器装备在名称下方追加特效描述行）──
+            from entities.equipment_defs import HELMETS, ARMORS, BACKPACKS  # 延迟导入
             self.equip_item_buttons = []
             self.equip_sell_buttons = []
             equipment = get_equipment_inventory(pid)
@@ -176,9 +201,13 @@ class WarehouseView(ScrollView):
                 slot_label = {"helmet": "头盔", "armor": "护甲", "backpack": "背包"}.get(eq["slot"], eq["slot"])
                 is_eq = "★" if eq["is_equipped"] else "  "
                 label_color = arcade.color.GOLD if eq["is_equipped"] else arcade.color.LIGHT_GRAY
+                # 查找装备定义以判断是否为神器
+                edef = HELMETS.get(eq["item_id"]) or ARMORS.get(eq["item_id"]) or BACKPACKS.get(eq["item_id"])
+                is_artifact = edef.get("artifact") if edef else False
+                name_prefix = "★ " if is_artifact else ""
                 self._tc.text(
                     f"eq_{i}",
-                    f"{is_eq} [{slot_label}] {eq['name']}  防+{eq['defense']}  Lv.{eq['level']}",
+                    f"{is_eq} {name_prefix}[{slot_label}] {eq['name']}  防+{eq['defense']}  Lv.{eq['level']}",
                     60, y, label_color, 13,
                 )
                 # 装备/卸下按钮
@@ -190,7 +219,6 @@ class WarehouseView(ScrollView):
                               eq_btn.center_x, eq_btn.center_y,
                               arcade.color.WHITE, 10, anchor_x="center", anchor_y="center")
                 # 售卖按钮
-                # 修复：装备售卖价改为与武器相同的方式（防御/容量 × 2），避免显示价远高于实际入账金币
                 base = eq["capacity"] if eq["slot"] == "backpack" else eq["defense"]
                 sell_price = int(base) * 2
                 sv_btn = arcade.XYWH(WINDOW_WIDTH - 80, y + 6, 70, 26)
@@ -199,6 +227,12 @@ class WarehouseView(ScrollView):
                 self._tc.text(f"eq_sell_{i}", f"卖{sell_price}G", sv_btn.center_x, sv_btn.center_y,
                               arcade.color.WHITE, 10, anchor_x="center", anchor_y="center")
                 y -= 32
+                # 神器装备：在名称下方追加特效描述行
+                if is_artifact:
+                    desc = self._equipment_effect_desc(edef, eq["slot"])
+                    self._tc.text(f"eq_art_{i}", f"    特效: {desc}", 70, y,
+                                  arcade.color.LIGHT_GRAY, 11)
+                    y -= 16
 
             if not equipment:
                 self._tc.text("eq_empty", "(无装备)", 60, y, arcade.color.GRAY, 12)
@@ -222,6 +256,46 @@ class WarehouseView(ScrollView):
             if wdef["name"] == w["name"]:
                 return wdef.get("range", 50)
         return 50
+
+    @staticmethod
+    def _artifact_effect_desc(wdef: dict) -> str:
+        """根据武器定义生成神器特殊效果的中文描述"""
+        parts = []
+        debuff_names = {
+            "stun": "命中眩晕目标",
+            "freeze": "命中冰冻减速",
+            "burn": "命中点燃持续灼烧",
+            "poison": "命中附加中毒",
+        }
+        if wdef.get("lifesteal"):
+            parts.append(f"吸血{int(wdef['lifesteal'] * 100)}%")
+        if wdef.get("debuff"):
+            parts.append(debuff_names.get(wdef["debuff"], wdef["debuff"]))
+        special_names = {
+            "penetrating": "弹丸穿透敌人",
+            "explosive": "爆炸范围伤害",
+            "laser": "持续激光（可穿墙）",
+        }
+        if wdef.get("special"):
+            parts.append(special_names.get(wdef["special"], wdef["special"]))
+        if wdef.get("spread_count"):
+            parts.append(f"一次发射{wdef['spread_count']}发散射弹丸")
+        if wdef.get("aura_slow"):
+            parts.append(f"冰霜光环：半径{wdef.get('aura_radius', 0)}px内怪物持续减速")
+        if wdef.get("random_debuff"):
+            parts.append("每颗子弹随机附带一种异常状态")
+        if not parts:
+            parts.append("无特殊效果（纯高防御/容量）")
+        return "、".join(parts)
+
+    @staticmethod
+    def _equipment_effect_desc(edef: dict, slot: str) -> str:
+        """根据装备定义生成神器装备的中文特效描述
+
+        目前神器装备（强相互作用力头盔/护甲、圣光冠冕、龙鳞战甲、吞天包）仅提供极高基础属性，
+        无额外词条效果，因此固定返回「无特殊效果」。若未来新增带词条的装备，在此追加判断即可。
+        """
+        return "无特殊效果（超高属性）"
 
     def on_mouse_press(self, x, y, button, modifiers):
         gs = self.window.game_state

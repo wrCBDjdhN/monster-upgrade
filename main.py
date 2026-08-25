@@ -118,6 +118,15 @@ class GameWindow(arcade.Window):
         """F11：切换全屏/窗口模式（退出全屏时自动恢复原窗口尺寸）"""
         self.set_fullscreen(not self.fullscreen)
 
+    def on_close(self):
+        """关闭窗口：若在游戏内（GameView），触发撤离失败丢失装备"""
+        current = self.current_view
+        # 仅在游戏内（GameView）时执行惩罚，其他视图直接关闭
+        from views.game_view import GameView
+        if isinstance(current, GameView):
+            current._fail_run("关闭窗口")
+        super().on_close()
+
     def dispatch_event(self, event_type, *args):
         """拦截事件：鼠标坐标物理→逻辑转换 + F11 全局全屏切换。"""
         if event_type == "on_key_press" and args and args[0] == arcade.key.F11:

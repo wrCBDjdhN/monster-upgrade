@@ -102,18 +102,55 @@ MONSTER_WEAPON_DROP_CHANCE = 0.15   # 15% 掉落武器
 MONSTER_HELMET_DROP_CHANCE = 0.08   # 8% 掉落头盔
 MONSTER_ARMOR_DROP_CHANCE = 0.08    # 8% 掉落护甲
 
-# ── 怪物持有装备等级范围 ──
-# 普通怪物使用 Lv1~10 的武器/装备；Boss 使用 Lv20~30 的武器/装备（用户需求：等级体系）
-MONSTER_WEAPON_LEVEL_RANGE = (1, 10)    # 普通怪物持有武器等级范围
+# ── 怪物持有装备等级范围（按主题区分，用户需求 v1.2.0）──
+# 普通怪物按主题使用不同等级范围；Boss 仍使用全局范围
+MONSTER_WEAPON_LEVEL_RANGE = (1, 10)    # 兜底默认（不应被使用，主题覆盖）
 BOSS_WEAPON_LEVEL_RANGE = (20, 30)      # Boss 持有武器等级范围
-MONSTER_GEAR_LEVEL_RANGE = (1, 10)      # 普通怪物持有头盔/护甲等级范围
+MONSTER_GEAR_LEVEL_RANGE = (1, 10)      # 兜底默认
 BOSS_GEAR_LEVEL_RANGE = (20, 30)        # Boss 持有头盔/护甲等级范围
 
-# ── 沙漠怪穿戴木乃伊系装备概率 ──
-# 木乃伊系装备不再进入随机掉落表（用户需求：只掉自身装备），
-# 改为沙漠怪（木乃伊/骆驼/BOSS木乃伊）穿戴后掉落，保持木乃伊装备产出
-MONSTER_MUMMY_ARMOR_CHANCE = 0.35   # 沙漠怪穿戴木乃伊护甲概率
-MONSTER_MUMMY_HELMET_CHANCE = 0.35  # 沙漠怪穿戴木乃伊头盔概率
+# ── 主题级怪物装备配置（用户需求：按地图主题分策略）──
+# 每主题装备池按权重列表 [(item_id, weight), ...]，weight 为相对权重（内部归一化）
+# helmet_chance / armor_chance：穿戴概率（0~1）
+# weapon_level / gear_level：(min, max) 等级范围
+# artifact_weapon_chance / artifact_weapon_level：神器武器概率与等级范围
+# artifact 条目从 equipment_defs/weapon_defs 的 artifact=True 自动筛取
+MONSTER_THEME_EQUIP = {
+    "forest": {
+        "helmet_chance": 0.30,
+        "armor_chance": 0.30,
+        "helmet_pool": [("leather_helm", 80), ("iron_helm", 15), ("golden_helm", 5)],
+        "armor_pool":  [("leather_armor", 80), ("chain_mail", 15), ("plate_armor", 5)],
+        "weapon_level": (1, 5),
+        "gear_level":  (1, 5),
+        "artifact_weapon_chance": 0.0,
+        "artifact_weapon_level": (1, 5),
+    },
+    "desert": {
+        "helmet_chance": 0.50,
+        "armor_chance": 0.80,
+        "helmet_pool": [("mummy_helmet", 80), ("golden_helm", 20)],
+        "armor_pool":  [("mummy_armor", 80), ("plate_armor", 20)],
+        "weapon_level": (5, 10),
+        "gear_level":  (5, 10),
+        "artifact_weapon_chance": 0.10,
+        "artifact_weapon_level": (1, 5),
+    },
+    "space": {
+        "helmet_chance": 1.00,
+        "armor_chance": 1.00,
+        "helmet_pool": [("space_helmet", 90), ("strong_force_helm", 10)],
+        "armor_pool":  [("space_armor", 90), ("strong_force_armor", 10)],
+        "weapon_level": (10, 50),
+        "gear_level":  (10, 50),
+        "artifact_weapon_chance": 0.30,
+        "artifact_weapon_level": (5, 10),
+    },
+}
+
+# ── 沙漠怪穿戴木乃伊系装备概率（保留兼容，新逻辑由 MONSTER_THEME_EQUIP 驱动）──
+MONSTER_MUMMY_ARMOR_CHANCE = 0.35
+MONSTER_MUMMY_HELMET_CHANCE = 0.35
 
 # ── 开箱系统（按主题区分掉落池，用户需求 2026-08）──
 # 每主题配置项：
@@ -452,6 +489,10 @@ KEY_BINDINGS = {
     "spectate": ["V"],      # 观战视角切换
     "minimap_zoom": ["M"],  # 小地图放大（周围视野 ⇄ 全图）
 }
+
+# ── 刷新距离（怪物/环境物生成时与玩家的最小欧几里得距离）──
+MONSTER_SPAWN_MIN_DIST = 600      # 怪物刷新最小距离（超出屏幕可视范围，避免在玩家身边二次刷新）
+HARVEST_SPAWN_MIN_DIST = 400      # 环境物刷新最小距离
 
 # ── 小地图（游戏 HUD 右上角）──
 MINIMAP_SIZE = 200             # 小地图边长（像素）

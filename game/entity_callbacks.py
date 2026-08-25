@@ -332,10 +332,10 @@ def handle_rocket_pad_interaction(view):
                     from game.monsters import BossSpace
                     from game.monster_utils import assign_monster_weapon, assign_monster_armor, assign_monster_helmet
                     boss = BossSpace(center_x=pad.center_x, center_y=pad.center_y + 60)
-                    # 为BOSS分配武器和装备
-                    assign_monster_weapon(boss, level=15, is_space=True)
-                    assign_monster_armor(boss, level=15, is_space=True)
-                    assign_monster_helmet(boss, level=15, is_space=True)
+                    # 为BOSS分配武器和装备（航天主题）
+                    assign_monster_weapon(boss, level=15, theme="space")
+                    assign_monster_armor(boss, level=15, theme="space")
+                    assign_monster_helmet(boss, level=15, theme="space")
                     boss.set_on_death(lambda b, p=pad: _on_rocket_boss_defeated(view, b, p))
                     view.monsters.append(boss)
                     pad.set_boss(boss)

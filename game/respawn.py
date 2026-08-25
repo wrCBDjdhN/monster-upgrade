@@ -1,7 +1,8 @@
 """资源和怪物刷新逻辑"""
 
+import math
 import random
-from config import TILE_SIZE, MONSTER_GEAR_LEVEL_RANGE, MONSTER_WEAPON_LEVEL_RANGE
+from config import TILE_SIZE, MONSTER_GEAR_LEVEL_RANGE, MONSTER_WEAPON_LEVEL_RANGE, MONSTER_SPAWN_MIN_DIST, HARVEST_SPAWN_MIN_DIST
 from game.harvestable import HarvestableEntity
 from game.monsters import Zombie, Skeleton, MummyMelee, MummyRanged, Camel, Sniper, Assault, Bandit, RocketTroop
 from game.monster_utils import assign_monster_armor, assign_monster_helmet, assign_monster_weapon
@@ -84,7 +85,7 @@ def respawn_harvestables(view, dt):
                 break
         if on_wall:
             continue
-        # 不与现有资源/玩家过近
+        # 不与现有资源/玩家过近（欧几里得距离，避免在玩家身边二次刷新）
         too_close = False
         for h in view.harvestables:
             if h.alive and abs(h.center_x - x) < 50 and abs(h.center_y - y) < 50:
@@ -92,8 +93,8 @@ def respawn_harvestables(view, dt):
                 break
         if too_close:
             continue
-        if (abs(view.player.center_x - x) < 80 and
-                abs(view.player.center_y - y) < 80):
+        # 环境物刷新需与玩家保持最小距离（超出屏幕可视范围）
+        if math.hypot(view.player.center_x - x, view.player.center_y - y) < HARVEST_SPAWN_MIN_DIST:
             continue
         h = HarvestableEntity(x, y, random.choice(types))
         view.harvestables.append(h)
@@ -156,7 +157,7 @@ def respawn_monsters(view, dt):
                 break
         if on_wall:
             continue
-        # 不与现有怪物/玩家/资源过近
+        # 不与现有怪物/玩家/资源过近（欧几里得距离，避免在玩家身边二次刷新）
         too_close = False
         for m in view.monsters:
             if m.alive and abs(m.center_x - x) < 80 and abs(m.center_y - y) < 80:
@@ -164,8 +165,8 @@ def respawn_monsters(view, dt):
                 break
         if too_close:
             continue
-        if (abs(view.player.center_x - x) < 100 and
-                abs(view.player.center_y - y) < 100):
+        # 怪物刷新需与玩家保持最小距离（超出屏幕可视范围）
+        if math.hypot(view.player.center_x - x, view.player.center_y - y) < MONSTER_SPAWN_MIN_DIST:
             continue
         # 创建新怪物（按主题类型池实例化；BOSS 不参与刷新）
         mtype = random.choice(types)
@@ -202,13 +203,11 @@ def respawn_monsters(view, dt):
                 bm = Bandit(center_x=bx, center_y=by)
                 bm.set_on_death(view._on_monster_death)
                 bm._walls = view.map_data.get("walls", [])
-                assign_monster_weapon(bm, level=random.randint(*MONSTER_WEAPON_LEVEL_RANGE), is_desert=False)
-                view.monsters.append(bm)
-        # 随机穿戴护甲、头盔和武器（普通怪等级 Lv1-10；木乃伊系怪物可携带木乃伊武器）
-        is_desert = mtype in ("mummy_melee", "mummy_ranged", "camel")
-        is_space = mtype in ("sniper", "assault", "bandit", "rocket_troop")
-        assign_monster_armor(m, level=random.randint(*MONSTER_GEAR_LEVEL_RANGE), is_desert=is_desert, is_space=is_space)
-        assign_monster_helmet(m, level=random.randint(*MONSTER_GEAR_LEVEL_RANGE), is_desert=is_desert, is_space=is_space)
-        assign_monster_weapon(m, level=random.randint(*MONSTER_WEAPON_LEVEL_RANGE), is_desert=is_desert, is_space=is_space)
+                assign_monster_weapon(bm, level=random.randint(*MONSTER_WEAPON_LEVEL_RANGE), theme=theme)
+                view.monsters.append(m)
+        # 随机穿戴护甲、头盔和武器（按地图主题分策略，见 config.MONSTER_THEME_EQUIP）
+        assign_monster_armor(m, level=random.randint(*MONSTER_GEAR_LEVEL_RANGE), theme=theme)
+        assign_monster_helmet(m, level=random.randint(*MONSTER_GEAR_LEVEL_RANGE), theme=theme)
+        assign_monster_weapon(m, level=random.randint(*MONSTER_WEAPON_LEVEL_RANGE), theme=theme)
         view.monsters.append(m)
         spawned += 1

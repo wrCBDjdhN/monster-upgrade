@@ -1,9 +1,9 @@
 # PROJECT KNOWLEDGE BASE - 打怪升级项目
 
-**Updated:** 2026-08-17
-**Commit:** e6177b7
+**Updated:** 2026-08-25
+**Commit:** 48ec430
 **Branch:** master
-**Stats:** 62 Python files, ~14,761 行（联机层 + 大厅 + 火箭发射台就位）
+**Stats:** 66 Python files, ~17,068 行（v1.2.0：开屏动画 + 新手教程 + 设置界面 + 打包管线就位）
 
 ## 项目知识库（结构速览）
 
@@ -12,14 +12,16 @@
 ### 目录结构
 ```
 打怪升级/
-├── main.py       # 入口：arcade.Window + GameState（各 View 共享状态，含 player_id/run_carried/当前武器/地图种子/net_mode）
+├── main.py       # 入口：GameWindow（固定逻辑分辨率投影器）+ GameState + TutorialState（教程状态机）
 ├── config.py     # 全部数值常量（窗口/玩家/怪物/战斗/掉落/升级公式/宝箱/火箭发射台），调整平衡性只改这里
 ├── entities/     # 数据定义：weapon_defs / equipment_defs / monster_defs / resource_defs / effects_defs / character_defs（见 entities/AGENTS.md）
-├── db/           # SQLite 层：connection / database(建表+CRUD re-export) / players / weapons / equipment / warehouse / potions / characters / levels（见 db/AGENTS.md）
+├── db/           # SQLite 层：connection / database(建表+CRUD re-export) / players / weapons / equipment / warehouse / potions / characters / levels / settings（见 db/AGENTS.md）
 ├── game/         # 核心逻辑：怪物AI / 战斗 / 地图生成 / 掉落 / 撤离 / 宝箱 / 特效 / 渲染 / 音效 / 输入 / 刷新 / 回调汇聚 / 角色技能（见 game/AGENTS.md）
 ├── net/          # 联机网络层：protocol / server / client / thread_bridge + 4 个 _selftest 自检脚本（见 net/AGENTS.md）
-├── docs/         # 文档：net-mode-matrix.md（联机模式矩阵）
-└── views/        # UI：start / map_select / game(2553行,最大) / lobby / warehouse / market / forge / backpack / scroll / text_cache / character_select / level_up（见 views/AGENTS.md）
+├── views/        # UI：splash(开屏) / start / map_select / game(2699行,最大) / lobby / settings / tutorial / warehouse / market / forge / backpack / scroll / text_cache / character_select / level_up（见 views/AGENTS.md）
+├── packaging/    # 打包三件套：MonsterUpgrade.spec(PyInstaller) / build.ps1(一键构建) / installer.iss(Inno Setup 安装包)
+├── assets/       # 二进制资产：icon.ico(打包用) / sounds/splash.wav(开屏音效)；其余音效由 game/sound_manager.py 程序化合成
+└── docs/         # 文档：net-mode-matrix.md（联机模式矩阵）
 ```
 
 ### 高频入口速查
@@ -38,11 +40,17 @@
 | 联机模式判定 | `window.game_state.net_mode`（solo/host/client），客户端禁本地仲裁 |
 | 角色系统 | `entities/character_defs.py` + `db/characters.py` + `game/character_skills.py` + `views/character_select_view.py` |
 | 升级系统 | `db/levels.py` + `views/level_up_view.py` + `game/character_skills.py` |
+| 设置界面/按键重绑 | `views/settings_view.py`（UI）+ `db/settings.py`（settings 键值表：音量/静音/键位） |
+| 新手教程 | `main.TutorialState`（stage 0-6 状态机）+ `views/tutorial.py`（页面定义+绘制+完成标记） |
+| 打包发布 exe/安装包 | `powershell -ExecutionPolicy Bypass -File packaging\build.ps1`（PyInstaller onedir → Inno Setup） |
 
 ### CODE MAP（核心符号）
 | 符号 | 类型 | 位置 | 角色 |
 |------|------|------|------|
-| `GameState` | class | main.py:23 | 各 View 共享运行时状态（player_id/run_carried/武器/地图种子/net_mode） |
+| `GameWindow` | class | main.py:64 | 窗口：FixedLogicalProjector 固定逻辑分辨率 + letterbox；dispatch_event 拦截鼠标坐标换算与 F11 全局全屏 |
+| `TutorialState` | class | main.py:148 | 新手教程状态机（stage 0-6/page/击杀拾取计数），首次启动（DB 未标记 tutorial_done）激活 |
+| `GameState` | class | main.py:171 | 各 View 共享运行时状态（player_id/run_carried/run_potions/武器/地图种子/net_mode/tutorial） |
+| `SplashView` | class | views/splash_view.py:42 | 开屏动画三阶段（品牌展示→光效过渡→切 StartView），任意键跳过，播 assets/sounds/splash.wav |
 | `RocketPad` | class | game/rocket_pad.py | 火箭发射台状态机 IDLE→ACTIVATED→BOSS_SPAWNED→BOSS_DEFEATED→DESTROYED/EVACUATING→EVAC_SUCCESS（非 Sprite） |
 | `_MONSTER_CLASSES` | dict | views/game_view.py | 怪物类型名 → 类映射（数据驱动注册） |
 | `MONSTER_CONFIGS` | dict | entities/monster_defs.py | 怪物数值配置（hp/damage/speed/弹丸参数），BOSS 条目内联倍率（hp×8/damage×4/speed×0.7） |
@@ -60,7 +68,9 @@
 
 ### 关键约定
 - 中文 docstring + 中文注释为硬性约定；汇报必须中文
-- 视图切换用 `window.show_view()`；函数内延迟 import 避免 views 循环依赖
+- 视图切换用 `window.show_view()`；函数内延迟 import 避免 views 循环依赖（全仓约 110 处，导航唯一模式：处理函数内 `from views.xxx import XxxView` → `XxxView(self.window_ref)` → `show_view`）
+- 启动链：`main()` = init_db → 读 `db.settings.is_tutorial_done` 决定是否激活教程 → SplashView（任意键跳过）→ StartView
+- GameWindow 已全局拦截 F11 切全屏，且 dispatch_event 把所有鼠标事件坐标统一换算为 1280×720 逻辑坐标——各视图拿到的 (x,y) 无需再自行换算
 - 怪物护甲/头盔/武器分配集中在 `game/monster_utils.py` 的 `assign_monster_armor()`/`assign_monster_helmet()`/`assign_monster_weapon()`
 - 怪物数值/元数据集中在 `entities/monster_defs.py`（MONSTER_CONFIGS/MONSTER_METADATA），`game/monsters.py` 禁硬编码数值（数据驱动重构后 13 类，含 4 BOSS）
 - `db/database.py` 保留全量 re-export 兼容旧 import；`db/game.db` 为 SQLite 数据文件（pyright 已排除）
@@ -68,7 +78,7 @@
 - 渲染禁空心/线框绘制（`draw_*_outline`/`draw_line` 等会导致闪烁）：一律不透明实心填充（见 game/AGENTS.md）
 - game/ 层可经 `db.database` 读数据、`input_handler.py` 反向依赖 views（TAB 开背包）属例外
 - net 层铁律：协议禁静默忽略未知消息、回调禁阻塞主线程、回调禁碰 arcade 对象（见 net/AGENTS.md）
-- `Player.update()` 已含移动逻辑，禁手动二次调用（否则位移翻倍，player.py:202 注释）；RocketPad 非 Sprite，勿按 Sprite 处理
+- `Player.update()` 已含移动逻辑，禁手动二次调用（否则位移翻倍，player.py 内注释）；RocketPad 非 Sprite，勿按 Sprite 处理（entity_callbacks.py 陷阱注释）
 - 动画/读条期间禁滚动/点击（views 层约定，见 views/AGENTS.md）
 - 角色系统：`character_defs.py`（角色数据）+ `db/characters.py`（角色持久化）+ `game/character_skills.py`（技能逻辑）+ `views/character_select_view.py`（选角UI）
 - 升级系统：`db/levels.py`（等级/经验数据）+ `views/level_up_view.py`（升级界面）+ `game/character_skills.py`（技能效果）
@@ -220,7 +230,7 @@ class NewMonster:
 5. **不要使用英文汇报**：必须使用中文
 6. **不要自己发挥**：添加新内容时必须参考现有代码模式
 7. **不要未经同意就修改**：实施任何修改前，必须先将将要进行的修改向用户陈述，得到用户明确同意后才能执行
-8. **不要静默忽略**：net 层未知消息必须显式处理或记录日志（protocol.py:358 铁律）
+8. **不要静默忽略**：net 层未知消息必须显式处理或记录日志（protocol.py 铁律，:359）
 9. **不要阻塞主线程**：net 回调禁 sleep/等待，经 thread_bridge 队列汇入主循环
 10. **不要改数据键名**：entities 的 item_id/资源名是跨层契约（DB/掉落/渲染共用）
 

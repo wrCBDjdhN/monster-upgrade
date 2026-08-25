@@ -1,6 +1,6 @@
 # game/ - 核心游戏逻辑
 
-**Updated:** 2026-08-16 | **Files:** 19 | **Lines:** ~4,644
+**Updated:** 2026-08-25 | **Files:** 20 | **Lines:** ~5,145
 
 ## OVERVIEW
 游戏逻辑层：怪物 AI、战斗、随机地图生成、掉落、撤离、宝箱、可采集物、特效、渲染、音效、输入、刷新。被 views/ 层编排；本层可经 `db.database` 读数据，`input_handler.py` 反向依赖 views（TAB 开背包）属例外。
@@ -18,7 +18,7 @@
 | 宝箱 | chest.py |
 | 可采集物（树/矿石/石头/仙人掌） | harvestable.py |
 | 粒子/漂浮文字/音效触发 | effects.py |
-| 批量绘制 / 渲染辅助 / 主渲染 | batch_shapes.py / render_helpers.py / rendering.py（696 行，render_game 单函数 528 行） |
+| 批量绘制 / 渲染辅助 / 主渲染 | batch_shapes.py / render_helpers.py / rendering.py（760 行，render_game 单函数） |
 | 程序化合成音效 | sound_manager.py |
 | 键鼠输入映射 | input_handler.py |
 | 怪物死亡回调汇聚（含拾取/掉落/装备分配联动） | entity_callbacks.py |
@@ -41,7 +41,7 @@
 - 不在本层直接绘制 UI 文本/按钮（那是 views/ 的职责）
 - 不直接拼 SQL：数据库读写经 `db/` 模块函数（evac/rendering/input_handler 调用 db.database 属正常）
 - **渲染禁空心/线框绘制**：`draw_*_outline`/`draw_arc_outline`/`draw_line` 等透明矢量层会导致闪烁，一律不透明实心填充（render_helpers.py 顶部铁律）
-- **玩家位移禁重复 update**：位置更新逻辑已在 player.py 内实现，别再手动调 `player.update()`，否则位移翻倍（player.py:202 注释）
-- **RocketPad 非 Sprite**：撤离火箭平台不是 arcade.Sprite，勿按 Sprite 处理（entity_callbacks.py:428 陷阱注释）
-- **无背包一律不能拾取**：掉落拾取强制要求有背包（loot.py:174）
+- **玩家位移禁重复 update**：位置更新逻辑已在 player.update() 内实现（player.py 内注释），别再手动调 `player.update()`，否则位移翻倍
+- **RocketPad 非 Sprite**：撤离火箭平台不是 arcade.Sprite，勿按 Sprite 处理（entity_callbacks.py 陷阱注释）
+- **无背包一律不能拾取**：掉落拾取强制要求有背包（loot.py skipped_no_bag 分支）
 - 撤离金币结算口径以 evac.py 为准（避免与战利品入库口径混淆）

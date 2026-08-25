@@ -349,7 +349,7 @@ class GameView(arcade.View):
                     elif slot_name == "backpack":
                         # 装备栏需要显示当前装备的背包，故同步记录 item_id
                         gs.equipped_backpack_id = eq["item_id"]
-                    # 处理装备被动效果（max_hp / regen / speed）
+                    # 处理装备被动效果（max_hp / regen / speed / defense / damage / lifesteal / thorns / crit_chance）
                     # 修复：效果元素为 "id:level" 格式，需先 parse_effect_item 解析出效果id与等级，
                     # 再用 effect_params 取分级后的数值（与武器效果处理逻辑保持一致），否则效果不生效
                     for e in eq.get("effects", []):
@@ -364,6 +364,21 @@ class GameView(arcade.View):
                                 self.player.regen_per_sec += pdata.get("value", 1)
                             elif eid == "speed":
                                 self.player.gear_speed_mult *= (1.0 + pdata.get("value", 0.30))
+                            elif eid == "defense":
+                                total_def += int(pdata.get("value", 3))
+                            elif eid == "damage":
+                                # 伤害加成：按百分比增加武器伤害（存储倍率供战斗读取）
+                                current = getattr(self.player, "equip_damage_mult", 1.0)
+                                self.player.equip_damage_mult = current * (1.0 + pdata.get("value", 0.08))
+                            elif eid == "lifesteal":
+                                current = getattr(self.player, "equip_lifesteal", 0.0)
+                                self.player.equip_lifesteal = current + pdata.get("value", 0.03)
+                            elif eid == "thorns":
+                                current = getattr(self.player, "equip_thorns", 0.0)
+                                self.player.equip_thorns = current + pdata.get("value", 0.10)
+                            elif eid == "crit_chance":
+                                current = getattr(self.player, "crit_chance", 0.0)
+                                self.player.crit_chance = current + pdata.get("value", 0.05)
             # 总防御 = 角色基础防御（骑士 +10）+ 装备防御；原代码直接覆盖会丢失角色基础防御
             self.player.defense = self.player.base_defense + total_def
             self.player.backpack_capacity = get_backpack_capacity(gs.player_id)
@@ -432,11 +447,10 @@ class GameView(arcade.View):
                 cls = _MONSTER_CLASSES.get(mtype, Zombie)
                 m = cls(center_x=mx, center_y=my)
                 m.set_on_death(self._on_monster_death)
-                # 随机穿戴护甲、头盔和武器（普通怪装备等级 Lv1-10；木乃伊系怪物可携带木乃伊武器）
-                is_desert = mtype in ("mummy_melee", "mummy_ranged", "camel")
-                assign_monster_armor(m, level=random.randint(*MONSTER_GEAR_LEVEL_RANGE), is_desert=is_desert)
-                assign_monster_helmet(m, level=random.randint(*MONSTER_GEAR_LEVEL_RANGE), is_desert=is_desert)
-                assign_monster_weapon(m, level=random.randint(*MONSTER_WEAPON_LEVEL_RANGE), is_desert=is_desert)
+                # 随机穿戴护甲、头盔和武器（按地图主题分策略，见 config.MONSTER_THEME_EQUIP）
+                assign_monster_armor(m, level=random.randint(*MONSTER_GEAR_LEVEL_RANGE), theme=theme)
+                assign_monster_helmet(m, level=random.randint(*MONSTER_GEAR_LEVEL_RANGE), theme=theme)
+                assign_monster_weapon(m, level=random.randint(*MONSTER_WEAPON_LEVEL_RANGE), theme=theme)
                 m._walls = walls_for_collision
                 self.monsters.append(m)
 
@@ -446,11 +460,10 @@ class GameView(arcade.View):
                 m = cls(center_x=wx, center_y=my)
                 m.set_on_death(self._on_monster_death)
                 m._walls = walls_for_collision
-                # 随机穿戴护甲、头盔和武器（普通怪装备等级 Lv1-10；木乃伊系怪物可携带木乃伊武器）
-                is_desert = mtype in ("mummy_melee", "mummy_ranged", "camel")
-                assign_monster_armor(m, level=random.randint(*MONSTER_GEAR_LEVEL_RANGE), is_desert=is_desert)
-                assign_monster_helmet(m, level=random.randint(*MONSTER_GEAR_LEVEL_RANGE), is_desert=is_desert)
-                assign_monster_weapon(m, level=random.randint(*MONSTER_WEAPON_LEVEL_RANGE), is_desert=is_desert)
+                # 随机穿戴护甲、头盔和武器（按地图主题分策略）
+                assign_monster_armor(m, level=random.randint(*MONSTER_GEAR_LEVEL_RANGE), theme=theme)
+                assign_monster_helmet(m, level=random.randint(*MONSTER_GEAR_LEVEL_RANGE), theme=theme)
+                assign_monster_weapon(m, level=random.randint(*MONSTER_WEAPON_LEVEL_RANGE), theme=theme)
                 self.monsters.append(m)
 
             # BOSS（每局仅 1 个，位于金字塔/角落建筑内，不参与野外刷新）
@@ -460,12 +473,10 @@ class GameView(arcade.View):
                 boss = _BOSS_CLASSES[boss_type](center_x=boss_spawn[0], center_y=boss_spawn[1])
                 boss.set_on_death(self._on_monster_death)
                 boss._walls = walls_for_collision
-                # BOSS 穿戴护甲、头盔和武器（BOSS 装备等级 Lv20-30；BOSS木乃伊可携带木乃伊武器）
-                is_desert = boss_type == "boss_mummy"
-                is_space = boss_type == "boss_space"
-                assign_monster_armor(boss, level=random.randint(*BOSS_GEAR_LEVEL_RANGE), is_desert=is_desert, is_space=is_space)
-                assign_monster_helmet(boss, level=random.randint(*BOSS_GEAR_LEVEL_RANGE), is_desert=is_desert, is_space=is_space)
-                assign_monster_weapon(boss, level=random.randint(*BOSS_WEAPON_LEVEL_RANGE), is_desert=is_desert, is_space=is_space)
+                # BOSS 穿戴护甲、头盔和武器（BOSS 装备等级 Lv20-30，按主题分策略）
+                assign_monster_armor(boss, level=random.randint(*BOSS_GEAR_LEVEL_RANGE), theme=theme)
+                assign_monster_helmet(boss, level=random.randint(*BOSS_GEAR_LEVEL_RANGE), theme=theme)
+                assign_monster_weapon(boss, level=random.randint(*BOSS_WEAPON_LEVEL_RANGE), theme=theme)
                 self.monsters.append(boss)
 
             # 水井守卫（沙漠主题固定 3 个木乃伊近战）
@@ -474,10 +485,10 @@ class GameView(arcade.View):
                 guard = cls(center_x=gx, center_y=gy)
                 guard.set_on_death(self._on_monster_death)
                 guard._walls = walls_for_collision
-                # 水井守卫为木乃伊系，穿戴护甲、头盔和武器（普通怪等级 Lv1-10，可携带木乃伊武器）
-                assign_monster_armor(guard, level=random.randint(*MONSTER_GEAR_LEVEL_RANGE), is_desert=True)
-                assign_monster_helmet(guard, level=random.randint(*MONSTER_GEAR_LEVEL_RANGE), is_desert=True)
-                assign_monster_weapon(guard, level=random.randint(*MONSTER_WEAPON_LEVEL_RANGE), is_desert=True)
+                # 水井守卫穿戴护甲、头盔和武器（按主题分策略）
+                assign_monster_armor(guard, level=random.randint(*MONSTER_GEAR_LEVEL_RANGE), theme=theme)
+                assign_monster_helmet(guard, level=random.randint(*MONSTER_GEAR_LEVEL_RANGE), theme=theme)
+                assign_monster_weapon(guard, level=random.randint(*MONSTER_WEAPON_LEVEL_RANGE), theme=theme)
                 self.monsters.append(guard)
 
         # 联机主机：为全部初始怪物分配单调网络 id（仅 host 模式且已注入 net_server 时执行；
@@ -771,23 +782,19 @@ class GameView(arcade.View):
         monsters = [m for m in self.monsters if hasattr(m, "alive") and m.alive]
         if kind == "melee":
             # 近战即时判定（按攻击者 id 独立冷却），逐条广播命中结果
+            # 汇总武器自带 debuff + 客户端装备附加 debuff，一并传入 melee_attack 施加
+            wdebuff = wdef.get("debuff")
+            combined_debuffs = []
+            if wdebuff:
+                combined_debuffs.append((wdebuff, 1))
+            combined_debuffs.extend(debuffs)
             hit = self.combat.melee_attack(
                 attacker, monsters, damage, wrange, tx, ty, speed,
                 attacker_id=attacker_id,
-                # 吸血剑：主机裁决客户端近战命中时，按实际伤害比例给攻击者（幽灵）回血
                 lifesteal=wdef.get("lifesteal", LIFESTEAL_DEFAULT),
+                debuffs=combined_debuffs,
             )
-            # 武器自带 debuff（如诅咒弯刀中毒）随命中施加并广播；客户端装备附加 debuff 一并施加
-            wdebuff = wdef.get("debuff")
             for m, actual in hit:
-                # 汇总本次命中的全部附加效果（武器自带 1 级 + 客户端装备附加含等级）
-                combined_debuffs = []
-                if wdebuff:
-                    combined_debuffs.append((wdebuff, 1))
-                combined_debuffs.extend(debuffs)
-                for eid, lvl in combined_debuffs:  # 客户端装备附加效果（含等级）
-                    if hasattr(m, "apply_debuff"):
-                        m.apply_debuff(eid, lvl)
                 self._broadcast_damage(m, actual, hit=True, crit=False, debuffs=combined_debuffs)
             # 近战命中环境物（修复「客户端近战打资源不同步」）：客户端近战攻击收敛主机后，
             # 环境物受击/摧毁/掉落也必须在主机裁决并广播（客户端本地不裁决环境物伤害）。
@@ -975,17 +982,20 @@ class GameView(arcade.View):
                 pid, actual,
                 getattr(ghost, "_pending_debuff", None),
                 getattr(ghost, "_pending_debuff_level", 1),
+                getattr(ghost, "_pending_debuff_effects", None),
             )
         self.remote_players[player_id] = ghost
         print(f"[GameView] 远端玩家幽灵懒创建: player_id={player_id} @({sx:.0f},{sy:.0f})")
         return ghost
 
     def _broadcast_player_hurt(self, player_id: int, damage: float,
-                               debuff=None, debuff_level: int = 1) -> None:
+                               debuff=None, debuff_level: int = 1,
+                               debuffs: list = None) -> None:
         """主机广播 PLAYER_HURT：玩家受伤（HP 主机权威），各端据此本地扣血 + 受击反馈
 
         debuff/debuff_level：怪物攻击（近战/弹丸）附带的附加效果与等级，随广播下发
         客户端，修复「客户端玩家被怪物攻击时特殊效果未生效」（旧版钩子恒传 None）。
+        debuffs：全部效果列表 [(效果ID, 效果等级), ...]（联机多效果同步用）
         """
         gs = self.window.game_state
         if gs.net_mode == "host" and gs.net_server is not None:
@@ -994,6 +1004,7 @@ class GameView(arcade.View):
                 "damage": damage,
                 "debuff": debuff,
                 "debuff_level": debuff_level,
+                "debuffs": debuffs or [],
             })
 
     def _serialize_players(self) -> list:
@@ -2512,6 +2523,7 @@ class GameView(arcade.View):
                     pid, actual,
                     getattr(self.player, "_pending_debuff", None),
                     getattr(self.player, "_pending_debuff_level", 1),
+                    getattr(self.player, "_pending_debuff_effects", None),
                 )
             for inbound in gs.net_server.inbound_poll():
                 if not isinstance(inbound, dict):
@@ -2730,12 +2742,15 @@ class GameView(arcade.View):
                 # 观战模式：主机玩家已撤离/死亡，弹丸不再命中主机（剩余客户端幽灵照常受击）
                 if not self._spectating and arcade.check_for_collision(p, self.player):
                     # 记录弹丸附带效果：受击钩子（PLAYER_HURT 广播）据此下发 debuff+等级
-                    self.player._pending_debuff = getattr(p, "debuff_id", None)
+                    first_debuff = getattr(p, "debuff_id", None)
+                    self.player._pending_debuff = first_debuff
                     self.player._pending_debuff_level = 1
+                    self.player._pending_debuff_effects = getattr(p, "debuffs", [])  # 全部效果（联机广播用）
                     self.player.take_damage(p.damage)
-                    # 弹丸附带 debuff（木乃伊毒弹/BOSS 冰冻弹等）施加到玩家
-                    if getattr(p, "debuff_id", None):
-                        self.player.apply_debuff(p.debuff_id)
+                    # 弹丸附带 debuff（木乃伊毒弹/BOSS 冰冻弹 + 武器效果）施加到玩家
+                    for eid, lvl in getattr(p, "debuffs", []):
+                        if hasattr(self.player, "apply_debuff"):
+                            self.player.apply_debuff(eid, lvl)
                     p.remove_from_sprite_lists()
                     continue
                 if gs.net_mode == "host":
@@ -2745,11 +2760,14 @@ class GameView(arcade.View):
                         if arcade.check_for_collision(p, ghost):
                             # 幽灵受击：take_damage 内 on_take_damage 钩子自动广播 PLAYER_HURT
                             # （先记录附带效果，钩子据此下发 debuff+等级）
-                            ghost._pending_debuff = getattr(p, "debuff_id", None)
+                            first_debuff = getattr(p, "debuff_id", None)
+                            ghost._pending_debuff = first_debuff
                             ghost._pending_debuff_level = 1
+                            ghost._pending_debuff_effects = getattr(p, "debuffs", [])
                             ghost.take_damage(p.damage)
-                            if getattr(p, "debuff_id", None):
-                                ghost.apply_debuff(p.debuff_id)
+                            for eid, lvl in getattr(p, "debuffs", []):
+                                if hasattr(ghost, "apply_debuff"):
+                                    ghost.apply_debuff(eid, lvl)
                             p.remove_from_sprite_lists()
                             break
 
@@ -2777,9 +2795,11 @@ class GameView(arcade.View):
         if gs.net_mode != "client":
             # 弹丸命中怪物（复用精灵列表，避免每帧新建）
             self._monster_sprite_list.clear()
+            seen_ids = set()  # 防止同一怪物对象被重复添加（respawn 时可能出现）
             for m in self.monsters:
-                if hasattr(m, 'alive') and m.alive:
+                if hasattr(m, 'alive') and m.alive and id(m) not in seen_ids:
                     self._monster_sprite_list.append(m)
+                    seen_ids.add(id(m))
             hit_list = self.combat.check_monster_hits(self._monster_sprite_list)
             # 激光命中检测（陨星炮：对路径上的怪物持续造成伤害）
             hit_list.extend(self.combat.check_laser_hits(self._monster_sprite_list))
@@ -3215,6 +3235,8 @@ class GameView(arcade.View):
                     c.execute("DELETE FROM weapons WHERE id=? AND player_id=?", (weapon_db_id, pid))
                 # 删除已装备的头盔/护甲/背包（equipment 表中 is_equipped=1 的行）
                 c.execute("DELETE FROM equipment WHERE player_id=? AND is_equipped=1", (pid,))
+                # 删除仓库中所有药水（死亡/撤离失败 = 药水全部丢失，与武器装备同口径）
+                c.execute("DELETE FROM potions WHERE player_id=?", (pid,))
         # 重置游戏状态中的装备引用
         gs.equipped_weapon_id = None
         gs.current_weapon_kind = "melee"

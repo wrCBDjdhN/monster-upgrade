@@ -16,11 +16,13 @@ class StartView(arcade.View):
         self.market_rect = arcade.XYWH(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - 200, 220, 50)
         self.forge_rect = arcade.XYWH(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - 270, 220, 50)  # 锻造坊入口
         self.net_rect = arcade.XYWH(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - 330, 220, 46)  # 局域网联机入口
+        self.settings_gear_rect = arcade.XYWH(35, WINDOW_HEIGHT - 35, 40, 40)  # 左上角齿轮图标
         self.btn_hover = False
         self.wh_hover = False
         self.market_hover = False
         self.forge_hover = False
         self.net_hover = False
+        self.settings_hover = False
         # 新手教程（阶段 1）：向导弹窗状态
         self.tut_pages = self._build_tutorial_pages()
         self.tut_next_rect = None
@@ -161,12 +163,22 @@ class StartView(arcade.View):
         net_color = (40, 160, 120) if self.net_hover else (30, 110, 85)
         arcade.draw_rect_filled(self.net_rect, net_color)
         arcade.draw_rect_outline(self.net_rect, arcade.color.WHITE, border_width=2)
-        # 持久 Text 对象，避免 draw_text 每帧重建纹理
         self._tc.text(
             "btn_net",
             "局 域 网 联 机",
             self.net_rect.center_x, self.net_rect.center_y,
             arcade.color.WHITE, size=18, anchor_x="center", anchor_y="center",
+        )
+
+        # 左上角齿轮图标（设置入口）
+        gear_color = (100, 100, 120) if not self.settings_hover else (140, 140, 170)
+        arcade.draw_rect_filled(self.settings_gear_rect, gear_color)
+        # 用 "⚙" 齿轮符号
+        self._tc.text(
+            "gear_icon",
+            "⚙",
+            self.settings_gear_rect.center_x, self.settings_gear_rect.center_y,
+            arcade.color.WHITE, size=24, anchor_x="center", anchor_y="center",
         )
 
         # 底部提示（联机按钮占用了底部空间，提示上移）
@@ -199,6 +211,7 @@ class StartView(arcade.View):
         self.market_hover = self.market_rect.point_in_rect((x, y))
         self.forge_hover = self.forge_rect.point_in_rect((x, y))
         self.net_hover = self.net_rect.point_in_rect((x, y))
+        self.settings_hover = self.settings_gear_rect.point_in_rect((x, y))
 
     def _start_game(self):
         """开始游戏：初始化玩家并进入角色选择页（单机流程入口）"""
@@ -278,3 +291,10 @@ class StartView(arcade.View):
         # 开始游戏按钮
         if self.btn_rect.point_in_rect((x, y)):
             self._start_game()
+            return
+
+        # 设置按钮：打开设置界面（from_game=False，显示"退出游戏"替代"放弃行动"）
+        if self.settings_gear_rect.point_in_rect((x, y)):
+            from views.settings_view import SettingsView
+            self.window.show_view(SettingsView(self.window_ref, from_game=False))
+            return
