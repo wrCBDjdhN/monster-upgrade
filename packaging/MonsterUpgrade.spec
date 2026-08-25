@@ -23,11 +23,16 @@ arcade_datas = [
     if dst.startswith("arcade/resources/system")
 ]
 
+# 收集游戏资源（音效等）
+assets_datas = [
+    (os.path.join(ROOT, "assets", "sounds", "splash.wav"), os.path.join("assets", "sounds")),
+]
+
 a = Analysis(
     [os.path.join(ROOT, "main.py")],
     pathex=[ROOT],
     binaries=[],
-    datas=arcade_datas,
+    datas=arcade_datas + assets_datas,
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

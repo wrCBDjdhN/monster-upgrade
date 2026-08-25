@@ -124,10 +124,19 @@ class SplashView(arcade.View):
         self._load_sound()
 
     def _load_sound(self):
-        """加载启动音效"""
+        """加载启动音效（兼容 PyInstaller 打包路径）"""
         try:
             import os
-            sound_path = os.path.join(os.path.dirname(__file__), "..", "assets", "sounds", "splash.wav")
+            import sys
+            
+            # PyInstaller 打包后，资源在 sys._MEIPASS 目录下
+            if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+                base_path = sys._MEIPASS
+            else:
+                # 开发模式：从当前文件向上一级找到 assets 目录
+                base_path = os.path.dirname(os.path.dirname(__file__))
+            
+            sound_path = os.path.join(base_path, "assets", "sounds", "splash.wav")
             if os.path.exists(sound_path):
                 self._sound = arcade.load_sound(sound_path)
                 arcade.play_sound(self._sound, volume=0.6)

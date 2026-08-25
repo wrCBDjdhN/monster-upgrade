@@ -2689,6 +2689,17 @@ class GameView(arcade.View):
         # 玩家移动
         self.controller.update(dt)
 
+        # 新手教程：检测玩家是否进入 BOSS 房间区域，设置 boss_taught = True
+        tut = getattr(gs, "tutorial", None)
+        if tut is not None and tut.active and tut.stage == 3 and not tut.boss_taught:
+            boss_spawn = self.map_data.get("boss_spawn")
+            if boss_spawn:
+                # 计算玩家与 BOSS 生成点的距离（使用 TILE_SIZE 作为判定半径）
+                dx = self.player.center_x - boss_spawn[0]
+                dy = self.player.center_y - boss_spawn[1]
+                if abs(dx) < TILE_SIZE * 3 and abs(dy) < TILE_SIZE * 3:
+                    tut.boss_taught = True
+
         # 环境物受击闪烁计时衰减（否则被攻击后会一直显示白圈）
         for h in self.harvestables:
             if h.alive:
