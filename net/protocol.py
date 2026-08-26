@@ -56,6 +56,10 @@ class MsgType(Enum):
     # ── 撤离 ──
     EVAC_REQUEST = "EVAC_REQUEST"      # 客户端→主机：撤离完成请求
     EVAC_RESULT = "EVAC_RESULT"        # 主机→各端：撤离结算清单（各端据此本地入库）
+    # ── 交互（宝箱/水井/火箭发射台）──
+    INTERACTION_REQUEST = "INTERACTION_REQUEST"  # 客户端→主机：交互请求（宝箱/水井/火箭台）
+    # ── 放弃行动 ──
+    PLAYER_ABANDON = "PLAYER_ABANDON"  # 客户端→主机：放弃行动通知（主机更新状态触发全员结束判定）
     # ── 运行期同步 ──
     MAP_CHANGE = "MAP_CHANGE"          # 主机→全部：运行期地图改动（宝箱/环境物/水井/火箭台）
     ACTION_TIME = "ACTION_TIME"        # 主机→全部：剩余行动时间周期广播（客户端 HUD 显示）
@@ -289,6 +293,21 @@ MESSAGE_SCHEMAS: dict[MsgType, str] = {
         "payload: {\n"
         "  'player_id': int,    撤离玩家 id\n"
         "  'run_carried': dict} 本次携带物清单（结构 = commit_run_to_warehouse 入参口径）\n"
+        "}"
+    ),
+    MsgType.INTERACTION_REQUEST: (
+        "客户端请求与环境物交互（宝箱/水井/火箭发射台），主机裁决后广播 MAP_CHANGE。\n"
+        "payload: {\n"
+        "  'player_id': int,     请求交互的玩家 id\n"
+        "  'interaction_type': str,  交互类型（'chest'/'well'/'rocket_pad'）\n"
+        "  'x': float, 'y': float}  请求交互时玩家世界坐标（主机判距防作弊）\n"
+        "}"
+    ),
+    MsgType.PLAYER_ABANDON: (
+        "客户端通知主机放弃行动（清装备回房），主机更新 _player_status 触发全员结束判定。\n"
+        "payload: {\n"
+        "  'player_id': int,    放弃行动的玩家 id\n"
+        "  'reason': str}       放弃原因（如 '放弃行动'）\n"
         "}"
     ),
     MsgType.MAP_CHANGE: (

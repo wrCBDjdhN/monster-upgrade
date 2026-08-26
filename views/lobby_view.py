@@ -8,8 +8,8 @@
 - 返回：安全停止 server/client，清理 GameState 联机字段，回 StartView。
 
 状态机（self.mode）：
-  menu       选择 建房/加入/返回 + 主题（host_wait 前）
-  host_wait  建房等待：显示房间号 / 玩家列表 / 开始游戏 / 返回
+  menu       选择 建房/加入/返回
+  host_wait  建房等待：显示房间号 / 地图主题选择 / 玩家列表 / 开始游戏 / 返回
   join       加入：IP 输入框（键盘编辑）+ 连接 / 返回
   client_wait 连接已建立：显示等待主机开始 / 取消（断线自动回 menu 并提示）
 
@@ -57,7 +57,8 @@ class LobbyView(arcade.View):
         # 主题按钮（建房模式选择）
         self.theme_rects = {}
         for i, (tid, (_, _)) in enumerate(self.THEMES.items()):
-            self.theme_rects[tid] = arcade.XYWH(cx - 160 + i * 160, WINDOW_HEIGHT // 2 - 120, 140, 40)
+            # 地图主题按钮：放在角色选择区下方、市场/仓库按钮上方（host_wait 模式）
+            self.theme_rects[tid] = arcade.XYWH(cx - 160 + i * 160, WINDOW_HEIGHT - 370, 140, 36)
         # hover 状态
         self.host_hover = False
         self.join_hover = False
@@ -69,6 +70,7 @@ class LobbyView(arcade.View):
         self.ready_hover = False
         self.warehouse_hover = False
         self.market_hover = False
+        self.theme_hover = ""  # host_wait 模式地图主题 hover 状态
         # 房间内角色选择（host_wait/client_wait 共用）：4 个角色按钮横排
         self.char_rects = {}
         self.char_hover = ""
@@ -508,7 +510,7 @@ class LobbyView(arcade.View):
             self._draw_client_wait(cx)
 
     def _draw_menu(self, cx):
-        """menu：建房 / 加入 / 主题选择 / 返回"""
+        """menu：建房 / 加入 / 返回"""
         # 建房按钮
         color = arcade.color.CORNFLOWER_BLUE if self.host_hover else arcade.color.STEEL_BLUE
         arcade.draw_rect_filled(self.host_rect, color)
@@ -521,18 +523,6 @@ class LobbyView(arcade.View):
         arcade.draw_rect_outline(self.join_rect, arcade.color.WHITE, border_width=2)
         self._tc.text("btn_join", "加 入", self.join_rect.center_x, self.join_rect.center_y,
                       arcade.color.WHITE, size=22, anchor_x="center", anchor_y="center")
-        # 主题选择（建房用）
-        self._tc.text("theme_title", "选择地图主题:", cx, WINDOW_HEIGHT // 2 - 90,
-                      arcade.color.LIGHT_GRAY, size=14, anchor_x="center")
-        for tid, (tname, tcolor) in self.THEMES.items():
-            rect = self.theme_rects[tid]
-            sel = tid == self.selected_theme
-            base = (tcolor[0] + 30, tcolor[1] + 30, tcolor[2] + 30) if sel else tcolor
-            arcade.draw_rect_filled(rect, base)
-            arcade.draw_rect_outline(rect, arcade.color.GOLD if sel else arcade.color.WHITE,
-                                     border_width=2)
-            self._tc.text(f"theme_{tid}", tname, rect.center_x, rect.center_y,
-                          arcade.color.WHITE, size=14, anchor_x="center", anchor_y="center")
         # 返回
         arcade.draw_rect_filled(self.back_rect, arcade.color.DARK_RED)
         self._tc.text("back", "返回", self.back_rect.center_x, self.back_rect.center_y,
@@ -543,7 +533,7 @@ class LobbyView(arcade.View):
                           arcade.color.ORANGE_RED, size=14, anchor_x="center", bold=True)
 
     def _draw_host_wait(self, cx):
-        """host_wait：房间信息 / 角色选择 / 玩家列表（含准备状态）/ 开始游戏 / 关闭房间 / 市场仓库"""
+        """host_wait：房间信息 / 地图主题选择 / 角色选择 / 玩家列表（含准备状态）/ 开始游戏 / 关闭房间 / 市场仓库"""
         gs = self.window.game_state
         # 房间信息
         self._tc.text("room_info", f"房间: {gs.net_room_id}  |  主题: {self.selected_theme}",
@@ -551,6 +541,25 @@ class LobbyView(arcade.View):
                       anchor_x="center")
         self._tc.text("room_status", self._status, cx, WINDOW_HEIGHT - 180,
                       arcade.color.CYAN, size=13, anchor_x="center")
+        # 地图主题选择（建房后主机可在此切换，开局前确认最终主题）
+        self._tc.text("theme_label", "选择地图:", cx, WINDOW_HEIGHT - 325,
+                      arcade.color.LIGHT_GRAY, size=13, anchor_x="center")
+        for tid, (tname, tcolor) in self.THEMES.items():
+            rect = self.theme_rects[tid]
+            sel = tid == self.selected_theme
+            hov = self.theme_hover == tid
+            # 选中/悬停时提亮底色
+            if sel:
+                base = (min(255, tcolor[0] + 30), min(255, tcolor[1] + 30), min(255, tcolor[2] + 30))
+            elif hov:
+                base = (min(255, tcolor[0] + 15), min(255, tcolor[1] + 15), min(255, tcolor[2] + 15))
+            else:
+                base = tcolor
+            arcade.draw_rect_filled(rect, base)
+            arcade.draw_rect_outline(rect, arcade.color.GOLD if sel else arcade.color.WHITE,
+                                     border_width=2 if sel else 1)
+            self._tc.text(f"theme_{tid}", tname, rect.center_x, rect.center_y,
+                          arcade.color.WHITE, size=14, anchor_x="center", anchor_y="center")
         # 角色选择区（开局前必选，主机本人在此选角）
         self._draw_char_select(cx)
         # 玩家列表（主机 + 已加入客户端，含准备状态）
@@ -739,6 +748,13 @@ class LobbyView(arcade.View):
                 if rect.point_in_rect((x, y)):
                     self.char_hover = cid
                     break
+        # host_wait 模式地图主题按钮 hover
+        self.theme_hover = ""
+        if self.mode == "host_wait":
+            for tid, rect in self.theme_rects.items():
+                if rect.point_in_rect((x, y)):
+                    self.theme_hover = tid
+                    break
 
     def _open_warehouse(self):
         """房间内打开仓库（联机保持连接，返回时回 LobbyView 复用连接）"""
@@ -792,11 +808,6 @@ class LobbyView(arcade.View):
                 self._enter_join()
             elif self.back_rect.point_in_rect((x, y)):
                 self._leave()
-            # 主题选择
-            for tid, rect in self.theme_rects.items():
-                if rect.point_in_rect((x, y)):
-                    self.selected_theme = tid
-                    break
         elif self.mode == "host_wait":
             if self.start_rect.point_in_rect((x, y)):
                 self._host_start_game()
@@ -810,6 +821,14 @@ class LobbyView(arcade.View):
             for cid, rect in self.char_rects.items():
                 if rect.point_in_rect((x, y)):
                     self._select_character(cid)
+                    break
+            # host_wait 模式：地图主题切换（更新本地选择 + 服务器房间主题）
+            for tid, rect in self.theme_rects.items():
+                if rect.point_in_rect((x, y)):
+                    self.selected_theme = tid
+                    # 同步更新服务器房间主题，保证 _host_start_game 使用最新选择
+                    if self.server is not None:
+                        self.server.room.theme = tid
                     break
         elif self.mode == "join":
             if self.ip_rect.point_in_rect((x, y)):

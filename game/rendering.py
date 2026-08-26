@@ -410,6 +410,7 @@ def render_game(view):
         g_hp = getattr(ghost, "hp", 0)
         g_max = max(1, int(getattr(ghost, "max_hp", 0) or 1))
         g_ratio = max(0.0, min(1.0, g_hp / g_max))
+        bar_w = 40
         gbx = ghost.center_x - bar_w // 2
         gby = ghost.center_y + PLAYER_SIZE + 10
         if pb is not None:
@@ -679,6 +680,19 @@ def render_game(view):
     if view._message_timer > 0:
         view._hud_text("msg", view._message, WINDOW_WIDTH // 2, 40,
                        arcade.color.YELLOW, 13, anchor_x="center", bold=True)
+
+    # 退出观战按钮（观战模式下右下角显示，点击返回大厅等待下一局）
+    if getattr(view, "_spectating", False):
+        exit_rect = getattr(view, "_exit_spectate_rect", None)
+        if exit_rect is not None:
+            is_hover = getattr(view, "_exit_spectate_hover", False)
+            bg_color = (80, 80, 80, 220) if is_hover else (50, 50, 50, 200)
+            arcade.draw_rect_filled(exit_rect, bg_color)
+            arcade.draw_rect_outline(exit_rect, arcade.color.WHITE)
+            view._hud_text("exit_spectate", "退出观战",
+                           exit_rect.center_x, exit_rect.center_y,
+                           arcade.color.WHITE, 14,
+                           anchor_x="center", anchor_y="center", bold=True)
 
     # 火箭发射台交互提示（靠近且处于可交互状态时显示）
     for pad in getattr(view, 'rocket_pads', []):

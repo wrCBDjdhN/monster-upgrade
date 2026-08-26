@@ -194,12 +194,24 @@ def handle_key_release(view, key, modifiers):
 def handle_mouse_motion(view, x, y, dx, dy):
     """处理鼠标移动事件"""
     view._mouse_x, view._mouse_y = x, y
+    # 退出观战按钮悬停检测（观战模式下右下角按钮高亮）
+    if getattr(view, "_spectating", False):
+        exit_rect = getattr(view, "_exit_spectate_rect", None)
+        if exit_rect is not None:
+            view._exit_spectate_hover = exit_rect.point_in_rect((x, y))
 
 
 def handle_mouse_press(view, x, y, button, modifiers):
     """处理鼠标按下事件"""
-    # 观战模式：禁操作（不攻击、不交互）
+    # 退出观战按钮点击（观战模式下优先检测，返回大厅等待下一局）
     if getattr(view, "_spectating", False):
+        exit_rect = getattr(view, "_exit_spectate_rect", None)
+        if exit_rect is not None and exit_rect.point_in_rect((x, y)):
+            gs = view.window.game_state
+            if gs.net_mode == "host":
+                view._broadcast_room_ended("all_finished")
+            else:
+                view._back_to_lobby("退出观战，等待下一局")
         return
     if button == arcade.MOUSE_BUTTON_LEFT:
         view._mouse_x, view._mouse_y = x, y
@@ -243,6 +255,8 @@ def handle_mouse_press(view, x, y, button, modifiers):
                 "y": view.player.center_y,
                 "damage": getattr(gs, 'weapon_damage', 0),  # 实际伤害（升级武器以客户端为准，主机据此裁决，修复联机假伤害）
                 "debuffs": list(debuffs),  # (效果ID, 效果等级) 元组列表
+                "crit_chance": getattr(view.player, "crit_chance", 0.0),  # 装备暴击率（幽灵无此属性，需客户端上报）
+                "equip_lifesteal": getattr(view.player, "equip_lifesteal", 0.0),  # 装备吸血（幽灵无此属性，需客户端上报）
                 "timestamp": time.time() * 1000.0,  # 时间戳（毫秒），供主机去重/延迟测量
             }))
             # 本地表现：攻击闪白 + 命中反馈由主机 DAMAGE_RESULT 驱动（不本地判定）

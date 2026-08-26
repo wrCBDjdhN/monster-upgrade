@@ -172,6 +172,9 @@ class GameView(arcade.View):
         # 客户端各端状态由 _player_status 跟踪，全员结束后广播 ROOM_ENDED(all_finished) 回房等待
         self._spectating = False
         self._spectate_target_id: int | None = None   # 观战跟随目标玩家 id（None=跟随自己玩家）
+        # 退出观战按钮（观战模式下屏幕右下角显示，点击返回大厅等待下一局）
+        self._exit_spectate_rect = arcade.XYWH(WINDOW_WIDTH - 120, 80, 180, 40)
+        self._exit_spectate_hover = False
         # 各玩家本局结束状态：alive/evac/dead/left（主机观战期间全员结束判定用，host=0 固定）
         self._player_status: dict[int, str] = {}
         # 联机客户端：撤离请求已发送标记（读条完成只发一次 EVAC_REQUEST，B12 单次闸门）
@@ -778,6 +781,11 @@ class GameView(arcade.View):
             # 兼容 (id, lvl) 元组/列表两种载荷形态（json 序列化后元组变列表）
             if isinstance(d, (list, tuple)) and len(d) >= 2:
                 debuffs.append((d[0], int(d[1])))
+        # 客户端上报的装备暴击率和吸血（幽灵无此属性，需从客户端同步）：
+        # 修复「客户端暴击/装备吸血不生效」——幽灵是最小实体，不继承装备 passive 效果
+        if attacker is not self.player:
+            attacker.crit_chance = float(payload.get("crit_chance", 0.0))
+            attacker.equip_lifesteal = float(payload.get("equip_lifesteal", 0.0))
         # 存活怪物列表（主机权威怪物，客户端攻击由主机裁决命中）
         monsters = [m for m in self.monsters if hasattr(m, "alive") and m.alive]
         if kind == "melee":
@@ -1782,21 +1790,34 @@ class GameView(arcade.View):
                 break
 
     def _apply_player_death(self, payload: dict) -> None:
-        """客户端收到主机 PLAYER_DEATH（本人死亡）：清装备 + 回房等待
+        """客户端收到主机 PLAYER_DEATH（本人死亡）：清装备 + 进入观战模式
 
         - 其余玩家/怪物不受影响继续游戏（死亡 = 单人事件，B9）；
-        - 重构后：客户端死亡不再断开连接离开房间，而是清空装备后回 LobbyView
-          client_wait 等待主机再次开局（房间保留，连接保留，可再次参与下一局）。
+        - 与放弃行动同路径：进入观战模式（连接保留、等待全员结束回房），
+          而非直接回 LobbyView（避免 SettingsView 阻挡视图切换）。
         """
+        # 已在观战模式（放弃行动/已死亡）：不再重复处理 PLAYER_DEATH，
+        # 避免"你已阵亡"红字与"你已放弃行动"红字同时出现
+        if self._spectating:
+            return
         gs = self.window.game_state
         player_id = payload.get("player_id")
         my_id = getattr(gs, "net_player_id", None)
         if my_id is not None and player_id != my_id:
             return  # 非本人死亡事件：忽略（幽灵同步由快照处理）
-        # 死亡丢失装备（与单机死亡同口径），随后回房等待（连接保留，不停止 net_client）
+        # 死亡丢失装备（与单机死亡同口径），进入观战模式
         gs.net_wait_reason = "dead"
         self._clear_run_equipment(gs)
-        self._back_to_lobby("你已阵亡，装备已丢失，等待下一局")
+        self._spectating = True
+        self._left_mouse_held = False
+        self._chest_key_pressed = False
+        self._attack_debuffs = []
+        self._attack_this_frame = False
+        self.controller.follow_player = False
+        self._spectate_target_id = None
+        floating_texts.add(self.player.center_x, self.player.center_y + 60,
+                           "你已阵亡，进入观战模式（V 键切换视角）",
+                           arcade.color.RED, life=3.0, font_size=16)
 
     def _on_monster_death(self, monster):
         """怪物死亡回调 - 委托给 entity_callbacks"""
@@ -1865,6 +1886,167 @@ class GameView(arcade.View):
         """火箭发射台交互：委托给 entity_callbacks"""
         from game.entity_callbacks import handle_rocket_pad_interaction
         handle_rocket_pad_interaction(self)
+
+    def _send_client_interaction_request(self, gs) -> None:
+        """客户端发送交互请求给主机（宝箱/水井/火箭发射台）
+
+        按E时检测附近可交互物，发送 INTERACTION_REQUEST 给主机裁决。
+        主机处理后通过 MAP_CHANGE 广播结果，客户端镜像状态。
+        """
+        if not self._chest_key_pressed or self._spectating:
+            return
+        if gs.net_client is None:
+            print("[Client] net_client is None, skip interaction")
+            return
+
+        player_x = self.player.center_x
+        player_y = self.player.center_y
+        interaction_type = None
+
+        print(f"[Client] 检测交互: chests={len(self.chests)}, well={self.map_data.get('water_well')}, pads={len(self.rocket_pads)}")
+
+        # 检测宝箱
+        for i, chest in enumerate(self.chests):
+            if chest.opened:
+                continue
+            dist = math.hypot(chest.center_x - player_x, chest.center_y - player_y)
+            print(f"[Client] 宝箱 {i}: pos=({chest.center_x},{chest.center_y}), opened={chest.opened}, dist={dist:.1f}")
+            if dist < 40:
+                interaction_type = "chest"
+                break
+
+        # 检测水井
+        if interaction_type is None:
+            well = self.map_data.get("water_well")
+            if well:
+                dist = math.hypot(well[0] - player_x, well[1] - player_y)
+                print(f"[Client] 水井: pos=({well[0]},{well[1]}), dist={dist:.1f}")
+                if dist < 40:
+                    interaction_type = "well"
+
+        # 检测火箭发射台
+        if interaction_type is None:
+            for i, pad in enumerate(self.rocket_pads):
+                dist = math.hypot(pad.center_x - player_x, pad.center_y - player_y)
+                print(f"[Client] 火箭台 {i}: pos=({pad.center_x},{pad.center_y}), state={pad.state}, dist={dist:.1f}")
+                if dist < 60 and pad.state in ("idle", "boss_defeated"):
+                    interaction_type = "rocket_pad"
+                    break
+
+        print(f"[Client] 交互类型: {interaction_type}")
+
+        # 发送交互请求
+        if interaction_type:
+            gs.net_client.send((MsgType.INTERACTION_REQUEST, {
+                "player_id": getattr(gs, "net_player_id", 0),
+                "interaction_type": interaction_type,
+                "x": player_x,
+                "y": player_y,
+            }))
+            self._chest_key_pressed = False  # 消费按键
+            print(f"[Client] 发送交互请求: {interaction_type}")
+
+    def _handle_interaction_request(self, sender_id: int, payload: dict) -> None:
+        """主机处理客户端交互请求：验证距离 → 执行交互 → 广播结果
+
+        安全校验：验证请求者位置与交互物距离，防止作弊。
+        """
+        if self.window.game_state.net_mode != "host":
+            return
+
+        player_id = payload.get("player_id", sender_id)
+        interaction_type = payload.get("interaction_type", "")
+        request_x = float(payload.get("x", 0))
+        request_y = float(payload.get("y", 0))
+
+        print(f"[Host] 收到交互请求: player={player_id}, type={interaction_type}, pos=({request_x},{request_y})")
+
+        # 获取请求者幽灵（用于距离校验）
+        ghost = self.remote_players.get(player_id)
+        if ghost is None:
+            print(f"[Host] 幽灵不存在: player={player_id}")
+            return  # 幽灵不存在，忽略
+
+        # 用客户端上报的位置校验距离（与 ATTACK_EVENT 同口径）
+        ghost.center_x = request_x
+        ghost.center_y = request_y
+
+        if interaction_type == "chest":
+            # 找到最近的未开启宝箱
+            for i, chest in enumerate(self.chests):
+                if chest.opened:
+                    continue
+                dist = math.hypot(chest.center_x - request_x, chest.center_y - request_y)
+                if dist < 40:
+                    # 执行开箱
+                    from game.entity_callbacks import spawn_chest_loot, _award_exp
+                    from config import EXP_CHEST
+                    loot = chest.open_chest()
+                    spawn_chest_loot(self, chest, loot)
+                    _award_exp(self, EXP_CHEST)
+                    print(f"[GameView] 客户端 {player_id} 开启宝箱 {i}")
+                    break
+
+        elif interaction_type == "well":
+            well = self.map_data.get("water_well")
+            if well:
+                dist = math.hypot(well[0] - request_x, well[1] - request_y)
+                if dist < 40:
+                    # 执行水井交互
+                    from game.entity_callbacks import handle_well_interaction
+                    # 临时设置 _chest_key_pressed 和 player 为幽灵
+                    old_player = self.player
+                    old_key = self._chest_key_pressed
+                    self.player = ghost
+                    self._chest_key_pressed = True
+                    handle_well_interaction(self)
+                    self.player = old_player
+                    self._chest_key_pressed = old_key
+                    print(f"[GameView] 客户端 {player_id} 使用水井")
+
+        elif interaction_type == "rocket_pad":
+            for i, pad in enumerate(self.rocket_pads):
+                dist = math.hypot(pad.center_x - request_x, pad.center_y - request_y)
+                if dist < 60:
+                    if pad.state == "idle":
+                        # 激活火箭台
+                        from game.entity_callbacks import handle_rocket_pad_interaction
+                        old_player = self.player
+                        old_key = self._chest_key_pressed
+                        self.player = ghost
+                        self._chest_key_pressed = True
+                        handle_rocket_pad_interaction(self)
+                        self.player = old_player
+                        self._chest_key_pressed = old_key
+                        print(f"[GameView] 客户端 {player_id} 激活火箭台 {i}")
+                    elif pad.state == "boss_defeated":
+                        # 标记可选择状态（7/8键选择）
+                        self._rocket_pad_menu = pad
+                        print(f"[GameView] 客户端 {player_id} 打开火箭台菜单 {i}")
+                    break
+
+    def _handle_player_abandon(self, sender_id: int, payload: dict) -> None:
+        """主机处理客户端放弃行动通知：更新 _player_status → 触发全员结束判定
+
+        客户端调用 _fail_run 后发送此消息，主机更新状态后 _check_all_finished
+        可正确判定全员结束，广播 ROOM_ENDED 回房。
+        """
+        gs = self.window.game_state
+        if gs.net_mode != "host" or gs.net_server is None:
+            return
+
+        player_id = payload.get("player_id", sender_id)
+        reason = payload.get("reason", "放弃行动")
+
+        # 更新玩家状态为 dead（与死亡同待遇，触发全员结束判定）
+        if self._player_status.get(player_id) not in ("evac", "dead", "left"):
+            self._player_status[player_id] = "dead"
+            print(f"[GameView] 客户端 {player_id} 放弃行动: {reason}，已标记 dead")
+
+        # 标记幽灵为不存活（设置 hp=0，alive 是只读 property：hp > 0）
+        ghost = self.remote_players.get(player_id)
+        if ghost is not None:
+            ghost.hp = 0
 
     def _scatter_drops(self, drops, center_x, center_y, radius=30):
         """分散掉落物 - 委托给 entity_callbacks（带障碍物避让，防掉落物卡墙）"""
@@ -2551,6 +2733,12 @@ class GameView(arcade.View):
                     # 主机：处理撤离请求（B12）：以主机权威 _players_run_carried 汇总该玩家
                     # 携带物清单并广播 EVAC_RESULT（各端据此调用 commit_run_to_warehouse 本地入库）
                     self._handle_evac_request(sender_id, inbound.get("payload") or {})
+                elif inbound.get("msg_type") == MsgType.INTERACTION_REQUEST.name:
+                    # 客户端交互请求：主机验证距离 → 执行交互 → 通过 MAP_CHANGE 广播结果
+                    self._handle_interaction_request(sender_id, inbound.get("payload") or {})
+                elif inbound.get("msg_type") == MsgType.PLAYER_ABANDON.name:
+                    # 客户端放弃行动通知：更新 _player_status → 触发全员结束判定
+                    self._handle_player_abandon(sender_id, inbound.get("payload") or {})
                 elif inbound.get("msg_type") == MsgType.PLAYER_SNAPSHOT.name:
                     # 客户端 20Hz 上报本人实体：主机据此更新对应幽灵的位置/朝向/存活（Todo 23）
                     self._apply_client_snapshot(sender_id, inbound.get("payload") or {})
@@ -2602,6 +2790,10 @@ class GameView(arcade.View):
                     gs.action_time_remaining = 0
                     self._fail_run("行动超时！未能在规定时间内撤离")
                     return
+
+        # player 尚未初始化时跳过（setup 未完成或被提前调用 on_update）
+        if self.player is None:
+            return
 
         if not self.player.alive and not self._spectating:
             self._fail_run("你已阵亡！")
@@ -2990,6 +3182,12 @@ class GameView(arcade.View):
                         self.window.show_view(EvacResultView(self.window_ref, success=False))
                         return
 
+        # 客户端交互请求：按E时检测附近可交互物，发送 INTERACTION_REQUEST 给主机裁决
+        # （放在 if gs.net_mode != "client" 块外部，确保客户端能执行）
+        if gs.net_mode == "client" and gs.net_client is not None:
+            if getattr(self, '_chest_key_pressed', False) and not self._spectating:
+                self._send_client_interaction_request(gs)
+
         # 掉落物生命周期（主机权威：掉落生成/过期由主机管理并随快照同步，客户端不本地推进）
         # TODO(联机): 主机权威逻辑，客户端跳过
         if gs.net_mode != "client":
@@ -3268,7 +3466,7 @@ class GameView(arcade.View):
 
         单机：清装备后展示失败结算页；
         联机主机：清装备后进入观战模式（房间保留、后台模拟，等待全员结束回房）；
-        联机客户端：清装备后回房等待（连接保留，等待主机再次开局）。
+        联机客户端：清装备后进入观战模式（与撤离观战同路径，连接保留、等待全员结束回房）。
         """
         gs = self.window.game_state
         if gs.net_mode == "host":
@@ -3279,10 +3477,33 @@ class GameView(arcade.View):
             return
         if gs.net_mode == "client":
             # 联机客户端死亡/超时（理论经 _apply_player_death 处理，此处兜底）：
-            # 清装备 → 回房等待（连接保留，等待主机再次开局）
+            # 清装备 → 通知主机放弃行动 → 进入观战模式（与撤离观战同路径，连接保留、等待全员结束回房）
             self._clear_run_equipment(gs)
+            # 通知主机：更新 _player_status → 触发全员结束判定（修复观战者卡住）
+            if gs.net_client is not None:
+                gs.net_client.send((MsgType.PLAYER_ABANDON, {
+                    "player_id": getattr(gs, "net_player_id", 0),
+                    "reason": reason,
+                }))
+            # 客户端放弃 → 进入观战模式（与撤离观战同路径）：
+            # - _spectating=True：渲染隐藏本体/武器/读条，input_handler 屏蔽操作，相机跟随观战目标；
+            # - _spectate_target_id=None：由 _spectate_camera_target 自动回退第一个存活幽灵；
+            # - 连接保留、poll 继续运行，主机 ROOM_ENDED(all_finished) 广播时经 _apply_room_ended 回房。
             gs.net_wait_reason = "dead"
-            self._back_to_lobby(f"{reason}，等待下一局")
+            self._spectating = True
+            # 观战期 input_handler 早退（handle_key_release/handle_mouse_release 被观战守卫拦截）
+            # 导致 _left_mouse_held/_chest_key_pressed 无法复位，这里手动清零：
+            # 双保险防止幽灵持续攻击/拾取（配合 on_update 的观战守卫）
+            self._left_mouse_held = False
+            self._chest_key_pressed = False
+            # 观战模式：相机改由观战段控制跟随幽灵，禁止 controller.update() 每帧拉回
+            # 已撤离/阵亡的静止玩家（否则观战视角卡死在撤离点）
+            self.controller.follow_player = False
+            self._spectate_target_id = None
+            # 观战提示
+            floating_texts.add(self.player.center_x, self.player.center_y + 60,
+                               "你已放弃行动，进入观战模式（V 键切换视角）",
+                               arcade.color.RED, life=3.0, font_size=16)
             return
         # 单机：清装备 + 失败结算页
         self._clear_run_equipment(gs)

@@ -112,6 +112,8 @@ class SettingsView(arcade.View):
         self._row_rects: dict[str, arcade.XYWH] = {}
         self._hover_row: str | None = None
         self._hover_btn: str | None = None   # "mute"/"reset"/"close"/"abandon"
+        # 放弃行动按钮矩形（_layout 会更新位置，此处防首次鼠标事件崩溃）
+        self._abandon_rect = arcade.XYWH(0, 0, 150, 40)
 
     # ── 布局计算 ──
     def _layout(self):
@@ -253,7 +255,7 @@ class SettingsView(arcade.View):
             self._hover_btn = "reset"
         elif self._close_rect.point_in_rect((x, y)):
             self._hover_btn = "close"
-        elif (self.game_view is not None or not self._from_game) and self._abandon_rect.point_in_rect((x, y)):
+        elif hasattr(self, '_abandon_rect') and (self.game_view is not None or not self._from_game) and self._abandon_rect.point_in_rect((x, y)):
             self._hover_btn = "abandon"
         else:
             for action, rect in self._row_rects.items():
@@ -283,8 +285,10 @@ class SettingsView(arcade.View):
         if self._close_rect.point_in_rect((x, y)):
             self._close()
             return
-        # 放弃行动（游戏内）：视为撤离失败，清空装备后回主页面
+        # 放弃行动（游戏内）：关闭设置页 → 清空装备 → 进入观战模式
         if self.game_view is not None and self._abandon_rect.point_in_rect((x, y)):
+            # 先关闭设置页（恢复 GameView 为当前视图），再调 _fail_run 进入观战
+            self.window.show_view(self.game_view)
             self.game_view._fail_run("放弃行动")
             return
         # 退出游戏（主页面设置）：直接关闭窗口
