@@ -34,7 +34,21 @@ class BackpackView(ScrollView):
         self.game_view = game_view  # 保存当前 GameView 引用，返回时不用重建
         self.discard_buttons = []  # 两种条目，见模块 docstring
         self.back_rect = arcade.XYWH(WINDOW_WIDTH // 2, 40, 120, 36)
+        # 丢弃对话框状态
+        self._discard_dialog_active = False  # 对话框是否显示
+        self._discard_dialog_item = None  # 待丢弃物品信息 (item_type, item_id, level, max_qty)
+        self._discard_dialog_qty = 1  # 输入的丢弃数量
+        self._discard_dialog_input = "1"  # 输入缓冲区（字符串）
+        self._discard_dialog_btn_1 = None  # "丢弃1个" 按钮
+        self._discard_dialog_btn_all = None  # "全部丢弃" 按钮
+        self._discard_dialog_btn_confirm = None  # "确认" 按钮
+        self._discard_dialog_btn_cancel = None  # "取消" 按钮
         self._build_content()
+
+    # Bug 7 fix: 主机开背包时转发 on_update，防止客户端因快照停止而冻结
+    def on_update(self, delta_time):
+        if self.game_view is not None:
+            self.game_view.on_update(delta_time)
 
     def _build_content(self):
         """构建内容并计算高度（与 on_draw 各区域 y 偏移严格一致）"""
@@ -101,6 +115,11 @@ class BackpackView(ScrollView):
 
     def on_mouse_press(self, x, y, button, modifiers):
         if button == arcade.MOUSE_BUTTON_LEFT:
+            # 丢弃对话框激活时，优先处理对话框按钮
+            if self._discard_dialog_active:
+                self._handle_dialog_click(x, y)
+                return
+
             # 检查丢弃按钮（on_draw 中已将 scroll_offset 算入坐标，直接检测即可）
             for btn in self.discard_buttons:
                 if btn[0].point_in_rect((x, y)):
@@ -109,7 +128,7 @@ class BackpackView(ScrollView):
                         self._discard_equipped(btn[2])
                     else:
                         # 背包物品丢弃：btn = (rect, "carry", item_type, item_id, level)
-                        self._discard_item(btn[2], btn[3], btn[4])
+                        self._show_discard_dialog(btn[2], btn[3], btn[4])
                     return
 
             # 检查返回按钮（固定在底部，不受滚动影响）
@@ -120,6 +139,169 @@ class BackpackView(ScrollView):
                     from views.game_view import GameView
                     self.window.show_view(GameView(self.window_ref))
                 return
+
+    def _show_discard_dialog(self, item_type: str, item_id: str, level: int):
+        """显示丢弃对话框，获取该物品的当前数量"""
+        gs = self.window_ref.game_state
+        carried = getattr(gs, 'run_carried', {})
+        slot = carried.get(item_type, {})
+        key = (item_id, level) if item_type in ("weapon", "helmet", "armor", "backpack") else item_id
+        max_qty = slot.get(key, 0) if slot else 0
+        if max_qty <= 0:
+            return
+        self._discard_dialog_active = True
+        self._discard_dialog_item = (item_type, item_id, level, max_qty)
+        self._discard_dialog_qty = 1
+        self._discard_dialog_input = "1"
+        # 定义对话框按钮位置
+        cx, cy = WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2
+        self._discard_dialog_btn_1 = arcade.XYWH(cx - 120, cy - 40, 100, 32)
+        self._discard_dialog_btn_all = arcade.XYWH(cx, cy - 40, 100, 32)
+        self._discard_dialog_btn_confirm = arcade.XYWH(cx + 60, cy - 90, 80, 32)
+        self._discard_dialog_btn_cancel = arcade.XYWH(cx - 60, cy - 90, 80, 32)
+
+    def _handle_dialog_click(self, x, y):
+        """处理丢弃对话框中的按钮点击"""
+        if self._discard_dialog_btn_1 and self._discard_dialog_btn_1.point_in_rect((x, y)):
+            # 丢弃1个
+            self._discard_dialog_qty = 1
+            self._execute_discard()
+            return
+        if self._discard_dialog_btn_all and self._discard_dialog_btn_all.point_in_rect((x, y)):
+            # 全部丢弃
+            self._discard_dialog_qty = self._discard_dialog_item[3]
+            self._execute_discard()
+            return
+        if self._discard_dialog_btn_confirm and self._discard_dialog_btn_confirm.point_in_rect((x, y)):
+            # 确认输入数量
+            try:
+                qty = max(1, min(int(self._discard_dialog_input), self._discard_dialog_item[3]))
+            except ValueError:
+                qty = 1
+            self._discard_dialog_qty = qty
+            self._execute_discard()
+            return
+        if self._discard_dialog_btn_cancel and self._discard_dialog_btn_cancel.point_in_rect((x, y)):
+            # 取消
+            self._discard_dialog_active = False
+            self._discard_dialog_item = None
+            return
+
+    def _execute_discard(self):
+        """执行丢弃操作并关闭对话框"""
+        if not self._discard_dialog_item:
+            return
+        item_type, item_id, level, _ = self._discard_dialog_item
+        qty = self._discard_dialog_qty
+        # 关闭对话框
+        self._discard_dialog_active = False
+        self._discard_dialog_item = None
+        # 执行丢弃
+        self._discard_item(item_type, item_id, level, qty=qty)
+
+    def on_key_press(self, key, modifiers):
+        """处理键盘输入（丢弃对话框数字输入）"""
+        if not self._discard_dialog_active:
+            return
+        max_qty = self._discard_dialog_item[3] if self._discard_dialog_item else 1
+        if key == arcade.key.BACKSPACE:
+            self._discard_dialog_input = self._discard_dialog_input[:-1]
+            if not self._discard_dialog_input:
+                self._discard_dialog_input = "1"
+        elif key == arcade.key.RETURN or key == arcade.key.NUM_ENTER:
+            # 回车确认
+            try:
+                qty = max(1, min(int(self._discard_dialog_input), max_qty))
+            except ValueError:
+                qty = 1
+            self._discard_dialog_qty = qty
+            self._execute_discard()
+        elif key == arcade.key.ESCAPE:
+            # ESC 取消
+            self._discard_dialog_active = False
+            self._discard_dialog_item = None
+        elif arcade.key.NUM_0 <= key <= arcade.key.NUM_9 or arcade.key.KEY_0 <= key <= arcade.key.KEY_9:
+            # 数字键输入
+            if key >= arcade.key.NUM_0 and key <= arcade.key.NUM_9:
+                digit = str(key - arcade.key.NUM_0)
+            else:
+                digit = str(key - arcade.key.KEY_0)
+            if self._discard_dialog_input == "1" and len(self._discard_dialog_input) == 1:
+                self._discard_dialog_input = digit
+            else:
+                if len(self._discard_dialog_input) < 4:
+                    self._discard_dialog_input += digit
+
+    def _draw_discard_dialog(self):
+        """绘制丢弃对话框（覆盖层，独立坐标系不受滚动影响）"""
+        # 半透明遮罩
+        arcade.draw_rect_filled(
+            arcade.XYWH(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2, WINDOW_WIDTH, WINDOW_HEIGHT),
+            (0, 0, 0, 150)
+        )
+        # 对话框背景
+        cx, cy = WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2
+        dialog_w, dialog_h = 320, 200
+        dialog_rect = arcade.XYWH(cx, cy, dialog_w, dialog_h)
+        arcade.draw_rect_filled(dialog_rect, (30, 35, 50))
+        arcade.draw_rect_outline(dialog_rect, arcade.color.WHITE, 2)
+
+        item_type, item_id, level, max_qty = self._discard_dialog_item
+        # 获取物品名称用于显示
+        if item_type == "resource":
+            from entities.resource_defs import RESOURCES
+            name = RESOURCES.get(item_id, {}).get("name", item_id)
+        elif item_type in ("weapon",):
+            from entities.weapon_defs import ALL_WEAPONS
+            name = ALL_WEAPONS.get(item_id, {}).get("name", item_id)
+        elif item_type in ("helmet", "armor", "backpack"):
+            from entities.equipment_defs import HELMETS, ARMORS, BACKPACKS
+            pool = {"helmet": HELMETS, "armor": ARMORS, "backpack": BACKPACKS}
+            name = pool.get(item_type, {}).get(item_id, {}).get("name", item_id)
+        else:
+            name = item_id
+
+        self._tc.text("dlg_title", f"丢弃: {name}", cx, cy + 65,
+                      arcade.color.WHITE, 16, anchor_x="center")
+        self._tc.text("dlg_max", f"当前数量: {max_qty}", cx, cy + 40,
+                      arcade.color.LIGHT_GRAY, 13, anchor_x="center")
+
+        # "丢弃1个" 按钮
+        if self._discard_dialog_btn_1:
+            arcade.draw_rect_filled(self._discard_dialog_btn_1, (80, 50, 50))
+            self._tc.text("dlg_btn_1", "丢弃1个", self._discard_dialog_btn_1.center_x,
+                          self._discard_dialog_btn_1.center_y, arcade.color.WHITE, 12,
+                          anchor_x="center", anchor_y="center")
+
+        # "全部丢弃" 按钮
+        if self._discard_dialog_btn_all:
+            arcade.draw_rect_filled(self._discard_dialog_btn_all, (120, 40, 40))
+            self._tc.text("dlg_btn_all", f"全部({max_qty})", self._discard_dialog_btn_all.center_x,
+                          self._discard_dialog_btn_all.center_y, arcade.color.WHITE, 12,
+                          anchor_x="center", anchor_y="center")
+
+        # 数量输入框
+        self._tc.text("dlg_input_label", "自定义数量:", cx, cy - 10,
+                      arcade.color.LIGHT_GRAY, 12, anchor_x="center")
+        input_rect = arcade.XYWH(cx, cy - 35, 80, 24)
+        arcade.draw_rect_filled(input_rect, (50, 50, 60))
+        arcade.draw_rect_outline(input_rect, arcade.color.WHITE, 1)
+        self._tc.text("dlg_input_val", self._discard_dialog_input, cx, cy - 35,
+                      arcade.color.YELLOW, 14, anchor_x="center", anchor_y="center")
+
+        # "确认" 按钮
+        if self._discard_dialog_btn_confirm:
+            arcade.draw_rect_filled(self._discard_dialog_btn_confirm, (50, 100, 50))
+            self._tc.text("dlg_confirm", "确认", self._discard_dialog_btn_confirm.center_x,
+                          self._discard_dialog_btn_confirm.center_y, arcade.color.WHITE, 12,
+                          anchor_x="center", anchor_y="center")
+
+        # "取消" 按钮
+        if self._discard_dialog_btn_cancel:
+            arcade.draw_rect_filled(self._discard_dialog_btn_cancel, (80, 80, 80))
+            self._tc.text("dlg_cancel", "取消", self._discard_dialog_btn_cancel.center_x,
+                          self._discard_dialog_btn_cancel.center_y, arcade.color.WHITE, 12,
+                          anchor_x="center", anchor_y="center")
 
     def _discard_equipped(self, slot_type: str):
         """丢弃当前装备的物品：清理 GameState 字段 + 删除数据库记录 + 更新游戏属性 + 生成地面掉落物
@@ -227,12 +409,16 @@ class BackpackView(ScrollView):
         if not self.game_view or not hasattr(self.game_view, 'player') or not self.game_view.player:
             return
         import random as _rand
+        from config import MAP_WIDTH, MAP_HEIGHT
         from game.loot import DropItem
         player = self.game_view.player
         angle = _rand.uniform(0, 6.2832)  # 2π
         dist = _rand.uniform(50, 90)
         drop_x = player.center_x + dist * math.cos(angle)
         drop_y = player.center_y + dist * math.sin(angle)
+        # 修复：clamp 到地图边界内，防止掉落物生成到地图外无法拾取
+        drop_x = max(0, min(MAP_WIDTH, drop_x))
+        drop_y = max(0, min(MAP_HEIGHT, drop_y))
         drop = DropItem(drop_x, drop_y, item_type, item_id, 1, level=level)
         self._place_drop_near_player(drop)
         self.game_view.drops.append(drop)
@@ -248,6 +434,7 @@ class BackpackView(ScrollView):
         if not self.game_view or not hasattr(self.game_view, 'player') or not self.game_view.player:
             return False
         import random as _rand
+        from config import MAP_WIDTH, MAP_HEIGHT
         from game.entity_callbacks import _drop_collides, _place_drop_avoiding
         player = self.game_view.player
         obstacles = getattr(self.game_view, 'obstacle_list', None)
@@ -255,6 +442,9 @@ class BackpackView(ScrollView):
             angle = _rand.uniform(0, 6.2832)  # 2π
             dist = _rand.uniform(50, 120)
             _place_drop_avoiding(drop, player.center_x, player.center_y, angle, dist, obstacles)
+            # 修复：clamp 到地图边界内，防止避让后坐标越界
+            drop.center_x = max(0, min(MAP_WIDTH, drop.center_x))
+            drop.center_y = max(0, min(MAP_HEIGHT, drop.center_y))
             if not _drop_collides(drop, obstacles):
                 return True
         # 全部尝试仍碰撞：回退玩家脚下（玩家所在位置必定可通行，物品不会卡墙）
@@ -262,8 +452,8 @@ class BackpackView(ScrollView):
         drop.center_y = player.center_y
         return True
 
-    def _discard_item(self, item_type: str, item_id: str, level: int = 1):
-        """丢弃指定物品：从 run_carried 移除，并在玩家周围生成地面掉落物
+    def _discard_item(self, item_type: str, item_id: str, level: int = 1, qty: int = 1):
+        """丢弃指定数量的物品：从 run_carried 移除，并在玩家周围生成地面掉落物
 
         特殊处理：丢弃背包时同时丢弃所有物品（因为没有背包就无法携带物品）
         """
@@ -272,12 +462,14 @@ class BackpackView(ScrollView):
         if item_type == "gold":
             return  # 金币不可丢弃
 
-        # 本局药水槽（run_potions）丢弃：减 1，生成本局药水掉落物（拾取后重回药水槽）
+        # 本局药水槽（run_potions）丢弃：减 qty，生成本局药水掉落物（拾取后重回药水槽）
         if item_type == "run_potion":
             run_potions = getattr(gs, 'run_potions', {})
-            if run_potions.get(item_id, 0) <= 0:
+            available = run_potions.get(item_id, 0)
+            if available <= 0:
                 return
-            run_potions[item_id] -= 1
+            drop_qty = min(qty, available)
+            run_potions[item_id] -= drop_qty
             if run_potions[item_id] <= 0:
                 del run_potions[item_id]
             if self.game_view and hasattr(self.game_view, 'player') and self.game_view.player:
@@ -288,13 +480,13 @@ class BackpackView(ScrollView):
                 dist = _rand.uniform(50, 90)
                 drop_x = player.center_x + dist * math.cos(angle)
                 drop_y = player.center_y + dist * math.sin(angle)
-                drop = DropItem(drop_x, drop_y, "potion", item_id, 1)
+                drop = DropItem(drop_x, drop_y, "potion", item_id, drop_qty)
                 self._place_drop_near_player(drop)
                 self.game_view.drops.append(drop)
             self._build_content()
             return
 
-        # 仓库药水（db_potion）丢弃：从数据库删除 1 瓶，生成地面掉落物
+        # 仓库药水（db_potion）丢弃：从数据库删除 qty 瓶，生成地面掉落物
         if item_type == "db_potion":
             from db.database import remove_potion
             pid = gs.player_id
@@ -302,7 +494,8 @@ class BackpackView(ScrollView):
                 return
             # level 参数复用为 potion DB row id
             potion_db_id = level
-            remove_potion(pid, potion_db_id)
+            for _ in range(qty):
+                remove_potion(pid, potion_db_id)
             if self.game_view and hasattr(self.game_view, 'player') and self.game_view.player:
                 import random as _rand
                 from game.loot import DropItem
@@ -311,15 +504,10 @@ class BackpackView(ScrollView):
                 dist = _rand.uniform(50, 90)
                 drop_x = player.center_x + dist * math.cos(angle)
                 drop_y = player.center_y + dist * math.sin(angle)
-                drop = DropItem(drop_x, drop_y, "potion", item_id, 1)
+                drop = DropItem(drop_x, drop_y, "potion", item_id, qty)
                 self._place_drop_near_player(drop)
                 self.game_view.drops.append(drop)
             self._build_content()
-            return
-
-        # 如果丢弃背包，同时丢弃所有物品
-        if item_type == "backpack":
-            self._discard_all_items()
             return
 
         slot = carried.get(item_type, {})
@@ -328,12 +516,13 @@ class BackpackView(ScrollView):
         if key not in slot:
             return
 
-        # 先记录要丢弃的数量（丢弃1个）
-        qty_to_drop = 1
+        # 限制丢弃数量不超过持有量
+        available = slot[key]
+        drop_qty = min(qty, available)
 
         # 从 run_carried 中移除
-        if slot[key] > 1:
-            slot[key] -= 1
+        if slot[key] > drop_qty:
+            slot[key] -= drop_qty
         else:
             del slot[key]
 
@@ -347,7 +536,7 @@ class BackpackView(ScrollView):
             dist = _rand.uniform(50, 90)
             drop_x = player.center_x + dist * math.cos(angle)
             drop_y = player.center_y + dist * math.sin(angle)
-            drop = DropItem(drop_x, drop_y, item_type, item_id, qty_to_drop, level=level)
+            drop = DropItem(drop_x, drop_y, item_type, item_id, drop_qty, level=level)
             self._place_drop_near_player(drop)
             self.game_view.drops.append(drop)
 
@@ -678,3 +867,7 @@ class BackpackView(ScrollView):
         arcade.draw_rect_filled(self.back_rect, arcade.color.DARK_BLUE)
         self._tc.text("nav_back", "返回游戏", self.back_rect.center_x, self.back_rect.center_y,
                       arcade.color.WHITE, 14, anchor_x="center", anchor_y="center")
+
+        # 丢弃对话框（覆盖层，独立坐标系不受滚动影响）
+        if self._discard_dialog_active and self._discard_dialog_item:
+            self._draw_discard_dialog()

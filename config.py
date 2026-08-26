@@ -451,7 +451,7 @@ LEVEL_BONUS_POOL = [
     {"key": "bonus_damage",    "name": "攻击伤害", "value": 3,    "desc": "攻击伤害 +3",   "color": (255, 160, 80)},
     {"key": "bonus_defense",   "name": "防御力",   "value": 3,    "desc": "防御力 +3",     "color": (120, 180, 255)},
     {"key": "bonus_speed",     "name": "移动速度", "value": 0.2,  "desc": "移动速度 +5%", "color": (140, 255, 140)},
-    {"key": "bonus_atk_speed", "name": "攻击速度", "value": 0.1,  "desc": "攻击速度 +0.1", "color": (255, 220, 120)},
+    {"key": "bonus_atk_speed", "name": "攻击速度", "value": 0.1,  "desc": "攻击速度 +10%", "color": (255, 220, 120)},
 ]
 
 

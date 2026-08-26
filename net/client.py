@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import asyncio
+import socket
 import threading
 from collections.abc import Callable
 
@@ -41,7 +42,7 @@ except ImportError:
     from protocol import MsgType, decode, encode  # pyright: ignore[reportMissingImports]
     from thread_bridge import NetBridge  # pyright: ignore[reportMissingImports]
 
-__all__ = ["NetClient"]
+__all__ = ["NetClient", "RoomDiscovery"]
 
 # 默认连接超时（秒）：超过视为连接失败，connect() 返回 False
 CONNECT_TIMEOUT_DEFAULT = 5.0
@@ -414,3 +415,149 @@ class NetClient:
                 continue
             # 解码后的 (MsgType, payload) 交给主线程 poll() 消费
             self._bridge.put_inbound((msg_type, payload))
+
+
+class RoomDiscovery:
+    """局域网房间发现：UDP 广播搜索在线房间。
+    
+    用法：
+        discovery = RoomDiscovery()
+        discovery.start()  # 启动后台搜索线程
+        rooms = discovery.get_rooms()  # 获取发现的房间列表
+        discovery.stop()  # 停止搜索
+    """
+    
+    def __init__(self, broadcast_port: int = 8766):
+        """初始化房间发现器。
+        
+        Args:
+            broadcast_port: UDP 广播端口（默认 8766 = 8765 + 1）
+        """
+        self._broadcast_port = broadcast_port
+        self._rooms: dict[str, dict] = {}  # room_id -> room_info
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+        self._sock: socket.socket | None = None
+    
+    def start(self) -> None:
+        """启动后台搜索线程（非阻塞）。"""
+        if self._thread is not None and self._thread.is_alive():
+            return  # 已在运行
+        
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._discovery_worker,
+            name="room-discovery",
+            daemon=True,
+        )
+        self._thread.start()
+    
+    def stop(self) -> None:
+        """停止搜索线程（幂等）。"""
+        self._stop_event.set()
+        if self._sock:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+        self._thread = None
+    
+    def get_rooms(self) -> list[dict]:
+        """获取当前发现的房间列表（线程安全）。
+        
+        返回列表，每项包含：
+        - room_id: 房间号
+        - host_name: 主机名
+        - theme: 地图主题
+        - player_count: 当前玩家数
+        - max_players: 最大玩家数
+        - port: WebSocket 端口
+        - host_ip: 主机 IP 地址
+        """
+        with self._lock:
+            # 过滤掉超过 6 秒未更新的房间（可能已关闭）
+            import time
+            now = time.time()
+            stale = [rid for rid, info in self._rooms.items() 
+                     if now - info.get("last_seen", 0) > 6.0]
+            for rid in stale:
+                del self._rooms[rid]
+            return list(self._rooms.values())
+    
+    def send_query(self) -> None:
+        """发送一次 ROOM_QUERY 广播（触发主机回复）。"""
+        import socket
+        import json
+        
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            sock.settimeout(0.5)
+            
+            query_msg = json.dumps({
+                "type": "ROOM_QUERY",
+                "payload": {"query": "discover"}
+            }, ensure_ascii=False)
+            
+            sock.sendto(
+                query_msg.encode("utf-8"),
+                ("255.255.255.255", self._broadcast_port)
+            )
+            sock.close()
+        except OSError:
+            pass
+    
+    def _discovery_worker(self) -> None:
+        """后台搜索线程：监听 UDP 广播，收集房间信息。"""
+        import socket
+        import json
+        import time
+        
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.setblocking(False)
+        self._sock = sock
+        
+        try:
+            sock.bind(("", self._broadcast_port))
+        except OSError:
+            print(f"[RoomDiscovery] 无法绑定端口 {self._broadcast_port}")
+            return
+        
+        # 启动时立即发送一次查询
+        self.send_query()
+        
+        while not self._stop_event.is_set():
+            try:
+                data, addr = sock.recvfrom(4096)
+                if data:
+                    try:
+                        msg = json.loads(data.decode("utf-8"))
+                        if msg.get("type") == "ROOM_BROADCAST":
+                            payload = msg.get("payload", {})
+                            room_id = payload.get("room_id", "")
+                            if room_id:
+                                with self._lock:
+                                    self._rooms[room_id] = {
+                                        "room_id": room_id,
+                                        "host_name": payload.get("host_name", "未知"),
+                                        "theme": payload.get("theme", "forest"),
+                                        "player_count": payload.get("player_count", 0),
+                                        "max_players": payload.get("max_players", 4),
+                                        "port": payload.get("port", 8765),
+                                        "host_ip": addr[0],
+                                        "last_seen": time.time(),
+                                    }
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        pass
+            except BlockingIOError:
+                pass  # 无数据
+            
+            # 每 1 秒发送一次查询，保持发现
+            if not self._stop_event.is_set():
+                self._stop_event.wait(1.0)

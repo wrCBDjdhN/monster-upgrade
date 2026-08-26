@@ -275,7 +275,7 @@ class NetServer:
                 self._thread = None
 
     async def _serve(self, host: str, port: int) -> None:
-        """事件循环内的服务主体：监听端口 + 等待停止信号。"""
+        """事件循环内的服务主体：监听端口 + UDP 广播 + 等待停止信号。"""
         loop = asyncio.get_running_loop()
         self._stop_future = loop.create_future()
         if self._stop_requested:
@@ -283,7 +283,16 @@ class NetServer:
             self._stop_future.set_result(None)
         async with serve(self._handle_connection, host, port):
             self._ready_event.set()   # 已开始监听，通知 start() 返回
+            # 启动 UDP 广播任务（局域网房间发现）
+            self._udp_broadcast_task = asyncio.create_task(self._udp_broadcast_loop())
             await self._stop_future
+            # 停止 UDP 广播任务
+            if self._udp_broadcast_task:
+                self._udp_broadcast_task.cancel()
+                try:
+                    await self._udp_broadcast_task
+                except asyncio.CancelledError:
+                    pass
             # 退出 async with 时 serve 会关闭全部连接并等待处理器结束（优雅关闭）
 
     # ────────────────────────── 消息路由（主线程可调用，线程安全） ──────────────────────────
@@ -486,3 +495,63 @@ class NetServer:
         """把玩家从房间中移除（断线/关闭时调用，仅事件循环线程）。"""
         self.room.players.pop(player_id, None)
         self.room.names.pop(name, None)
+
+    async def _udp_broadcast_loop(self) -> None:
+        """UDP 广播循环：每 2 秒向局域网广播房间信息（局域网房间发现）。
+        
+        使用 UDP 广播地址 255.255.255.255，端口与 WebSocket 服务端口相同+1。
+        客户端监听此端口即可发现局域网内的房间。
+        """
+        import socket
+        import json
+        
+        broadcast_port = (self._port or DEFAULT_PORT) + 1
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.setblocking(False)
+        
+        try:
+            while True:
+                # 构建房间广播信息
+                player_count = len(self.room.players) + 1  # +1 包含主机
+                broadcast_msg = json.dumps({
+                    "type": "ROOM_BROADCAST",
+                    "payload": {
+                        "room_id": self.room.room_id,
+                        "host_name": "主机",  # 主机名可从 GameState 获取，此处简化
+                        "theme": self.room.theme,
+                        "player_count": player_count,
+                        "max_players": self.room.max_players,
+                        "port": self._port or DEFAULT_PORT,
+                    }
+                }, ensure_ascii=False)
+                
+                # 发送 UDP 广播
+                try:
+                    sock.sendto(
+                        broadcast_msg.encode("utf-8"),
+                        ("255.255.255.255", broadcast_port)
+                    )
+                except OSError:
+                    pass  # 广播失败不阻塞服务器
+                
+                # 同时监听是否有客户端的 ROOM_QUERY 请求
+                try:
+                    data, addr = sock.recvfrom(1024)
+                    if data:
+                        try:
+                            msg = json.loads(data.decode("utf-8"))
+                            if msg.get("type") == "ROOM_QUERY":
+                                # 收到查询请求，立即回复一次广播
+                                sock.sendto(
+                                    broadcast_msg.encode("utf-8"),
+                                    addr
+                                )
+                        except (json.JSONDecodeError, UnicodeDecodeError):
+                            pass
+                except BlockingIOError:
+                    pass  # 无数据，继续
+                
+                await asyncio.sleep(2.0)  # 每 2 秒广播一次
+        finally:
+            sock.close()

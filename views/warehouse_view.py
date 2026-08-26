@@ -177,7 +177,7 @@ class WarehouseView(ScrollView):
                 sv_btn = arcade.XYWH(WINDOW_WIDTH - 80, y + 6, 70, 26)
                 self.weapon_sell_buttons.append((sv_btn, w, sell_price))
                 arcade.draw_rect_filled(sv_btn, (100, 30, 30))
-                self._tc.text(f"wep_sell_{i}", f"卖{sell_price}G", sv_btn.center_x, sv_btn.center_y,
+                self._tc.text(f"wep_sell_{i}", f"卖{sell_price}金币", sv_btn.center_x, sv_btn.center_y,
                               arcade.color.WHITE, 10, anchor_x="center", anchor_y="center")
                 y -= 32
                 # 神器武器：在名称下方追加特效描述行
@@ -224,7 +224,7 @@ class WarehouseView(ScrollView):
                 sv_btn = arcade.XYWH(WINDOW_WIDTH - 80, y + 6, 70, 26)
                 self.equip_sell_buttons.append((sv_btn, eq, sell_price))
                 arcade.draw_rect_filled(sv_btn, (100, 30, 30))
-                self._tc.text(f"eq_sell_{i}", f"卖{sell_price}G", sv_btn.center_x, sv_btn.center_y,
+                self._tc.text(f"eq_sell_{i}", f"卖{sell_price}金币", sv_btn.center_x, sv_btn.center_y,
                               arcade.color.WHITE, 10, anchor_x="center", anchor_y="center")
                 y -= 32
                 # 神器装备：在名称下方追加特效描述行

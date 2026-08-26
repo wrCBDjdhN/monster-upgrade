@@ -102,8 +102,8 @@ class LevelUpView(arcade.View):
                           opt.get("color", arcade.color.WHITE), 22, anchor_x="center")
             self._tc.text(f"opt_desc_{i}", opt.get("desc", ""), cx, y_center + 5,
                           arcade.color.LIGHT_GRAY, 15, anchor_x="center")
-            self._tc.text(f"opt_val_{i}", f"+{opt.get('value', 0)}", cx, y_center - 45,
-                          opt.get("color", arcade.color.WHITE), 18, anchor_x="center")
+            self._tc.text(f"opt_val_{i}", opt.get("desc", ""), cx, y_center - 45,
+                          opt.get("color", arcade.color.WHITE), 14, anchor_x="center")
 
         # 返回按钮
         arcade.draw_rect_filled(self.close_rect, arcade.color.DARK_BLUE)

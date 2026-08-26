@@ -459,7 +459,7 @@ class MarketView(ScrollView):
                 btn_color = arcade.color.DARK_GREEN if data["can_buy"] else (60, 60, 60)
                 btn = arcade.XYWH(WINDOW_WIDTH - 100, screen_y + 5, 90, 26)
                 arcade.draw_rect_filled(btn, btn_color)
-                self._tc.text(f"{item_type}_btn_{i}", f"购买({data['cost']}G)", btn.center_x, btn.center_y,
+                self._tc.text(f"{item_type}_btn_{i}", f"购买({data['cost']}金币)", btn.center_x, btn.center_y,
                               arcade.color.WHITE, 10, anchor_x="center", anchor_y="center")
 
             elif item_type == "buy_potion":
@@ -474,7 +474,7 @@ class MarketView(ScrollView):
                 btn_color = arcade.color.DARK_GREEN if data["can_buy"] else (60, 60, 60)
                 btn = arcade.XYWH(WINDOW_WIDTH - 100, screen_y + 5, 90, 26)
                 arcade.draw_rect_filled(btn, btn_color)
-                self._tc.text(f"buy_potion_btn_{i}", f"购买({data['cost']}G)", btn.center_x, btn.center_y,
+                self._tc.text(f"buy_potion_btn_{i}", f"购买({data['cost']}金币)", btn.center_x, btn.center_y,
                               arcade.color.WHITE, 10, anchor_x="center", anchor_y="center")
 
             elif item_type == "buy_weapon":
@@ -486,7 +486,7 @@ class MarketView(ScrollView):
                 btn_color = arcade.color.DARK_GREEN if data["can_buy"] else (60, 60, 60)
                 btn = arcade.XYWH(WINDOW_WIDTH - 100, screen_y + 5, 90, 26)
                 arcade.draw_rect_filled(btn, btn_color)
-                self._tc.text(f"buy_weapon_btn_{i}", f"购买({data['cost']}G)", btn.center_x, btn.center_y,
+                self._tc.text(f"buy_weapon_btn_{i}", f"购买({data['cost']}金币)", btn.center_x, btn.center_y,
                               arcade.color.WHITE, 10, anchor_x="center", anchor_y="center")
 
             elif item_type == "buy_box":
@@ -499,7 +499,7 @@ class MarketView(ScrollView):
                 btn_color = arcade.color.DARK_GREEN if data["can_buy"] else (60, 60, 60)
                 btn = arcade.XYWH(WINDOW_WIDTH - 100, screen_y + 5, 90, 26)
                 arcade.draw_rect_filled(btn, btn_color)
-                self._tc.text(f"buy_box_btn_{i}", f"购买({data['cost']}G)", btn.center_x, btn.center_y,
+                self._tc.text(f"buy_box_btn_{i}", f"购买({data['cost']}金币)", btn.center_x, btn.center_y,
                               arcade.color.WHITE, 10, anchor_x="center", anchor_y="center")
 
         # 滚动条（基类统一绘制 + 支持鼠标拖拽）

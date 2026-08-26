@@ -10,9 +10,9 @@ def create_weapon(pid: int, item_id: str, kind: str, name: str, damage: float, a
     level: 武器等级（默认1）
     effects: 附加效果id列表；为 None 时按等级自动随机生成（Lv.5+）
     """
-    from entities.effects_defs import roll_effects, serialize_effects
+    from entities.effects_defs import roll_effects_for_slot, serialize_effects
     if effects is None:
-        effects = roll_effects(level)
+        effects = roll_effects_for_slot(level, "weapon")
     effects_str = serialize_effects(effects)
     with _conn() as c:
         c.execute(
@@ -84,8 +84,8 @@ def upgrade_weapon(pid: int, wid: int) -> bool:
         new_dmg = round(dmg * mult, 2)
         new_spd = round(spd * mult, 2)
         # 升级后效果：已有效果等级只升不降（refresh），并按新等级补齐新效果（roll）
-        from entities.effects_defs import roll_effects, serialize_effects, parse_effects, refresh_effect_levels
-        new_effects = serialize_effects(roll_effects(new_level, refresh_effect_levels(parse_effects(effects), new_level)))
+        from entities.effects_defs import roll_effects_for_slot, serialize_effects, parse_effects, refresh_effect_levels
+        new_effects = serialize_effects(roll_effects_for_slot(new_level, "weapon", refresh_effect_levels(parse_effects(effects), new_level)))
         c.execute(
             "UPDATE weapons SET damage=?, attack_speed=?, level=level+1, effects=? WHERE id=?",
             (new_dmg, new_spd, new_effects, wid),

@@ -5,7 +5,96 @@ from config import WINDOW_WIDTH, WINDOW_HEIGHT
 from views.text_cache import TextCache  # 持久 Text 对象缓存，替代 draw_text
 
 
-# 地图数据定义
+# ── 战备检查函数 ──────────────────────────────────────────────────────────────
+
+def check_battle_readiness(pid: int, theme: str) -> tuple[bool, str, dict]:
+    """检查战备是否满足地图进入条件
+
+    Args:
+        pid: 玩家 ID
+        theme: 地图主题 ("forest" / "desert" / "space")
+
+    Returns:
+        (passed, error_msg, info)
+        - passed: 是否通过
+        - error_msg: 错误提示（passed=True 时为空）
+        - info: 战备信息字典（equip_value / max_level / has_high_level / has_artifact）
+    """
+    from db.equipment import get_equipment
+    from db.weapons import get_weapons
+    from entities.weapon_defs import ALL_WEAPONS
+    from entities.equipment_defs import HELMETS, ARMORS, BACKPACKS
+
+    if theme == "forest":
+        return True, "", {}
+
+    equip = get_equipment(pid)
+    weapons = get_weapons(pid)
+
+    # 计算装备（头盔/护甲/背包）总金币价值
+    equip_defs = {"helmet": HELMETS, "armor": ARMORS, "backpack": BACKPACKS}
+    equip_value = 0
+    has_artifact = False
+    has_high_level = False
+    max_level = 0
+
+    # 检查已装备物品
+    for slot, item in equip.items():
+        defs = equip_defs.get(slot, {})
+        item_def = defs.get(item["item_id"], {})
+        equip_value += item_def.get("price", 0)
+        if item_def.get("artifact", False):
+            has_artifact = True
+        if item["level"] > 5:
+            has_high_level = True
+        if item["level"] > max_level:
+            max_level = item["level"]
+
+    # 检查武器（价格 + 等级 + 神器判定）
+    for w in weapons:
+        wdef = ALL_WEAPONS.get(w["item_id"], {})
+        equip_value += wdef.get("price", 0)
+        if wdef.get("artifact", False):
+            has_artifact = True
+        if w["level"] > 5:
+            has_high_level = True
+        if w["level"] > max_level:
+            max_level = w["level"]
+
+    info = {
+        "equip_value": equip_value,
+        "max_level": max_level,
+        "has_high_level": has_high_level,
+        "has_artifact": has_artifact,
+    }
+
+    # 沙漠荒地：装备价值 > 100 + 至少一件 Lv.5+ 物品
+    if theme == "desert":
+        if equip_value < 100:
+            return False, f"装备价值不足：当前 {equip_value}，需要 100 以上", info
+        if not has_high_level:
+            return False, f"需要至少一件 Lv.5+ 物品，当前最高等级 Lv.{max_level}", info
+    # 航天基地：装备价值 > 500 + 至少一件神器
+    elif theme == "space":
+        if equip_value < 500:
+            return False, f"装备价值不足：当前 {equip_value}，需要 500 以上", info
+        if not has_artifact:
+            return False, "需要至少一件神器装备", info
+
+    return True, "", info
+
+
+# ── 战备要求定义（用于卡片上显示）──────────────────────────────────────────────
+
+BATTLE_READY_REQS = {
+    "forest": None,  # 无要求
+    "desert": {"min_value": 100, "min_level": 6, "need_artifact": False},
+    "space": {"min_value": 500, "min_level": 0, "need_artifact": True},
+}
+
+
+# ── 地图数据定义 ───────────────────────────────────────────────────────────────
+
 MAPS = [
     {
         "id": 1,
@@ -62,6 +151,8 @@ class MapSelectView(arcade.View):
         self.tut_next_rect = None
         self.tut_skip_rect = None
         self.tut_next_hover = False
+        # 战备检查错误提示（on_mouse_press 设置，on_draw 绘制）
+        self._error = ""
 
     def _build_tutorial_pages(self):
         """新手教程阶段 3：地图选择向导（介绍地图，引导选幽暗森林）"""
@@ -126,8 +217,36 @@ class MapSelectView(arcade.View):
                 f"card_diff_{i}", "难度: " + m["difficulty"], rect.center_x, rect.bottom + 25,
                 arcade.color.YELLOW, size=14, anchor_x="center",
             )
+            # 战备要求显示（非森林地图）
+            theme = m.get("theme", "forest")
+            req = BATTLE_READY_REQS.get(theme)
+            if req:
+                req_lines = []
+                if req["min_value"] > 0:
+                    req_lines.append(f"装备价值 ≥ {req['min_value']}")
+                if req["min_level"] > 0:
+                    req_lines.append(f"至少 Lv.{req['min_level']}+ 物品")
+                if req["need_artifact"]:
+                    req_lines.append("至少一件神器")
+                req_text = " | ".join(req_lines)
+                # 检查当前战备状态
+                gs = self.window.game_state
+                pid = gs.player_id if gs else 0
+                passed, _, info = check_battle_readiness(pid, theme)
+                req_color = (100, 255, 100) if passed else (255, 100, 100)
+                self._tc.text(
+                    f"card_req_{i}", req_text, rect.center_x, rect.bottom + 45,
+                    req_color, size=11, anchor_x="center",
+                )
+                # 显示当前价值信息
+                if info.get("equip_value") is not None:
+                    val_text = f"当前价值: {info['equip_value']}"
+                    self._tc.text(
+                        f"card_val_{i}", val_text, rect.center_x, rect.bottom + 60,
+                        arcade.color.LIGHT_GRAY, size=10, anchor_x="center",
+                    )
             # 进入按钮
-            btn = arcade.XYWH(rect.center_x, rect.bottom + 50, 100, 30)
+            btn = arcade.XYWH(rect.center_x, rect.bottom + 80, 100, 30)
             btn_color = arcade.color.DARK_GREEN if is_hover else (60, 120, 60)
             arcade.draw_rect_filled(btn, btn_color)
             # 持久 Text 对象，避免 draw_text 每帧重建纹理
@@ -145,6 +264,14 @@ class MapSelectView(arcade.View):
             "返回", back_rect.center_x, back_rect.center_y,
             arcade.color.WHITE, size=14, anchor_x="center", anchor_y="center",
         )
+
+        # 战备不足错误提示（红色醒目）
+        if self._error:
+            self._tc.text(
+                "battle_err", self._error,
+                WINDOW_WIDTH // 2, 90,
+                arcade.color.RED, size=16, anchor_x="center",
+            )
 
         # 新手教程（阶段 3）：向导弹窗覆盖层（画在最上层）
         if self._tut_showing():
@@ -172,7 +299,9 @@ class MapSelectView(arcade.View):
             return
         self.hovered_map = -1
         for i, rect in enumerate(self.cards):
-            if rect.point_in_rect((x, y)):
+            # 检测卡片区域或进入按钮区域（按钮在卡片下方 bottom+80 处）
+            btn = arcade.XYWH(rect.center_x, rect.bottom + 80, 100, 30)
+            if rect.point_in_rect((x, y)) or btn.point_in_rect((x, y)):
                 self.hovered_map = i
                 break
 
@@ -198,9 +327,21 @@ class MapSelectView(arcade.View):
             self.window.show_view(CharacterSelectView(self.window_ref))
             return
 
-        # 地图卡片点击
+        # 地图卡片点击（进入按钮在卡片下方 bottom+80 处）
         for i, rect in enumerate(self.cards):
-            if rect.point_in_rect((x, y)):
+            # 检测点击区域：进入按钮（卡片底部 +80，尺寸 100×30）
+            btn = arcade.XYWH(rect.center_x, rect.bottom + 80, 100, 30)
+            if btn.point_in_rect((x, y)):
+                # 战备检查（非森林地图）
+                theme = MAPS[i].get("theme", "forest")
+                gs = self.window.game_state
+                pid = gs.player_id if gs else 0
+                passed, error_msg, _ = check_battle_readiness(pid, theme)
+                if not passed:
+                    # 战备不足：显示错误提示（用 self._error 持久化，on_draw 可绘制）
+                    self._error = error_msg
+                    return
+                self._error = ""
                 # 每次进入随机生成种子，确保房间/资源/怪物/宝箱位置不固定
                 import random
                 self.window.game_state.current_map_seed = random.randint(1, 999999)

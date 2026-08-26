@@ -547,80 +547,82 @@ def render_game(view):
                     break
 
     # HUD 文本（玩家状态/装备全部左对齐 x=10；从上到下：等级→HP→金币→武器→药水→效果→装备→debuff→技能）
-    view._hud_text("hp", f"HP: {round(view.player.hp)}/{round(view.player.max_hp)}",
-                   10, WINDOW_HEIGHT - 60, arcade.color.WHITE, 12)
-    view._hud_text("gold", f"金币: {total_gold} (携带:{carried_gold})",
-                   10, WINDOW_HEIGHT - 80, arcade.color.YELLOW, 12)
-    # 已取消武器特殊效果显示（用户需求：左侧HUD简化，不再显示吸血/散射/光环等效果文本）
-    view._hud_text("weapon",
-                   f"武器: {view._cached_weapon_name} | 伤害:{round(gs.weapon_damage)} | 距离:{round(gs.weapon_range)}",
-                   10, WINDOW_HEIGHT - 100, arcade.color.ORANGE, 12)
-    view._hud_text("hint",
-                   "WASD移动 | 鼠标攻击 | 靠近按E拾取物品 | 1-3药水 | E开宝箱 | TAB背包 | M地图 | ESC设置",
-                   10, 10, arcade.color.GRAY, 12)
+    # 修复：观战模式下隐藏 HUD（HP/金币/武器/技能等），避免遮挡观战视线
+    if not getattr(view, "_spectating", False):
+        view._hud_text("hp", f"HP: {round(view.player.hp)}/{round(view.player.max_hp)}",
+                       10, WINDOW_HEIGHT - 60, arcade.color.WHITE, 12)
+        view._hud_text("gold", f"金币: {total_gold} (携带:{carried_gold})",
+                       10, WINDOW_HEIGHT - 80, arcade.color.YELLOW, 12)
+        # 已取消武器特殊效果显示（用户需求：左侧HUD简化，不再显示吸血/散射/光环等效果文本）
+        view._hud_text("weapon",
+                       f"武器: {view._cached_weapon_name} | 伤害:{round(gs.weapon_damage)} | 距离:{round(gs.weapon_range)}",
+                       10, WINDOW_HEIGHT - 100, arcade.color.ORANGE, 12)
+        view._hud_text("hint",
+                       "WASD移动 | 鼠标攻击 | 靠近按E拾取物品 | 1-3药水 | E开宝箱 | TAB背包 | M地图 | ESC设置",
+                       10, 10, arcade.color.GRAY, 12)
 
-    # 角色技能栏（F 键）：技能名 + 冷却/就绪状态（无技能角色如"初始"不显示）
-    # 位置：左侧 debuff 下方（原右侧右对齐，现随玩家状态全部左移，为小地图腾出右上角）
-    skill_def = getattr(view.player, "character_def", {}).get("skill")
-    if skill_def:
-        skill_cd = max(0.0, getattr(view.player, "skill_cd", 0.0))
-        if skill_cd > 0:
-            skill_txt = f"技能[{skill_def['name']}] 冷却 {skill_cd:.1f}s"
-            skill_color = arcade.color.ORANGE
+        # 角色技能栏（F 键）：技能名 + 冷却/就绪状态（无技能角色如"初始"不显示）
+        # 位置：左侧 debuff 下方（原右侧右对齐，现随玩家状态全部左移，为小地图腾出右上角）
+        skill_def = getattr(view.player, "character_def", {}).get("skill")
+        if skill_def:
+            skill_cd = max(0.0, getattr(view.player, "skill_cd", 0.0))
+            if skill_cd > 0:
+                skill_txt = f"技能[{skill_def['name']}] 冷却 {skill_cd:.1f}s"
+                skill_color = arcade.color.ORANGE
+            else:
+                skill_txt = f"技能[{skill_def['name']}] 就绪 (F)"
+                skill_color = arcade.color.GOLD
+            view._hud_text("skill", skill_txt, 10, WINDOW_HEIGHT - 330,
+                           skill_color, 11)
         else:
-            skill_txt = f"技能[{skill_def['name']}] 就绪 (F)"
-            skill_color = arcade.color.GOLD
-        view._hud_text("skill", skill_txt, 10, WINDOW_HEIGHT - 330,
-                       skill_color, 11)
-    else:
-        # 空串也会重绘，保证切换角色后旧文本被清除
-        view._hud_text("skill", "", 10, WINDOW_HEIGHT - 330,
-                       arcade.color.GOLD, 11)
+            # 空串也会重绘，保证切换角色后旧文本被清除
+            view._hud_text("skill", "", 10, WINDOW_HEIGHT - 330,
+                           arcade.color.GOLD, 11)
 
-    # 药水显示：合并本局药水槽（run_potions）+ 仓库药水，顺序与热键 1-3 一致
-    # （热键候选 = run 药水在前，仓库药水在后，见 input_handler.handle_key_press）
-    run_potions = getattr(gs, "run_potions", None) or {}
-    _pot_entries = []  # (名称, 数量)
-    for item_id, qty in run_potions.items():
-        if qty > 0:
-            pdef = POTIONS.get(item_id, {})
-            _pot_entries.append((pdef.get("name", item_id), qty))
-    _pot_entries.extend((p["name"], p["quantity"]) for p in potions)
-    if _pot_entries:
-        view._hud_text("pot_title", "药水:", 10, WINDOW_HEIGHT - 122,
-                       arcade.color.LIGHT_GRAY, 11)
-        for i, (pname, pqty) in enumerate(_pot_entries[:3]):
-            view._hud_text(f"pot{i}",
-                           f"[{i+1}] {pname} x{pqty}",
-                           70, WINDOW_HEIGHT - 122 - i * 15, arcade.color.CYAN, 11)
+        # 药水显示：合并本局药水槽（run_potions）+ 仓库药水，顺序与热键 1-3 一致
+        # （热键候选 = run 药水在前，仓库药水在后，见 input_handler.handle_key_press）
+        run_potions = getattr(gs, "run_potions", None) or {}
+        _pot_entries = []  # (名称, 数量)
+        for item_id, qty in run_potions.items():
+            if qty > 0:
+                pdef = POTIONS.get(item_id, {})
+                _pot_entries.append((pdef.get("name", item_id), qty))
+        _pot_entries.extend((p["name"], p["quantity"]) for p in potions)
+        if _pot_entries:
+            view._hud_text("pot_title", "药水:", 10, WINDOW_HEIGHT - 122,
+                           arcade.color.LIGHT_GRAY, 11)
+            for i, (pname, pqty) in enumerate(_pot_entries[:3]):
+                view._hud_text(f"pot{i}",
+                               f"[{i+1}] {pname} x{pqty}",
+                               70, WINDOW_HEIGHT - 122 - i * 15, arcade.color.CYAN, 11)
 
-    # 药水/效果剩余时间显示（速度加速、护盾、狂暴、持续回复）
-    eff_y = WINDOW_HEIGHT - 168
-    if view.player.speed_effect_timer > 0:
-        view._hud_text("eff_speed",
-                       f"移速加速: {view.player.speed_effect_timer:.1f}s",
-                       10, eff_y, arcade.color.CYAN, 11)
-        eff_y -= 15
-    if getattr(view.player, "shield_effect_timer", 0) > 0:
-        view._hud_text("eff_shield",
-                       f"护盾: {view.player.shield:.0f} ({view.player.shield_effect_timer:.1f}s)",
-                       10, eff_y, (120, 160, 255), 11)
-        eff_y -= 15
-    if getattr(view.player, "power_effect_timer", 0) > 0:
-        view._hud_text("eff_power",
-                       f"狂暴: {view.player.power_effect_timer:.1f}s",
-                       10, eff_y, (255, 120, 40), 11)
-        eff_y -= 15
-    if view.player.heal_duration > 0:
-        view._hud_text("eff_heal",
-                       f"回复中: {view.player.heal_duration:.1f}s",
-                       10, eff_y, arcade.color.GREEN, 11)
+        # 药水/效果剩余时间显示（速度加速、护盾、狂暴、持续回复）
+        eff_y = WINDOW_HEIGHT - 168
+        if view.player.speed_effect_timer > 0:
+            view._hud_text("eff_speed",
+                           f"移速加速: {view.player.speed_effect_timer:.1f}s",
+                           10, eff_y, arcade.color.CYAN, 11)
+            eff_y -= 15
+        if getattr(view.player, "shield_effect_timer", 0) > 0:
+            view._hud_text("eff_shield",
+                           f"护盾: {view.player.shield:.0f} ({view.player.shield_effect_timer:.1f}s)",
+                           10, eff_y, (120, 160, 255), 11)
+            eff_y -= 15
+        if getattr(view.player, "power_effect_timer", 0) > 0:
+            view._hud_text("eff_power",
+                           f"狂暴: {view.player.power_effect_timer:.1f}s",
+                           10, eff_y, (255, 120, 40), 11)
+            eff_y -= 15
+        if view.player.heal_duration > 0:
+            view._hud_text("eff_heal",
+                           f"回复中: {view.player.heal_duration:.1f}s",
+                           10, eff_y, arcade.color.GREEN, 11)
 
-    # ── 行动倒计时（space 主题）──
-    draw_action_timer(view)
+        # ── 行动倒计时（space 主题）──
+        draw_action_timer(view)
 
-    # ── 角色等级 HUD（等级/经验条/待选升级提示）──
-    draw_level_hud(view)
+        # ── 角色等级 HUD（等级/经验条/待选升级提示）──
+        draw_level_hud(view)
 
     # ── 联机状态条 E3（host/client 显示；solo 不绘制）──
     # 位置：右上角小地图正下方（原 H-20 处让位给小地图），右对齐

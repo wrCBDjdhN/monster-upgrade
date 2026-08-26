@@ -67,6 +67,9 @@ class MsgType(Enum):
     # ── 保活 / 断线 ──
     HEARTBEAT = "HEARTBEAT"            # 双向：心跳保活 + 延迟测量
     DISCONNECT = "DISCONNECT"          # 双向：主动断线通知
+    # ── 局域网房间发现 ──
+    ROOM_BROADCAST = "ROOM_BROADCAST"  # 主机→广播：房间信息（UDP 广播，客户端搜索用）
+    ROOM_QUERY = "ROOM_QUERY"          # 客户端→广播：请求房间信息（UDP 广播，触发主机回复）
 
 
 # 每类消息的载荷 schema（键名 + 含义），供 server/client/game_view 联机逻辑参考
@@ -348,6 +351,23 @@ MESSAGE_SCHEMAS: dict[MsgType, str] = {
         "payload: {\n"
         "  'player_id': int,   断线玩家 id\n"
         "  'reason': str}      断线原因\n"
+        "}"
+    ),
+    MsgType.ROOM_BROADCAST: (
+        "主机 UDP 广播房间信息（局域网房间发现）。\n"
+        "payload: {\n"
+        "  'room_id': str,        房间号\n"
+        "  'host_name': str,      主机玩家名\n"
+        "  'theme': str,          地图主题（forest/desert/space）\n"
+        "  'player_count': int,   当前玩家数（含主机）\n"
+        "  'max_players': int,    最大玩家数\n"
+        "  'port': int}           WebSocket 服务端口\n"
+        "}"
+    ),
+    MsgType.ROOM_QUERY: (
+        "客户端 UDP 广播请求房间信息（触发主机回复 ROOM_BROADCAST）。\n"
+        "payload: {\n"
+        "  'query': str}  固定值 'discover'（预留扩展）\n"
         "}"
     ),
 }

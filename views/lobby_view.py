@@ -3,14 +3,14 @@
 职责：
 - 建房（host）：创建 NetServer + NetBridge，展示房间状态与已加入玩家，
   点击「开始游戏」广播 ROOM_START（含 seed/theme/全房出生点），主机进入 GameView；
-- 加入（client）：输入主机 IP，NetClient 连接后自动发 HELLO + JOIN 握手，
+- 加入（client）：自动搜索局域网房间，选择房间加入，NetClient 连接后自动发 HELLO + JOIN 握手，
   收到 JOIN_ACCEPT 记录身份，收到 ROOM_START 按种子重建地图进入 GameView；
 - 返回：安全停止 server/client，清理 GameState 联机字段，回 StartView。
 
 状态机（self.mode）：
   menu       选择 建房/加入/返回
   host_wait  建房等待：显示房间号 / 地图主题选择 / 玩家列表 / 开始游戏 / 返回
-  join       加入：IP 输入框（键盘编辑）+ 连接 / 返回
+  join       加入：自动搜索房间列表 + 手动输入IP + 连接 / 返回
   client_wait 连接已建立：显示等待主机开始 / 取消（断线自动回 menu 并提示）
 
 线程模型：NetServer/NetClient 的网络线程收发不阻塞 arcade 主线程；
@@ -98,6 +98,13 @@ class LobbyView(arcade.View):
         self._ready_display: list = []
         # 房间结束提示（GameView ROOM_ENDED 回大厅时设置，menu 模式顶部显示）
         self._notice = ""
+        # 局域网房间发现
+        from net.client import RoomDiscovery
+        self._discovery = RoomDiscovery()
+        self._discovered_rooms: list = []  # 发现的房间列表
+        self._discovery_hover_idx = -1  # hover 的房间索引
+        self._discovery_scroll_offset = 0  # 房间列表滚动偏移
+        self._manual_ip_mode = False  # 是否切换到手动输入IP模式
         # 从市场/仓库/锻造等房间内页面返回时：自动复用 GameState 中的联机连接（房间保持）
         self._restore_net_connection()
 
@@ -288,10 +295,17 @@ class LobbyView(arcade.View):
         self.window.show_view(gv)
 
     def _enter_join(self):
-        """切换到加入模式（清空错误与状态）"""
+        """切换到加入模式：启动房间搜索，清空错误与状态"""
         self._error = ""
         self._status = ""
         self.ip_editing = False
+        self._manual_ip_mode = False
+        self._discovered_rooms = []
+        self._discovery_hover_idx = -1
+        self._discovery_scroll_offset = 0
+        # 启动局域网房间搜索
+        self._discovery.start()
+        self._status = "正在搜索局域网房间…"
         self.mode = "join"
 
     def _client_connect(self):
@@ -352,7 +366,10 @@ class LobbyView(arcade.View):
         self.window.show_view(gv)
 
     def _leave(self):
-        """返回主菜单：安全停止 server/client，清理 GameState 联机字段"""
+        """返回主菜单：安全停止 server/client/discovery，清理 GameState 联机字段"""
+        # 停止房间搜索
+        if self._discovery is not None:
+            self._discovery.stop()
         gs = self.window.game_state
         if self.server is not None:
             self.server.stop()
@@ -379,6 +396,11 @@ class LobbyView(arcade.View):
 
     def on_update(self, delta_time):
         gs = self.window.game_state
+        # 加入模式：更新发现的房间列表
+        if self.mode == "join" and self._discovery is not None:
+            self._discovered_rooms = self._discovery.get_rooms()
+            if self._discovered_rooms and not self._manual_ip_mode:
+                self._status = f"发现 {len(self._discovered_rooms)} 个房间，点击加入"
         # 建房等待：刷新已加入玩家列表（server 权威数据）+ 处理 READY 上报 + 新玩家就绪登记
         if self.mode == "host_wait" and self.server is not None:
             self._players_info = self.server.player_info()
@@ -606,34 +628,102 @@ class LobbyView(arcade.View):
                       arcade.color.WHITE, size=14, anchor_x="center", anchor_y="center")
 
     def _draw_join(self, cx):
-        """join：IP 输入框 / 连接 / 返回"""
-        # IP 输入框（点击进入编辑态，键盘输入）
-        box_color = arcade.color.DARK_GRAY if not self.ip_editing else (70, 90, 70)
-        arcade.draw_rect_filled(self.ip_rect, box_color)
-        arcade.draw_rect_outline(self.ip_rect,
-                                 arcade.color.GOLD if self.ip_editing else arcade.color.WHITE,
-                                 border_width=2)
-        self._tc.text("ip_label", "主机 IP:", self.ip_rect.center_x - 120, self.ip_rect.center_y,
-                      arcade.color.LIGHT_GRAY, size=14, anchor_x="center", anchor_y="center")
-        self._tc.text("ip_value", self._ip_buffer, self.ip_rect.center_x + 10,
-                      self.ip_rect.center_y, arcade.color.WHITE, size=16,
-                      anchor_x="center", anchor_y="center")
-        self._tc.text("ip_hint", "（点击输入框后直接键入，回车连接）",
-                      cx, self.ip_rect.center_y - 32, arcade.color.GRAY, size=10,
-                      anchor_x="center")
-        # 连接按钮
-        ccolor = arcade.color.CORNFLOWER_BLUE if self.connect_hover else arcade.color.STEEL_BLUE
-        arcade.draw_rect_filled(self.connect_rect, ccolor)
-        arcade.draw_rect_outline(self.connect_rect, arcade.color.WHITE, border_width=2)
-        self._tc.text("btn_connect", "连 接", self.connect_rect.center_x, self.connect_rect.center_y,
-                      arcade.color.WHITE, size=22, anchor_x="center", anchor_y="center")
+        """join：搜索到的房间列表 / 手动输入IP / 返回"""
+        # 标题
+        self._tc.text("join_title", "搜索局域网房间", cx, WINDOW_HEIGHT - 140,
+                      arcade.color.WHITE, size=20, anchor_x="center")
+        
+        # 房间列表区域
+        room_list_top = WINDOW_HEIGHT - 180
+        room_list_bottom = WINDOW_HEIGHT // 2 + 40
+        room_item_height = 60
+        
+        if self._discovered_rooms and not self._manual_ip_mode:
+            # 显示搜索到的房间列表
+            self._tc.text("room_list_title", f"发现 {len(self._discovered_rooms)} 个房间：",
+                          60, room_list_top, arcade.color.LIGHT_GRAY, size=14)
+            y = room_list_top - 30
+            for i, room in enumerate(self._discovered_rooms):
+                if y < room_list_bottom:
+                    break
+                # 房间条目背景
+                room_rect = arcade.XYWH(cx, y, 500, room_item_height)
+                is_hover = self._discovery_hover_idx == i
+                bg_color = (60, 80, 60) if is_hover else (40, 50, 50)
+                arcade.draw_rect_filled(room_rect, bg_color)
+                arcade.draw_rect_outline(room_rect, arcade.color.WHITE if is_hover else arcade.color.GRAY, 1)
+                
+                # 房间信息
+                theme_names = {"forest": "幽暗森林", "desert": "沙漠荒地", "space": "航天基地"}
+                theme_name = theme_names.get(room.get("theme", ""), room.get("theme", ""))
+                self._tc.text(f"room_{i}_info", 
+                              f"{room.get('host_name', '未知')} 的房间 | {theme_name} | {room.get('player_count', 0)}/{room.get('max_players', 4)}人",
+                              80, y + 15, arcade.color.WHITE, size=14)
+                self._tc.text(f"room_{i}_ip", 
+                              f"IP: {room.get('host_ip', '?')}:{room.get('port', 8765)}",
+                              80, y - 10, arcade.color.LIGHT_GRAY, size=12)
+                # "加入" 按钮
+                join_btn = arcade.XYWH(cx + 200, y, 80, 30)
+                arcade.draw_rect_filled(join_btn, arcade.color.DARK_GREEN)
+                self._tc.text(f"room_{i}_join", "加入", join_btn.center_x, join_btn.center_y,
+                              arcade.color.WHITE, 12, anchor_x="center", anchor_y="center")
+                y -= room_item_height + 5
+        else:
+            # 无房间或手动模式
+            if not self._manual_ip_mode:
+                self._tc.text("no_room", "未发现房间，请稍候或手动输入IP", cx, room_list_top - 50,
+                              arcade.color.GRAY, size=14, anchor_x="center")
+        
+        # 手动输入IP按钮
+        manual_btn = arcade.XYWH(cx, room_list_bottom - 40, 200, 36)
+        manual_color = arcade.color.DARK_ORANGE if not self._manual_ip_mode else (150, 100, 40)
+        arcade.draw_rect_filled(manual_btn, manual_color)
+        arcade.draw_rect_outline(manual_btn, arcade.color.WHITE, 2)
+        self._tc.text("btn_manual", "手动输入IP", manual_btn.center_x, manual_btn.center_y,
+                      arcade.color.WHITE, 14, anchor_x="center", anchor_y="center")
+        self._manual_btn_rect = manual_btn
+        
+        # 手动输入IP区域（仅手动模式显示）
+        if self._manual_ip_mode:
+            # IP 输入框
+            box_color = arcade.color.DARK_GRAY if not self.ip_editing else (70, 90, 70)
+            arcade.draw_rect_filled(self.ip_rect, box_color)
+            arcade.draw_rect_outline(self.ip_rect,
+                                     arcade.color.GOLD if self.ip_editing else arcade.color.WHITE,
+                                     border_width=2)
+            self._tc.text("ip_label", "主机 IP:", self.ip_rect.center_x - 120, self.ip_rect.center_y,
+                          arcade.color.LIGHT_GRAY, size=14, anchor_x="center", anchor_y="center")
+            self._tc.text("ip_value", self._ip_buffer, self.ip_rect.center_x + 10,
+                          self.ip_rect.center_y, arcade.color.WHITE, size=16,
+                          anchor_x="center", anchor_y="center")
+            self._tc.text("ip_hint", "（点击输入框后直接键入，回车连接）",
+                          cx, self.ip_rect.center_y - 32, arcade.color.GRAY, size=10,
+                          anchor_x="center")
+            # 连接按钮
+            ccolor = arcade.color.CORNFLOWER_BLUE if self.connect_hover else arcade.color.STEEL_BLUE
+            arcade.draw_rect_filled(self.connect_rect, ccolor)
+            arcade.draw_rect_outline(self.connect_rect, arcade.color.WHITE, border_width=2)
+            self._tc.text("btn_connect", "连 接", self.connect_rect.center_x, self.connect_rect.center_y,
+                          arcade.color.WHITE, size=22, anchor_x="center", anchor_y="center")
+        
+        # 刷新按钮
+        refresh_btn = arcade.XYWH(cx + 150, room_list_bottom - 40, 80, 36)
+        arcade.draw_rect_filled(refresh_btn, arcade.color.STEEL_BLUE)
+        self._tc.text("btn_refresh", "刷新", refresh_btn.center_x, refresh_btn.center_y,
+                      arcade.color.WHITE, 12, anchor_x="center", anchor_y="center")
+        self._refresh_btn_rect = refresh_btn
+        
         # 返回
         arcade.draw_rect_filled(self.back_rect, arcade.color.DARK_RED)
         self._tc.text("back", "返回", self.back_rect.center_x, self.back_rect.center_y,
                       arcade.color.WHITE, size=14, anchor_x="center", anchor_y="center")
+        # 状态提示
+        if self._status:
+            self._tc.text("status", self._status, cx, WINDOW_HEIGHT - 160,
+                          arcade.color.CYAN, size=12, anchor_x="center")
         # 错误提示（红色）
         if self._error:
-            self._tc.text("err", self._error, cx, WINDOW_HEIGHT - 140,
+            self._tc.text("err", self._error, cx, WINDOW_HEIGHT - 200,
                           arcade.color.RED, size=14, anchor_x="center")
 
     def _draw_char_select(self, cx):
@@ -770,6 +860,9 @@ class LobbyView(arcade.View):
         """主机关闭房间：广播 ROOM_ENDED(room_closed) → 停止服务器 → 回主菜单"""
         from net.protocol import MsgType
         gs = self.window.game_state
+        # 停止房间搜索
+        if self._discovery is not None:
+            self._discovery.stop()
         if self.server is not None:
             try:
                 self.server.broadcast(MsgType.ROOM_ENDED, {"reason": "room_closed"})
@@ -831,16 +924,46 @@ class LobbyView(arcade.View):
                         self.server.room.theme = tid
                     break
         elif self.mode == "join":
-            if self.ip_rect.point_in_rect((x, y)):
-                # 点击输入框：进入编辑态
-                self.ip_editing = True
+            # 手动输入IP模式按钮
+            if hasattr(self, '_manual_btn_rect') and self._manual_btn_rect.point_in_rect((x, y)):
+                self._manual_ip_mode = not self._manual_ip_mode
+                self.ip_editing = False
+                self._error = ""
                 return
-            if self.connect_rect.point_in_rect((x, y)):
+            # 刷新按钮
+            if hasattr(self, '_refresh_btn_rect') and self._refresh_btn_rect.point_in_rect((x, y)):
+                self._discovered_rooms = []
+                self._discovery.send_query()
+                self._status = "正在搜索…"
+                return
+            if self._manual_ip_mode:
+                # 手动输入IP模式
+                if self.ip_rect.point_in_rect((x, y)):
+                    # 点击输入框：进入编辑态
+                    self.ip_editing = True
+                    return
+                if self.connect_rect.point_in_rect((x, y)):
+                    self.ip_editing = False
+                    self._client_connect()
+            else:
+                # 房间列表模式：检查是否点击了某个房间的"加入"按钮
+                room_list_top = WINDOW_HEIGHT - 180
+                room_item_height = 60
+                y_start = room_list_top - 30
+                for i, room in enumerate(self._discovered_rooms):
+                    item_y = y_start - i * (room_item_height + 5)
+                    join_btn = arcade.XYWH(cx + 200, item_y, 80, 30)
+                    if join_btn.point_in_rect((x, y)):
+                        # 点击加入按钮：使用该房间的IP连接
+                        self._ip_buffer = room.get("host_ip", "127.0.0.1")
+                        self._client_connect()
+                        return
+            # 返回按钮
+            if self.back_rect.point_in_rect((x, y)):
+                if self._discovery is not None:
+                    self._discovery.stop()
                 self.ip_editing = False
-                self._client_connect()
-            elif self.back_rect.point_in_rect((x, y)):
-                self.ip_editing = False
-                self.mode = "menu"  # join 模式返回：回 menu（顶部已按模式排除，此处显式处理）
+                self.mode = "menu"
         elif self.mode == "client_wait":
             cancel_rect = getattr(self, "_cancel_rect", None)
             if cancel_rect is not None and cancel_rect.point_in_rect((x, y)):

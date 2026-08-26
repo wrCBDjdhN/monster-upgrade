@@ -316,9 +316,7 @@ def handle_well_interaction(view):
 
 def handle_rocket_pad_interaction(view):
     """火箭发射台交互：靠近按 E 激活/按 7/8 直接选择"""
-    # 7/8 直接选择（无需先按E）
-    if hasattr(view, '_rocket_pad_menu') and view._rocket_pad_menu is not None:
-        return  # 已有菜单打开，等 input_handler 处理
+    # Bug 8 fix: 移除 _rocket_pad_menu 早期返回，允许激活其他发射台
     for pad in getattr(view, 'rocket_pads', []):
         dist = math.hypot(pad.center_x - view.player.center_x,
                           pad.center_y - view.player.center_y)

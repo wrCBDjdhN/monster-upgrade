@@ -35,9 +35,9 @@ def get_equipment_inventory(pid: int) -> list[dict]:
 
 def equip_item(pid: int, slot: str, item_id: str, name: str, defense: int = 0, capacity: int = 0, level: int = 1, effects: list | None = None) -> int:
     """装备物品（替换旧装备，旧装备标记为未装备）"""
-    from entities.effects_defs import roll_effects, serialize_effects
+    from entities.effects_defs import roll_effects_for_slot, serialize_effects
     if effects is None:
-        effects = roll_effects(level)
+        effects = roll_effects_for_slot(level, slot)
     effects_str = serialize_effects(effects)
     with _conn() as c:
         # 卸下旧装备
@@ -100,14 +100,14 @@ def add_equipment(pid: int, item_id: str, slot: str, level: int = 1, effects: li
     返回装备 ID
     """
     from entities.equipment_defs import HELMETS, ARMORS, BACKPACKS
-    from entities.effects_defs import roll_effects, serialize_effects
+    from entities.effects_defs import roll_effects_for_slot, serialize_effects
     from config import upgrade_mult_product
     defs = {"helmet": HELMETS, "armor": ARMORS, "backpack": BACKPACKS}
     info = defs.get(slot, {}).get(item_id)
     if not info:
         return None
     if effects is None:
-        effects = roll_effects(level)
+        effects = roll_effects_for_slot(level, slot)
     effects_str = serialize_effects(effects)
     # 防御按等级缩放（平方根亚线性倍率），等级越高防御越高但不爆炸
     base_defense = info.get("defense", 0)
@@ -196,8 +196,11 @@ def upgrade_equipment(pid: int, equip_id: int = None, material_id: int = None) -
         new_level = level + 1
         new_defense = round(defense * upgrade_mult_for_level(new_level))
         # 升级后效果：已有效果等级只升不降（refresh），并按新等级补齐新效果（roll）
-        from entities.effects_defs import roll_effects, serialize_effects, parse_effects, refresh_effect_levels
-        new_effects = serialize_effects(roll_effects(new_level, refresh_effect_levels(parse_effects(effects), new_level)))
+        from entities.effects_defs import roll_effects_for_slot, serialize_effects, parse_effects, refresh_effect_levels
+        # 需要获取 slot 用于分类抽取
+        slot_row = c.execute("SELECT slot FROM equipment WHERE id=?", (equip_id,)).fetchone()
+        item_slot = slot_row[0] if slot_row else "armor"
+        new_effects = serialize_effects(roll_effects_for_slot(new_level, item_slot, refresh_effect_levels(parse_effects(effects), new_level)))
         c.execute(
             "UPDATE equipment SET defense=?, level=level+1, effects=? WHERE id=?",
             (new_defense, new_effects, equip_id),

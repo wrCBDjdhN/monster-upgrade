@@ -186,7 +186,7 @@ class FloatingTextManager:
 
     def add_gold(self, x, y, amount):
         """金币拾取提示"""
-        self.add(x, y + 20, f"+{amount}G", (255, 215, 0), life=1.2, font_size=16, vy=60)
+        self.add(x, y + 20, f"+{amount}金币", (255, 215, 0), life=1.2, font_size=16, vy=60)
 
     def add_resource(self, x, y, name, amount):
         """资源拾取提示"""

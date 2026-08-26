@@ -1298,13 +1298,25 @@ class GameView(arcade.View):
                     del potion_slot[item_id]
         else:
             # 仓库药水：查库验证 → use_potion 扣减
+            # 修复：sender_id 是网络 player_id（主机=0，客户端=1/2/3），
+            # DB 查询需要 DB player_id（数据库自增 ID）。
+            # 主机用 gs.player_id；客户端通过玩家名反查 DB ID。
             from db.database import get_potions, use_potion
-            potions = get_potions(sender_id)
+            db_pid = sender_id
+            if sender_id == getattr(gs, "net_player_id", None):
+                db_pid = gs.player_id
+            elif gs.net_server is not None:
+                for pid, pname, _slot in gs.net_server.player_info():
+                    if pid == sender_id:
+                        from db.database import get_or_create_player
+                        db_pid = get_or_create_player(pname)
+                        break
+            potions = get_potions(db_pid)
             pot = next((p for p in potions if p["id"] == potion_id), None)
             if pot is None:
                 self._reject_potion(sender_id, potion_id)
                 return
-            effect_info = use_potion(sender_id, potion_id)
+            effect_info = use_potion(db_pid, potion_id)
             if not effect_info:
                 self._reject_potion(sender_id, potion_id)
                 return
@@ -1484,6 +1496,12 @@ class GameView(arcade.View):
         })
         # 记录该玩家本局已撤离（观战期间全员结束判定用；客户端撤离后回房等待）
         self._player_status[sender_id] = "evac"
+        # 修复：设置幽灵 HP=0 + alive=False，使小地图不再绘制该玩家点
+        # （与 _handle_player_abandon 对齐，此前遗漏导致撤离后小地图幽灵残留）
+        ghost = self.remote_players.get(sender_id)
+        if ghost is not None:
+            ghost.hp = 0
+            ghost.alive = False
         print(f"[GameView] 主机响应玩家 {sender_id} 撤离请求：广播 EVAC_RESULT 结算清单")
 
     def _serialize_evac_carried(self, carried: dict) -> dict:
@@ -1999,10 +2017,22 @@ class GameView(arcade.View):
                     old_key = self._chest_key_pressed
                     self.player = ghost
                     self._chest_key_pressed = True
+                    # 修复：记录治疗前 HP，治疗后广播 POTION_ACK 给客户端
+                    hp_before = ghost.hp
                     handle_well_interaction(self)
+                    heal_amount = max(0, ghost.hp - hp_before)
                     self.player = old_player
                     self._chest_key_pressed = old_key
-                    print(f"[GameView] 客户端 {player_id} 使用水井")
+                    # 向客户端单播水井回血结果，客户端收到后更新本地玩家 HP
+                    if heal_amount > 0:
+                        gs.net_server.send_to(sender_id, MsgType.POTION_ACK, {
+                            "player_id": sender_id,
+                            "potion_id": "well",
+                            "accepted": True,
+                            "heal_amount": heal_amount,
+                            "effect": "heal", "value": heal_amount, "duration": 0,
+                        })
+                    print(f"[GameView] 客户端 {player_id} 使用水井，回血 {heal_amount}")
 
         elif interaction_type == "rocket_pad":
             for i, pad in enumerate(self.rocket_pads):
@@ -2492,6 +2522,7 @@ class GameView(arcade.View):
             self._cached_weapon_name = wdef.get("name", "武器")
         elif d.item_type in ("helmet", "armor"):
             from entities.equipment_defs import HELMETS, ARMORS
+            from entities.effects_defs import roll_effects_for_slot, parse_effect_item, effect_params, EFFECTS as _EFFECTS_DEFS
             defs = HELMETS if d.item_type == "helmet" else ARMORS
             edef = defs.get(d.item_id, {})
             if d.item_type == "helmet":
@@ -2500,14 +2531,43 @@ class GameView(arcade.View):
                 gs.equipped_armor_id = d.item_id
             # 防御即时生效（与 setup() 累加装备基础防御的语义一致）
             self.player.defense += edef.get("defense", 0)
-            # 同步更新 HUD 缓存，使左侧装备栏即时显示新拾取的装备
+            # 修复：生成装备被动效果并应用到玩家（与 setup() 一致）
+            # 地面掉落无 effects 属性，需按等级动态生成；被动效果含 max_hp/regen/speed/damage/lifesteal/thorns/crit_chance
+            effects = roll_effects_for_slot(getattr(d, "level", 1) or 1, d.item_type)
+            for e in effects:
+                eid, elvl = parse_effect_item(e)
+                edata = _EFFECTS_DEFS.get(eid, {})
+                if edata.get("type") == "passive":
+                    pdata = effect_params(eid, elvl)
+                    if eid == "max_hp":
+                        self.player.max_hp += int(pdata.get("value", 25))
+                        self.player.hp += int(pdata.get("value", 25))
+                    elif eid == "regen":
+                        self.player.regen_per_sec += pdata.get("value", 1)
+                    elif eid == "speed":
+                        self.player.gear_speed_mult *= (1.0 + pdata.get("value", 0.30))
+                    elif eid == "defense":
+                        self.player.defense += int(pdata.get("value", 3))
+                    elif eid == "damage":
+                        current = getattr(self.player, "equip_damage_mult", 1.0)
+                        self.player.equip_damage_mult = current * (1.0 + pdata.get("value", 0.08))
+                    elif eid == "lifesteal":
+                        current = getattr(self.player, "equip_lifesteal", 0.0)
+                        self.player.equip_lifesteal = current + pdata.get("value", 0.03)
+                    elif eid == "thorns":
+                        current = getattr(self.player, "equip_thorns", 0.0)
+                        self.player.equip_thorns = current + pdata.get("value", 0.10)
+                    elif eid == "crit_chance":
+                        current = getattr(self.player, "crit_chance", 0.0)
+                        self.player.crit_chance = current + pdata.get("value", 0.05)
+            # 同步更新 HUD 缓存，使左侧装备栏即时显示新拾取的装备（含 effects 列表）
             if self._cached_equip is None:
                 self._cached_equip = {}
             self._cached_equip[d.item_type] = {
                 "id": None, "item_id": d.item_id,
                 "name": edef.get("name", d.item_type),
                 "defense": edef.get("defense", 0),
-                "capacity": 0, "level": 1, "effects": [],
+                "capacity": 0, "level": getattr(d, "level", 1) or 1, "effects": effects,
             }
         elif d.item_type == "backpack":
             from entities.equipment_defs import BACKPACKS
