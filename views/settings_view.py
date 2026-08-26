@@ -356,6 +356,10 @@ class SettingsView(arcade.View):
         self._rebind_action = None
         if self.game_view:
             self.window.show_view(self.game_view)
+        elif not self._from_game:
+            # 主页面打开的设置：返回开始界面（而非创建未 setup 的 GameView）
+            from views.start_view import StartView
+            self.window.show_view(StartView(self.window_ref))
         else:
             from views.game_view import GameView
             self.window.show_view(GameView(self.window_ref))

@@ -217,6 +217,10 @@ def handle_mouse_press(view, x, y, button, modifiers):
         view._mouse_x, view._mouse_y = x, y
         view._left_mouse_held = True
 
+        # 防御性检查：controller 尚未初始化时跳过（setup 未完成）
+        if view.controller is None:
+            return
+
         # 屏幕坐标转世界坐标（combat 函数需要世界坐标计算方向）
         # 窗口坐标系恒为逻辑分辨率（main.GameWindow 已把鼠标坐标换算到逻辑空间，
         # 渲染投影也固定为逻辑分辨率），故以 WINDOW_WIDTH/HEIGHT 换算，而非物理窗口尺寸

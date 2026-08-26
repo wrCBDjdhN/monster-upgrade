@@ -3468,6 +3468,9 @@ class GameView(arcade.View):
         联机主机：清装备后进入观战模式（房间保留、后台模拟，等待全员结束回房）；
         联机客户端：清装备后进入观战模式（与撤离观战同路径，连接保留、等待全员结束回房）。
         """
+        # 防御性检查：窗口关闭时 player 可能尚未初始化（setup 未完成），直接跳过
+        if self.player is None:
+            return
         gs = self.window.game_state
         if gs.net_mode == "host":
             # 联机主机死亡/超时：清装备 → 观战模式（不关房、不广播 ROOM_ENDED，
