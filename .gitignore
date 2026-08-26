@@ -12,3 +12,7 @@ __pycache__/
 # 打包产物（PyInstaller 的 dist/build、Inno Setup 安装包输出）
 dist/
 build/
+# 项目知识库（本地维护，不提交）
+AGENTS.md
+# opencode配置（本地维护，不提交）
+opencode.json
