@@ -78,7 +78,7 @@ class LobbyView(arcade.View):
         char_total = 4 * char_w + 3 * char_gap
         for i, cid in enumerate(CHARACTER_ORDER):
             self.char_rects[cid] = arcade.XYWH(
-                cx - char_total // 2 + i * (char_w + char_gap),
+                int(cx - char_total / 2 + char_w / 2 + i * (char_w + char_gap)),
                 WINDOW_HEIGHT - 240, char_w, 40)
         # 联机对象（host/client 各自非 None）
         self.server = None
@@ -105,6 +105,7 @@ class LobbyView(arcade.View):
         self._discovery_hover_idx = -1  # hover 的房间索引
         self._discovery_scroll_offset = 0  # 房间列表滚动偏移
         self._manual_ip_mode = False  # 是否切换到手动输入IP模式
+        self._client_theme = "forest"  # 客户端加入房间时的地图主题（用于战备检查）
         # 从市场/仓库/锻造等房间内页面返回时：自动复用 GameState 中的联机连接（房间保持）
         self._restore_net_connection()
 
@@ -146,12 +147,20 @@ class LobbyView(arcade.View):
         self.server.broadcast(MsgType.READY_STATE, {"players": players})
 
     def _toggle_ready(self):
-        """客户端准备/取消准备：翻转本地 net_ready 并上报 READY 给主机"""
+        """客户端准备/取消准备：战备检查 → 翻转本地 net_ready 并上报 READY 给主机"""
         from net.protocol import MsgType
+        from views.map_select_view import check_battle_readiness
         gs = self.window.game_state
         my_id = getattr(gs, "net_player_id", None)
         if my_id is None or self.client is None:
             return
+        # 如果是准备操作（非取消），检查战备
+        if not gs.net_ready:
+            # 客户端战备检查：根据房间地图主题检查装备价值
+            passed, error_msg, _ = check_battle_readiness(gs.player_id, self._client_theme, gs.equipped_weapon_id)
+            if not passed:
+                self._status = f"战备不足：{error_msg}"
+                return
         gs.net_ready = not gs.net_ready
         self.client.send((MsgType.READY, {"player_id": my_id, "ready": gs.net_ready}))
         self._status = ("已准备，等待房主开始游戏…" if gs.net_ready else "已取消准备")
@@ -238,9 +247,10 @@ class LobbyView(arcade.View):
             self._status = f"已选择角色：{CHARACTERS[cid]['name']}"
 
     def _host_start_game(self):
-        """主机开始游戏：全员就绪检查 → 计算全房出生点 → 广播 ROOM_START → 本地进入 GameView"""
+        """主机开始游戏：全员就绪检查 → 战备检查 → 计算全房出生点 → 广播 ROOM_START → 本地进入 GameView"""
         from net.protocol import MsgType
         from game.map_gen import generate_map
+        from views.map_select_view import check_battle_readiness
         gs = self.window.game_state
         server = self.server
         if server is None or gs.net_server is None:
@@ -255,6 +265,11 @@ class LobbyView(arcade.View):
         no_char = [pid for pid in all_pids if gs.net_characters.get(pid) is None]
         if no_char:
             self._status = f"还有 {len(no_char)} 名玩家未选择角色，无法开始游戏"
+            return
+        # 主机战备检查：根据所选地图主题检查装备价值
+        host_passed, host_error, _ = check_battle_readiness(gs.player_id, self.selected_theme, gs.equipped_weapon_id)
+        if not host_passed:
+            self._status = f"主机战备不足：{host_error}"
             return
         # 开局后重置准备状态（新一局全员重新准备，避免直接继承上一局就绪态）
         self._ready_state = {0: True}
@@ -514,6 +529,22 @@ class LobbyView(arcade.View):
         gs.net_mode = "solo"
         gs.net_characters = {}  # 断开连接：清空角色映射（重新加入需重新选角）
 
+    def _get_battle_readiness_status(self, theme: str) -> tuple[bool, str]:
+        """检查当前玩家的战备状态，返回 (passed, status_text)"""
+        from views.map_select_view import check_battle_readiness
+        gs = self.window.game_state
+        passed, error_msg, info = check_battle_readiness(gs.player_id, theme, gs.equipped_weapon_id)
+        equip_value = info.get("equip_value", 0)
+        has_artifact = info.get("has_artifact", False)
+        if passed:
+            return True, f"战备充足（装备价值: {equip_value}）"
+        else:
+            # 显示更详细的战备信息
+            detail = f"装备价值: {equip_value}"
+            if theme == "space":
+                detail += f"，神器: {'有' if has_artifact else '无'}"
+            return False, f"战备不足（{detail}）：{error_msg}"
+
     # ─────────────────────────── 绘制 ───────────────────────────
 
     def on_draw(self):
@@ -563,6 +594,11 @@ class LobbyView(arcade.View):
                       anchor_x="center")
         self._tc.text("room_status", self._status, cx, WINDOW_HEIGHT - 180,
                       arcade.color.CYAN, size=13, anchor_x="center")
+        # 主机战备状态显示
+        host_ready, host_status = self._get_battle_readiness_status(self.selected_theme)
+        status_color = arcade.color.GREEN if host_ready else arcade.color.ORANGE_RED
+        self._tc.text("host_readiness", f"[主机] {host_status}", cx, WINDOW_HEIGHT - 200,
+                      status_color, size=12, anchor_x="center")
         # 地图主题选择（建房后主机可在此切换，开局前确认最终主题）
         self._tc.text("theme_label", "选择地图:", cx, WINDOW_HEIGHT - 325,
                       arcade.color.LIGHT_GRAY, size=13, anchor_x="center")
@@ -736,7 +772,7 @@ class LobbyView(arcade.View):
         # 解锁集合：仅已解锁角色可选（联机房间内禁选未购买角色，与单机选角同口径）
         from db.database import get_unlocked_characters
         unlocked = set(get_unlocked_characters(gs.player_id)) if gs.player_id else {"initial"}
-        self._tc.text("char_title", "选择角色（开局前必选）", cx, WINDOW_HEIGHT - 205,
+        self._tc.text("char_title", "选择角色（开局前必选）", cx, WINDOW_HEIGHT - 215,
                       arcade.color.LIGHT_GRAY, size=13, anchor_x="center")
         for cid, rect in self.char_rects.items():
             char = CHARACTERS[cid]
@@ -769,6 +805,12 @@ class LobbyView(arcade.View):
         tip = "正在连接主机，请稍候…" if not self._handshake_sent else "已加入房间，准备开始游戏…"
         self._tc.text("cw_tip", tip, cx, WINDOW_HEIGHT // 2 + 32,
                       arcade.color.LIGHT_GRAY, size=13, anchor_x="center")
+        # 客户端战备状态显示（连接建立后显示）
+        if self._handshake_sent:
+            client_ready, client_status = self._get_battle_readiness_status(self._client_theme)
+            status_color = arcade.color.GREEN if client_ready else arcade.color.ORANGE_RED
+            self._tc.text("client_readiness", client_status, cx, WINDOW_HEIGHT // 2 + 15,
+                          status_color, size=12, anchor_x="center")
         # 角色选择区（连接建立后可用，点击上报 SET_CHARACTER 给主机权威映射）
         if self._handshake_sent:
             self._draw_char_select(cx)
@@ -954,8 +996,9 @@ class LobbyView(arcade.View):
                     item_y = y_start - i * (room_item_height + 5)
                     join_btn = arcade.XYWH(cx + 200, item_y, 80, 30)
                     if join_btn.point_in_rect((x, y)):
-                        # 点击加入按钮：使用该房间的IP连接
+                        # 点击加入按钮：使用该房间的IP连接，并存储地图主题用于战备检查
                         self._ip_buffer = room.get("host_ip", "127.0.0.1")
+                        self._client_theme = room.get("theme", "forest")
                         self._client_connect()
                         return
             # 返回按钮

@@ -86,6 +86,9 @@ class CharacterSelectView(arcade.View):
         if self.selected not in self._unlocked:
             self.selected = "initial"
             gs.character_id = "initial"
+        # 默认角色已选中且已解锁：直接标记已选定，显示"进入地图"按钮（避免玩家困惑）
+        if self.selected in self._unlocked:
+            self._picked = True
 
     def on_draw(self):
         self.clear()

@@ -7,12 +7,13 @@ from views.text_cache import TextCache  # 持久 Text 对象缓存，替代 draw
 
 # ── 战备检查函数 ──────────────────────────────────────────────────────────────
 
-def check_battle_readiness(pid: int, theme: str) -> tuple[bool, str, dict]:
+def check_battle_readiness(pid: int, theme: str, equipped_weapon_id: int | None = None) -> tuple[bool, str, dict]:
     """检查战备是否满足地图进入条件
 
     Args:
         pid: 玩家 ID
         theme: 地图主题 ("forest" / "desert" / "space")
+        equipped_weapon_id: 当前携带的武器 DB row id（从 game_state.equipped_weapon_id 传入）
 
     Returns:
         (passed, error_msg, info)
@@ -21,7 +22,6 @@ def check_battle_readiness(pid: int, theme: str) -> tuple[bool, str, dict]:
         - info: 战备信息字典（equip_value / max_level / has_high_level / has_artifact）
     """
     from db.equipment import get_equipment
-    from db.weapons import get_weapons
     from entities.weapon_defs import ALL_WEAPONS
     from entities.equipment_defs import HELMETS, ARMORS, BACKPACKS
 
@@ -29,20 +29,38 @@ def check_battle_readiness(pid: int, theme: str) -> tuple[bool, str, dict]:
         return True, "", {}
 
     equip = get_equipment(pid)
-    weapons = get_weapons(pid)
 
-    # 计算装备（头盔/护甲/背包）总金币价值
+    # 获取携带的单把武器（而非所有武器）
+    carried_weapon = None
+    if equipped_weapon_id is not None:
+        from db.connection import _conn
+        with _conn() as c:
+            row = c.execute(
+                "SELECT id, item_id, level FROM weapons WHERE id=? AND player_id=?",
+                (equipped_weapon_id, pid),
+            ).fetchone()
+            if row:
+                carried_weapon = {"id": row[0], "item_id": row[1], "level": row[2]}
+
+    # 计算身上穿着装备（头盔/护甲/背包）的金币价值
     equip_defs = {"helmet": HELMETS, "armor": ARMORS, "backpack": BACKPACKS}
     equip_value = 0
     has_artifact = False
     has_high_level = False
     max_level = 0
 
-    # 检查已装备物品
+    # 检查已装备物品（头盔/护甲/背包）
     for slot, item in equip.items():
         defs = equip_defs.get(slot, {})
         item_def = defs.get(item["item_id"], {})
-        equip_value += item_def.get("price", 0)
+        price = item_def.get("price", 0)
+        # 神器物品 price=0（不可购买），使用属性值计算等效价值
+        if price == 0 and item_def:
+            if "defense" in item_def:
+                price = item_def["defense"] * max(item["level"], 1) * 5
+            elif "capacity" in item_def:
+                price = item_def["capacity"] * max(item["level"], 1) * 2
+        equip_value += price
         if item_def.get("artifact", False):
             has_artifact = True
         if item["level"] > 5:
@@ -50,16 +68,20 @@ def check_battle_readiness(pid: int, theme: str) -> tuple[bool, str, dict]:
         if item["level"] > max_level:
             max_level = item["level"]
 
-    # 检查武器（价格 + 等级 + 神器判定）
-    for w in weapons:
-        wdef = ALL_WEAPONS.get(w["item_id"], {})
-        equip_value += wdef.get("price", 0)
+    # 检查携带的武器（仅一把，非全部仓库武器）
+    if carried_weapon:
+        wdef = ALL_WEAPONS.get(carried_weapon["item_id"], {})
+        price = wdef.get("price", 0)
+        # 神器武器 price=0（不可购买），使用伤害值计算等效价值
+        if price == 0 and wdef:
+            price = wdef.get("damage", 0) * max(carried_weapon["level"], 1) * 5
+        equip_value += price
         if wdef.get("artifact", False):
             has_artifact = True
-        if w["level"] > 5:
+        if carried_weapon["level"] > 5:
             has_high_level = True
-        if w["level"] > max_level:
-            max_level = w["level"]
+        if carried_weapon["level"] > max_level:
+            max_level = carried_weapon["level"]
 
     info = {
         "equip_value": equip_value,
@@ -71,15 +93,15 @@ def check_battle_readiness(pid: int, theme: str) -> tuple[bool, str, dict]:
     # 沙漠荒地：装备价值 > 100 + 至少一件 Lv.5+ 物品
     if theme == "desert":
         if equip_value < 100:
-            return False, f"装备价值不足：当前 {equip_value}，需要 100 以上", info
+            return False, f"需要装备价值达到 100 金币，当前装备价值为 {equip_value} 金币", info
         if not has_high_level:
             return False, f"需要至少一件 Lv.5+ 物品，当前最高等级 Lv.{max_level}", info
     # 航天基地：装备价值 > 500 + 至少一件神器
     elif theme == "space":
         if equip_value < 500:
-            return False, f"装备价值不足：当前 {equip_value}，需要 500 以上", info
+            return False, f"需要装备价值达到 500 金币，当前装备价值为 {equip_value} 金币", info
         if not has_artifact:
-            return False, "需要至少一件神器装备", info
+            return False, "需要至少一件神器装备，当前没有神器装备", info
 
     return True, "", info
 
@@ -155,7 +177,7 @@ class MapSelectView(arcade.View):
         self._error = ""
 
     def _build_tutorial_pages(self):
-        """新手教程阶段 3：地图选择向导（介绍地图，引导选幽暗森林）"""
+        """新手教程阶段 3：地图选择向导（介绍地图与战备要求）"""
         from views.tutorial import TutorialPage
         return [
             TutorialPage("选择地图", [
@@ -163,6 +185,13 @@ class MapSelectView(arcade.View):
                 "【幽暗森林】普通 · 【沙漠荒地】困难 · 【航天基地】极难",
                 "新手先挑战【幽暗森林】，点击卡片右下角的【进入】按钮。",
             ], highlight=self.cards[0]),
+            TutorialPage("战备要求", [
+                "困难和极难地图有装备价值要求：",
+                "【沙漠荒地】需要装备价值达到 100 金币 + 至少一件 Lv.5+ 物品",
+                "【航天基地】需要装备价值达到 500 金币 + 至少一件神器装备",
+                "装备价值 = 身上穿着的头盔/护甲/背包 + 携带武器的金币价值",
+                "可去市场购买更强装备，或去仓库取出已有装备后再挑战。",
+            ]),
         ]
 
     def _tut_showing(self):
@@ -211,10 +240,10 @@ class MapSelectView(arcade.View):
                 f"card_desc_{i}", m["desc"], rect.center_x, rect.center_y - 15,
                 arcade.color.GRAY, size=10, anchor_x="center",
             )
-            # 难度
+            # 难度（放在卡片内部靠下位置，避免与下方按钮重合）
             # 持久 Text 对象，避免 draw_text 每帧重建纹理
             self._tc.text(
-                f"card_diff_{i}", "难度: " + m["difficulty"], rect.center_x, rect.bottom + 25,
+                f"card_diff_{i}", "难度: " + m["difficulty"], rect.center_x, rect.bottom - 90,
                 arcade.color.YELLOW, size=14, anchor_x="center",
             )
             # 战备要求显示（非森林地图）
@@ -232,21 +261,22 @@ class MapSelectView(arcade.View):
                 # 检查当前战备状态
                 gs = self.window.game_state
                 pid = gs.player_id if gs else 0
-                passed, _, info = check_battle_readiness(pid, theme)
+                ewid = gs.equipped_weapon_id if gs else None
+                passed, _, info = check_battle_readiness(pid, theme, ewid)
                 req_color = (100, 255, 100) if passed else (255, 100, 100)
                 self._tc.text(
-                    f"card_req_{i}", req_text, rect.center_x, rect.bottom + 45,
+                    f"card_req_{i}", req_text, rect.center_x, rect.bottom - 75,
                     req_color, size=11, anchor_x="center",
                 )
-                # 显示当前价值信息
+                # 显示当前价值信息（在要求文字下方、按钮上方）
                 if info.get("equip_value") is not None:
                     val_text = f"当前价值: {info['equip_value']}"
                     self._tc.text(
-                        f"card_val_{i}", val_text, rect.center_x, rect.bottom + 60,
+                        f"card_val_{i}", val_text, rect.center_x, rect.bottom - 60,
                         arcade.color.LIGHT_GRAY, size=10, anchor_x="center",
                     )
-            # 进入按钮
-            btn = arcade.XYWH(rect.center_x, rect.bottom + 80, 100, 30)
+            # 进入按钮（放在卡片下方，与卡片保持间距）
+            btn = arcade.XYWH(rect.center_x, rect.bottom - 30, 100, 30)
             btn_color = arcade.color.DARK_GREEN if is_hover else (60, 120, 60)
             arcade.draw_rect_filled(btn, btn_color)
             # 持久 Text 对象，避免 draw_text 每帧重建纹理
@@ -299,8 +329,8 @@ class MapSelectView(arcade.View):
             return
         self.hovered_map = -1
         for i, rect in enumerate(self.cards):
-            # 检测卡片区域或进入按钮区域（按钮在卡片下方 bottom+80 处）
-            btn = arcade.XYWH(rect.center_x, rect.bottom + 80, 100, 30)
+            # 检测卡片区域或进入按钮区域（按钮在卡片下方 bottom-30 处）
+            btn = arcade.XYWH(rect.center_x, rect.bottom - 30, 100, 30)
             if rect.point_in_rect((x, y)) or btn.point_in_rect((x, y)):
                 self.hovered_map = i
                 break
@@ -327,16 +357,17 @@ class MapSelectView(arcade.View):
             self.window.show_view(CharacterSelectView(self.window_ref))
             return
 
-        # 地图卡片点击（进入按钮在卡片下方 bottom+80 处）
+        # 地图卡片点击（进入按钮在卡片下方 bottom-30 处）
         for i, rect in enumerate(self.cards):
-            # 检测点击区域：进入按钮（卡片底部 +80，尺寸 100×30）
-            btn = arcade.XYWH(rect.center_x, rect.bottom + 80, 100, 30)
+            # 检测点击区域：进入按钮（卡片底部 -30，尺寸 100×30）
+            btn = arcade.XYWH(rect.center_x, rect.bottom - 30, 100, 30)
             if btn.point_in_rect((x, y)):
                 # 战备检查（非森林地图）
                 theme = MAPS[i].get("theme", "forest")
                 gs = self.window.game_state
                 pid = gs.player_id if gs else 0
-                passed, error_msg, _ = check_battle_readiness(pid, theme)
+                ewid = gs.equipped_weapon_id if gs else None
+                passed, error_msg, _ = check_battle_readiness(pid, theme, ewid)
                 if not passed:
                     # 战备不足：显示错误提示（用 self._error 持久化，on_draw 可绘制）
                     self._error = error_msg

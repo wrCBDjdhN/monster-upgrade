@@ -153,12 +153,12 @@ class BackpackView(ScrollView):
         self._discard_dialog_item = (item_type, item_id, level, max_qty)
         self._discard_dialog_qty = 1
         self._discard_dialog_input = "1"
-        # 定义对话框按钮位置
+        # 定义对话框按钮位置（垂直布局：标题→数量→快捷按钮→输入框→确认/取消）
         cx, cy = WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2
-        self._discard_dialog_btn_1 = arcade.XYWH(cx - 120, cy - 40, 100, 32)
-        self._discard_dialog_btn_all = arcade.XYWH(cx, cy - 40, 100, 32)
-        self._discard_dialog_btn_confirm = arcade.XYWH(cx + 60, cy - 90, 80, 32)
-        self._discard_dialog_btn_cancel = arcade.XYWH(cx - 60, cy - 90, 80, 32)
+        self._discard_dialog_btn_1 = arcade.XYWH(cx - 60, cy + 5, 100, 32)
+        self._discard_dialog_btn_all = arcade.XYWH(cx + 60, cy + 5, 100, 32)
+        self._discard_dialog_btn_confirm = arcade.XYWH(cx + 60, cy - 75, 80, 32)
+        self._discard_dialog_btn_cancel = arcade.XYWH(cx - 60, cy - 75, 80, 32)
 
     def _handle_dialog_click(self, x, y):
         """处理丢弃对话框中的按钮点击"""
@@ -280,13 +280,13 @@ class BackpackView(ScrollView):
                           self._discard_dialog_btn_all.center_y, arcade.color.WHITE, 12,
                           anchor_x="center", anchor_y="center")
 
-        # 数量输入框
-        self._tc.text("dlg_input_label", "自定义数量:", cx, cy - 10,
+        # 数量输入框（位于快捷按钮下方、确认/取消上方）
+        self._tc.text("dlg_input_label", "自定义数量:", cx, cy - 25,
                       arcade.color.LIGHT_GRAY, 12, anchor_x="center")
-        input_rect = arcade.XYWH(cx, cy - 35, 80, 24)
+        input_rect = arcade.XYWH(cx, cy - 45, 80, 24)
         arcade.draw_rect_filled(input_rect, (50, 50, 60))
         arcade.draw_rect_outline(input_rect, arcade.color.WHITE, 1)
-        self._tc.text("dlg_input_val", self._discard_dialog_input, cx, cy - 35,
+        self._tc.text("dlg_input_val", self._discard_dialog_input, cx, cy - 45,
                       arcade.color.YELLOW, 14, anchor_x="center", anchor_y="center")
 
         # "确认" 按钮
