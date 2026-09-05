@@ -12,6 +12,7 @@ from entities.weapon_defs import MELEE_WEAPONS, RANGED_WEAPONS
 from entities.effects_defs import effects_label
 from views.scroll_view import ScrollView
 from views.text_cache import TextCache
+from game.sound_manager import sound_manager
 
 
 class MarketView(ScrollView):
@@ -586,6 +587,7 @@ class MarketView(ScrollView):
         if self._box_opening:
             return
 
+        sound_manager.play_ui()
         # 新手教程向导显示：只响应 下一步/跳过（最后一页点完成后标记教程结束）
         if self._tut_showing():
             from views.tutorial import finish_tutorial
@@ -830,6 +832,7 @@ class MarketView(ScrollView):
         if get_gold(pid) < total_cost:
             return
         spend_gold(pid, total_cost)
+        sound_manager.play_upgrade()
         if item_type in ("buy_helmet", "buy_armor", "buy_backpack"):
             slot = "helmet" if "helmet" in item_type else ("armor" if "armor" in item_type else "backpack")
             for _ in range(qty):
@@ -898,6 +901,7 @@ class MarketView(ScrollView):
         self._box_open_duration = max(0.45, 1.5 - (total - 1) * 0.04)
         self._box_open_timer = 0.0
         self._box_opening = True
+        sound_manager.play_chest_open()
 
     def _draw_bulk_overlay(self):
         """绘制批量购买弹窗：遮罩 + 面板 + 数量显示 + 滑块 + 输入框 + 加减 + 按钮"""

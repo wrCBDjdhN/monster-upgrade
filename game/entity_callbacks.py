@@ -277,6 +277,7 @@ def handle_chest_interaction(view):
         dist = math.hypot(chest.center_x - view.player.center_x, chest.center_y - view.player.center_y)
         if dist < 40:
             loot = chest.open_chest()
+            sound_manager.play_chest_open()
             spawn_chest_loot(view, chest, loot)
             # 等级经验：开宝箱经验（本回调仅在 solo/host 运行——客户端开箱由主机裁决广播）
             _award_exp(view, EXP_CHEST)
@@ -303,6 +304,7 @@ def handle_well_interaction(view):
         # 水井仅沙漠主题生成（map_gen 铁律），复用宝箱掉落逻辑并传 desert 主题
         tmp_chest = Chest(well[0], well[1], theme="desert")
         loot = tmp_chest.open_chest()
+        sound_manager.play_chest_open()
         spawn_chest_loot(view, tmp_chest, loot)
     else:
         # 已开启：回复生命 + 移速加速（数值来自 config）
@@ -335,7 +337,15 @@ def handle_rocket_pad_interaction(view):
                     assign_monster_armor(boss, level=15, theme="space")
                     assign_monster_helmet(boss, level=15, theme="space")
                     boss.set_on_death(lambda b, p=pad: _on_rocket_boss_defeated(view, b, p))
+                    # 注入召唤回调：BOSS 召唤小怪时直接加入游戏怪物列表
+                    def _on_boss_summon(boss_ref, summoned_list, _view=view):
+                        for sm in summoned_list:
+                            sm.set_on_death(_view._on_monster_death)
+                            sm._walls = _view.map_data.get("walls", [])
+                            _view.monsters.append(sm)
+                    boss._summon_callback = _on_boss_summon
                     view.monsters.append(boss)
+                    view.active_boss = boss  # 激活屏幕顶部 BOSS 血条
                     pad.set_boss(boss)
                     sound_manager.play_rocket_launch()
                     floating_texts.add(pad.center_x, pad.center_y + 50,

@@ -252,6 +252,17 @@ class GameView(arcade.View):
         self._attack_kind = None
         # 鼠标左键按住状态（用于全自动武器持续射击）
         self._left_mouse_held = False
+        # BOSS 战系统
+        self.active_boss = None  # 当前激活的 BOSS 实例（进入 BOSS 房间/火箭台激活时设置）
+        self._boss_door_sprite = None  # BOSS 房间门洞遮挡精灵（BOSS 存活时显示，死亡后移除）
+        self._boss_room_locked = False  # BOSS 房间是否已锁定（玩家无法离开）
+        # BOSS 介绍向导弹窗（进入 BOSS 房间时首次弹出，展示 4 页说明）
+        self._boss_intro_active = False  # BOSS 介绍弹窗是否激活
+        self._boss_intro_pages = []       # BOSS 介绍向导页列表
+        self._boss_intro_idx = 0          # 当前显示的页码
+        self._boss_intro_next_hover = False  # 下一步按钮悬停状态
+        self._boss_intro_next_rect = None    # 下一步按钮矩形
+        self._boss_intro_shown = False   # 本次运行是否已展示过 BOSS 介绍（避免重复弹出）
         # 联机客户端本地攻速节流计时器（客户端不再经 combat 冷却，判定已移交主机；
         # 用独立计时器模拟攻速，避免上报 ATTACK_EVENT 的频率超过武器攻速）
         self._net_fire_cd = 0.0
@@ -476,11 +487,21 @@ class GameView(arcade.View):
                 boss = _BOSS_CLASSES[boss_type](center_x=boss_spawn[0], center_y=boss_spawn[1])
                 boss.set_on_death(self._on_monster_death)
                 boss._walls = walls_for_collision
+                # 设置BOSS主题（供召唤小怪时分配装备）
+                boss._theme = theme
+                # 注入召唤回调：BOSS 召唤小怪时直接加入游戏怪物列表
+                def _on_boss_summon(boss_ref, summoned_list, _view=self):
+                    for sm in summoned_list:
+                        sm.set_on_death(_view._on_monster_death)
+                        sm._walls = _view.map_data.get("walls", [])
+                        _view.monsters.append(sm)
+                boss._summon_callback = _on_boss_summon
                 # BOSS 穿戴护甲、头盔和武器（BOSS 装备等级 Lv20-30，按主题分策略）
                 assign_monster_armor(boss, level=random.randint(*BOSS_GEAR_LEVEL_RANGE), theme=theme)
                 assign_monster_helmet(boss, level=random.randint(*BOSS_GEAR_LEVEL_RANGE), theme=theme)
                 assign_monster_weapon(boss, level=random.randint(*BOSS_WEAPON_LEVEL_RANGE), theme=theme)
                 self.monsters.append(boss)
+                self.active_boss = boss  # 激活屏幕顶部 BOSS 血条
 
             # 水井守卫（沙漠主题固定 3 个木乃伊近战）
             for gx, gy, gtype in self.map_data.get("water_well_guards", []):
@@ -2086,6 +2107,44 @@ class GameView(arcade.View):
         """同步障碍物 - 委托给 entity_callbacks"""
         sync_obstacles(self)
 
+    def _create_boss_door_block(self):
+        """在 BOSS 房间门洞处生成临时墙壁精灵，阻止玩家离开"""
+        if self._boss_door_sprite is not None:
+            return  # 已存在
+        boss_door = self.map_data.get("boss_door")
+        if not boss_door:
+            return
+        from config import TILE_SIZE
+        # 门洞尺寸：128px 宽 × TILE_SIZE 厚
+        door_w = boss_door["width"]
+        door_h = TILE_SIZE
+        side = boss_door["side"]
+        # 门洞精灵（与墙壁同色）
+        theme = self.map_data.get("theme", "forest")
+        if theme == "desert":
+            wall_color = (160, 130, 70)
+        elif theme == "space":
+            wall_color = (60, 60, 70)
+        else:
+            wall_color = (60, 70, 55)
+        sprite = arcade.SpriteSolidColor(door_w, door_h, color=wall_color)
+        sprite.center_x = boss_door["x"]
+        sprite.center_y = boss_door["y"]
+        self._boss_door_sprite = sprite
+        self.wall_list.append(sprite)
+        self.obstacle_list.append(sprite)
+
+    def _remove_boss_door_block(self):
+        """移除 BOSS 房间门洞处的临时墙壁精灵"""
+        if self._boss_door_sprite is None:
+            return
+        sprite = self._boss_door_sprite
+        if sprite in self.wall_list:
+            self.wall_list.remove(sprite)
+        if sprite in self.obstacle_list:
+            self.obstacle_list.remove(sprite)
+        self._boss_door_sprite = None
+
     def _respawn_harvestables(self, dt):
         """资源刷新 - 委托给 respawn"""
         respawn_harvestables(self, dt)
@@ -2472,6 +2531,15 @@ class GameView(arcade.View):
             from views.tutorial import draw_in_game_tutorial
             self.window.default_camera.use()
             draw_in_game_tutorial(self, self._tut_tc)
+        # BOSS 介绍向导弹窗（进入 BOSS 房间时弹出，4 页说明血条/锁定/技能机制）
+        if self._boss_intro_active and self._boss_intro_pages:
+            from views.tutorial import draw_tutorial_page
+            self.window.default_camera.use()
+            page = self._boss_intro_pages[min(self._boss_intro_idx, len(self._boss_intro_pages) - 1)]
+            total = len(self._boss_intro_pages)
+            self._boss_intro_next_rect, _ = draw_tutorial_page(
+                self, page, self._boss_intro_idx, total,
+                self._tut_tc, self._boss_intro_next_hover)
 
     def _apply_free_equip(self, d):
         """无背包拾取空槽位武器/装备/背包时，立即在局内生效（穿戴 / 加防御 / 获得容量）
@@ -2951,6 +3019,35 @@ class GameView(arcade.View):
                 dy = self.player.center_y - boss_spawn[1]
                 if abs(dx) < TILE_SIZE * 3 and abs(dy) < TILE_SIZE * 3:
                     tut.boss_taught = True
+
+        # BOSS 房间锁定逻辑
+        boss_rect = self.map_data.get("boss_rect")
+        if boss_rect and self.active_boss and self.active_boss.alive:
+            # 检查玩家是否在 BOSS 房间内（含 1 块瓦片缓冲）
+            in_boss_room = (boss_rect[0] - TILE_SIZE <= self.player.center_x <= boss_rect[2] + TILE_SIZE and
+                           boss_rect[1] - TILE_SIZE <= self.player.center_y <= boss_rect[3] + TILE_SIZE)
+            if in_boss_room and not self._boss_room_locked:
+                # 进入 BOSS 房间：锁定门洞
+                self._boss_room_locked = True
+                self._create_boss_door_block()
+                # 首次进入 BOSS 房间：弹出 BOSS 介绍向导弹窗
+                if not self._boss_intro_shown:
+                    from views.tutorial import build_boss_intro_pages
+                    self._boss_intro_pages = build_boss_intro_pages()
+                    self._boss_intro_active = True
+                    self._boss_intro_idx = 0
+                    self._boss_intro_shown = True
+            elif not in_boss_room and self._boss_room_locked:
+                # 尝试离开 BOSS 房间：推回边界
+                # 计算最近的边界点并推回
+                push_x = max(boss_rect[0] - TILE_SIZE, min(self.player.center_x, boss_rect[2] + TILE_SIZE))
+                push_y = max(boss_rect[1] - TILE_SIZE, min(self.player.center_y, boss_rect[3] + TILE_SIZE))
+                self.player.center_x = push_x
+                self.player.center_y = push_y
+        elif self._boss_room_locked and (not self.active_boss or not self.active_boss.alive):
+            # BOSS 死亡：解锁门洞
+            self._boss_room_locked = False
+            self._remove_boss_door_block()
 
         # 环境物受击闪烁计时衰减（否则被攻击后会一直显示白圈）
         for h in self.harvestables:
@@ -3462,7 +3559,7 @@ class GameView(arcade.View):
                                    arcade.color.GREEN, life=3.0, font_size=22)
                 particle_system.emit(self.player.center_x, self.player.center_y, 30,
                                     (255, 215, 0), speed=100, life=1.0, size=5)
-                sound_manager.play_level_up()  # 使用升级音效作为成功音效
+                sound_manager.play_evac()  # 撤离成功专属音效
                 if gs.net_mode == "host":
                     # 重构：联机主机撤离成功 = 本局单人结束，不关房 → 进入观战模式
                     # （房间保留、后台继续模拟，剩余客户端继续玩，全员结束后回房等待）

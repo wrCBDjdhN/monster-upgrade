@@ -326,6 +326,16 @@ def generate_map(seed: int, num_rooms: int = 6, theme: str = "forest") -> dict:
                 walls.append((bx - tw, by + boss_h, boss_w + 2 * tw, tw))
             # 记录 BOSS 生成点（建筑内部中心）
             boss_spawn = (bx + boss_w // 2, by + boss_h // 2)
+            # 保存门洞坐标（供游戏逻辑生成临时墙壁锁定房间）
+            boss_door = None
+            if door_side == 0:  # 门在上墙
+                boss_door = {"x": door_cx, "y": by - tw, "side": 0, "width": door_width}
+            elif door_side == 1:  # 门在下墙
+                boss_door = {"x": door_cx, "y": by + boss_h + tw, "side": 1, "width": door_width}
+            elif door_side == 2:  # 门在左墙
+                boss_door = {"x": bx - tw, "y": door_cy, "side": 2, "width": door_width}
+            else:  # 门在右墙
+                boss_door = {"x": bx + boss_w + tw, "y": door_cy, "side": 3, "width": door_width}
             placed = True
             break
         if placed:
@@ -334,7 +344,7 @@ def generate_map(seed: int, num_rooms: int = 6, theme: str = "forest") -> dict:
     # 建筑矩形（用于其他生成点避让）
     boss_rect = None
     if boss_spawn:
-        boss_rect = (bx, by, bx + boss_w, by + boss_h)
+        boss_rect = (bx, by, bx + boss_w, bx + boss_h)
 
     def _in_building(px, py):
         """判断坐标是否落在 BOSS 建筑内部（含 1 块瓦片缓冲）"""
@@ -513,6 +523,8 @@ def generate_map(seed: int, num_rooms: int = 6, theme: str = "forest") -> dict:
         "theme": theme,
         "boss_spawn": boss_spawn,
         "boss_type": boss_type,
+        "boss_rect": boss_rect,
+        "boss_door": boss_door,
         "water_well": water_well,
         "water_well_guards": water_well_guards,
         "rocket_pads": rocket_pads,

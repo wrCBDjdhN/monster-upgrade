@@ -1,6 +1,6 @@
 # views/ - UI 视图层
 
-**Updated:** 2026-08-25 | **Files:** 17 | **Lines:** ~7,746
+**Updated:** 2026-09-05 | **Files:** 17 | **Lines:** ~7,746
 
 ## OVERVIEW
 全部界面，均为 `arcade.View` 子类（`text_cache.py` 文本缓存与 `tutorial.py` 教程辅助两模块除外，非 View 类）。切换用 `window.show_view()`；共享状态一律走 `window.game_state`（main.GameState）。

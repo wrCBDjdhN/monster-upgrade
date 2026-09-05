@@ -14,6 +14,7 @@ from config import (
     exp_needed_for_level, roll_level_up_options,
 )
 from views.text_cache import TextCache
+from game.sound_manager import sound_manager
 
 
 class LevelUpView(arcade.View):
@@ -121,6 +122,7 @@ class LevelUpView(arcade.View):
     def on_mouse_press(self, x, y, button, modifiers):
         if button != arcade.MOUSE_BUTTON_LEFT:
             return
+        sound_manager.play_ui()
         # 点击加成卡片：写库 + 应用 + 刷新（仍有待选则继续下一组）
         for rect, opt in self.option_rects:
             if rect.point_in_rect((x, y)):

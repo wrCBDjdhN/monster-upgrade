@@ -22,6 +22,7 @@ import random
 from config import WINDOW_WIDTH, WINDOW_HEIGHT, NET_PORT, NET_SPAWN_OFFSET
 from entities.character_defs import CHARACTERS, CHARACTER_ORDER  # 房间内选角（联机开局前必选）
 from views.text_cache import TextCache  # 持久 Text 对象缓存，替代 draw_text
+from game.sound_manager import sound_manager
 
 
 class LobbyView(arcade.View):
@@ -929,6 +930,7 @@ class LobbyView(arcade.View):
         self.window.show_view(StartView(self.window_ref))
 
     def on_mouse_press(self, x, y, button, modifiers):
+        sound_manager.play_ui()
         # 返回按钮（除 join 的输入框点击外，各模式共用；host_wait 返回=关闭房间，客户端能看到"房主已关闭房间"）
         if self.mode != "join" and self.back_rect.point_in_rect((x, y)):
             if self.mode == "host_wait":

@@ -9,6 +9,7 @@ from db.database import (
 )
 from views.scroll_view import ScrollView
 from views.text_cache import TextCache
+from game.sound_manager import sound_manager
 
 
 class WarehouseView(ScrollView):
@@ -298,6 +299,7 @@ class WarehouseView(ScrollView):
         return "无特殊效果（超高属性）"
 
     def on_mouse_press(self, x, y, button, modifiers):
+        sound_manager.play_ui()
         gs = self.window.game_state
         pid = gs.player_id
         offset = self.scroll_offset

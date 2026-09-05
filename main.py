@@ -39,7 +39,7 @@ class FixedLogicalProjector(ViewportProjector):
         super().__init__(viewport=LBWH(0, 0, WINDOW_WIDTH, WINDOW_HEIGHT), context=context)
 
     def use(self):
-        """按窗口当前实际尺寸重算 letterbox 视口，并应用固定逻辑投影。"""
+        """按窗口当前实际尺寸应用固定逻辑投影（自适应拉伸，无黑边）"""
         # 先把自己设为当前相机，再直接改 framebuffer 的 viewport，
         # 避免经 ctx.viewport setter 触发「默认相机回调 use()」造成递归
         self._ctx.current_camera = self
@@ -49,12 +49,9 @@ class FixedLogicalProjector(ViewportProjector):
         # 若直接用 ctx.screen.size（物理像素）计算，会被二次放大 1.25 倍，
         # 导致 GL 视口超出 framebuffer、画面整体偏移、点击错位（修复前 bug）。
         log_w, log_h = self._ctx.window.get_size()
-        scale = min(log_w / WINDOW_WIDTH, log_h / WINDOW_HEIGHT)
-        vw = max(1, round(WINDOW_WIDTH * scale))
-        vh = max(1, round(WINDOW_HEIGHT * scale))
-        vx = (log_w - vw) // 2
-        vy = (log_h - vh) // 2
-        self._ctx.active_framebuffer.viewport = (vx, vy, vw, vh)
+        # 自适应拉伸：视口使用整个窗口，无黑边
+        # 投影矩阵保持固定逻辑分辨率，但视口覆盖全窗口
+        self._ctx.active_framebuffer.viewport = (0, 0, log_w, log_h)
         self._ctx.view_matrix = Mat4()
         # 投影固定为逻辑分辨率（_projection_matrix 在基类构造时按
         # LBWH(0,0,WINDOW_WIDTH,WINDOW_HEIGHT) 生成）
@@ -93,8 +90,9 @@ class GameWindow(arcade.Window):
         self.ctx.current_camera.use()
 
     def _letterbox(self):
-        """当前窗口的 letterbox 视口几何：返回 (vx, vy, vw, vh, scale)。
+        """当前窗口的自适应拉伸视口几何：返回 (vx, vy, vw, vh, scale)。
 
+        自适应拉伸模式：视口覆盖整个窗口，无黑边。
         以「窗口逻辑像素」（pyglet 鼠标事件所在空间，get_size()）为基准计算：
         - 窗口逻辑像素 = 物理像素 ÷ DPI 缩放比（本机 1.25，1280×720 → 1600×900）
         - pyglet 鼠标事件坐标已除以 _mouse_scale，落在逻辑像素空间（0..逻辑宽）
@@ -102,11 +100,16 @@ class GameWindow(arcade.Window):
           两者只差 DPI 缩放比，等比关系一致，故鼠标反变换必须用本函数而非物理视口
         """
         log_w, log_h = self.get_size()
-        scale = min(log_w / WINDOW_WIDTH, log_h / WINDOW_HEIGHT)
-        vw = WINDOW_WIDTH * scale
-        vh = WINDOW_HEIGHT * scale
-        vx = (log_w - vw) / 2.0
-        vy = (log_h - vh) / 2.0
+        # 自适应拉伸：视口使用整个窗口，scale 用于坐标转换
+        vw = log_w
+        vh = log_h
+        vx = 0.0
+        vy = 0.0
+        # scale 用于将窗口坐标转换为逻辑坐标
+        scale_x = log_w / WINDOW_WIDTH
+        scale_y = log_h / WINDOW_HEIGHT
+        # 使用平均 scale 保持比例（虽然拉伸但保持坐标转换一致性）
+        scale = (scale_x + scale_y) / 2.0
         return vx, vy, vw, vh, scale
 
     def _to_logical(self, x, y):

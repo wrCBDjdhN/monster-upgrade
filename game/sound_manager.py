@@ -235,6 +235,23 @@ class SoundManager:
         self._emit('explode1', 200, 0.12, 0.4, 'square', noise=0.5)
         self._emit('explode2', 80, 0.3, 0.3, 'sawtooth', sweep_to=40, noise=0.3)
 
+    def play_chest_open(self):
+        """开宝箱音效 - C5→E5→G5 上行琶音，清脆惊喜感"""
+        self._emit('chest1', 523, 0.08, 0.25, 'sine')     # C5
+        self._emit('chest2', 659, 0.08, 0.25, 'sine')     # E5
+        self._emit('chest3', 784, 0.15, 0.28, 'triangle') # G5 余韵
+
+    def play_forge(self):
+        """锻造音效 - 金属敲击（方波+噪声）+ 上行确认音"""
+        self._emit('forge1', 440, 0.06, 0.3, 'square', noise=0.4)   # 金属撞击
+        self._emit('forge2', 880, 0.08, 0.22, 'triangle')            # A5 确认
+        self._emit('forge3', 1175, 0.12, 0.25, 'sine')               # D6 余韵
+
+    def play_rocket_activate(self):
+        """火箭发射台启用音效 - 低频隆隆声+频率上升"""
+        self._emit('rktact1', 60, 0.5, 0.3, 'sine', sweep_to=150, noise=0.25)
+        self._emit('rktact2', 100, 0.4, 0.2, 'triangle', sweep_to=300)
+
 
 # 全局实例
 sound_manager = SoundManager()

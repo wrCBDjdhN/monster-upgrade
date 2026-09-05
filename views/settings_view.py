@@ -266,6 +266,7 @@ class SettingsView(arcade.View):
     def on_mouse_press(self, x, y, button, modifiers):
         if button != arcade.MOUSE_BUTTON_LEFT:
             return
+        sound_manager.play_ui()
         # 音量滑块：点击即设置音量
         if self._slider_rect.point_in_rect((x, y)):
             self._set_volume(max(0.0, min(1.0, (x - self._slider_rect.left) / self.SLIDER_W)))

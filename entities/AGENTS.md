@@ -1,6 +1,6 @@
 # entities/ - 静态数据定义
 
-**Updated:** 2026-08-25 | **Files:** 7 | **Lines:** ~1109
+**Updated:** 2026-09-05 | **Files:** 7 | **Lines:** ~1109
 
 ## OVERVIEW
 数据定义层：武器/装备/资源/怪物/效果/角色模板（weapon/equipment/resource 3 个纯字典 + character_defs 角色定义 + effects_defs 含规则逻辑 + monster_defs 含注册表逻辑）。**添加新条目 = 复制现有条目改值**，不发明新结构。被 db/game/views 三方引用；本层只依赖 config（weapon_defs 用 PROJECTILE_SPEED，monster_defs 用 PROJECTILE_SPEED/PROJECTILE_SIZE，character_defs 用 PLAYER_SPEED/PLAYER_HP）。

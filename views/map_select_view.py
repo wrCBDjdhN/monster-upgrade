@@ -3,6 +3,7 @@
 import arcade
 from config import WINDOW_WIDTH, WINDOW_HEIGHT
 from views.text_cache import TextCache  # 持久 Text 对象缓存，替代 draw_text
+from game.sound_manager import sound_manager
 
 
 # ── 战备检查函数 ──────────────────────────────────────────────────────────────
@@ -63,7 +64,7 @@ def check_battle_readiness(pid: int, theme: str, equipped_weapon_id: int | None 
         equip_value += price
         if item_def.get("artifact", False):
             has_artifact = True
-        if item["level"] > 5:
+        if item["level"] >= 5:
             has_high_level = True
         if item["level"] > max_level:
             max_level = item["level"]
@@ -78,7 +79,7 @@ def check_battle_readiness(pid: int, theme: str, equipped_weapon_id: int | None 
         equip_value += price
         if wdef.get("artifact", False):
             has_artifact = True
-        if carried_weapon["level"] > 5:
+        if carried_weapon["level"] >= 5:
             has_high_level = True
         if carried_weapon["level"] > max_level:
             max_level = carried_weapon["level"]
@@ -110,7 +111,7 @@ def check_battle_readiness(pid: int, theme: str, equipped_weapon_id: int | None 
 
 BATTLE_READY_REQS = {
     "forest": None,  # 无要求
-    "desert": {"min_value": 100, "min_level": 6, "need_artifact": False},
+    "desert": {"min_value": 100, "min_level": 5, "need_artifact": False},
     "space": {"min_value": 500, "min_level": 0, "need_artifact": True},
 }
 
@@ -350,6 +351,7 @@ class MapSelectView(arcade.View):
                 return
             return
 
+        sound_manager.play_ui()
         # 返回按钮（单机流程：角色选择 → 地图选择，返回时回角色选择页）
         back_rect = arcade.XYWH(80, 40, 100, 36)
         if back_rect.point_in_rect((x, y)):

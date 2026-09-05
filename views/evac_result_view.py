@@ -6,6 +6,7 @@ from views.text_cache import TextCache  # 持久 Text 对象缓存，替代 draw
 from entities.resource_defs import RESOURCES       # 资源ID → 中文名
 from entities.weapon_defs import ALL_WEAPONS       # 武器ID → 中文名
 from entities.equipment_defs import get_item_def   # 装备(头盔/护甲)ID → 中文名
+from game.sound_manager import sound_manager
 
 
 class EvacResultView(arcade.View):
@@ -233,6 +234,7 @@ class EvacResultView(arcade.View):
                     return
                 return
 
+            sound_manager.play_ui()
             if self.return_rect.point_in_rect((x, y)):
                 # 新手教程：看完撤离结算 → 引导进入市场买卖教学（阶段 6 接管）
                 gs = self.window.game_state

@@ -28,6 +28,7 @@ from entities.effects_defs import (
 )
 from views.scroll_view import ScrollView
 from views.text_cache import TextCache
+from game.sound_manager import sound_manager
 
 # 材料最低等级
 FORGE_MIN_LEVEL = 5
@@ -306,6 +307,7 @@ class ForgeView(ScrollView):
         if self._forge_opening:
             return
 
+        sound_manager.play_ui()
         pid = self.window.game_state.player_id
         offset = self.scroll_offset
 
@@ -406,6 +408,7 @@ class ForgeView(ScrollView):
             result = self._grant_random(pid, result_level, merged_effects)
 
         # 触发动画
+        sound_manager.play_forge()
         self._forge_opening = True
         self._forge_timer = 0.0
         self._forge_result = result

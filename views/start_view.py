@@ -3,6 +3,7 @@
 import arcade
 from config import WINDOW_WIDTH, WINDOW_HEIGHT
 from views.text_cache import TextCache  # 持久 Text 对象缓存，替代 draw_text
+from game.sound_manager import sound_manager
 
 
 class StartView(arcade.View):
@@ -252,6 +253,7 @@ class StartView(arcade.View):
                 return
             return
 
+        sound_manager.play_ui()
         # 局域网联机按钮
         if self.net_rect.point_in_rect((x, y)):
             init_db()

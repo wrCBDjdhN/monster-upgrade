@@ -90,17 +90,23 @@ def _draw_monster(view, m, wb):
         w_color = (180, 180, 180)
     draw_monster_weapon(m, m_size, w_color, wb)
 
-    # 血条
-    bar_w = 30
-    hp_ratio = m.hp / m.max_hp
-    bx = m.center_x - bar_w // 2
-    by = m.center_y + m_size + 8
-    if wb is not None:
-        wb.rect(bx + bar_w // 2, by, bar_w, 4, arcade.color.DARK_RED)
-        wb.rect(bx + bar_w * hp_ratio // 2, by, bar_w * hp_ratio, 4, arcade.color.RED)
+    # 血条：BOSS 怪物不绘制头顶小血条（改由 draw_boss_hp_bar 在屏幕顶部绘制）
+    is_boss = getattr(m, 'is_boss', False)
+    if not is_boss:
+        bar_w = 30
+        hp_ratio = m.hp / m.max_hp
+        bx = m.center_x - bar_w // 2
+        by = m.center_y + m_size + 8
+        if wb is not None:
+            wb.rect(bx + bar_w // 2, by, bar_w, 4, arcade.color.DARK_RED)
+            wb.rect(bx + bar_w * hp_ratio // 2, by, bar_w * hp_ratio, 4, arcade.color.RED)
+        else:
+            arcade.draw_rect_filled(arcade.XYWH(bx + bar_w // 2, by, bar_w, 4), arcade.color.DARK_RED)
+            arcade.draw_rect_filled(arcade.XYWH(bx + bar_w * hp_ratio // 2, by, bar_w * hp_ratio, 4), arcade.color.RED)
     else:
-        arcade.draw_rect_filled(arcade.XYWH(bx + bar_w // 2, by, bar_w, 4), arcade.color.DARK_RED)
-        arcade.draw_rect_filled(arcade.XYWH(bx + bar_w * hp_ratio // 2, by, bar_w * hp_ratio, 4), arcade.color.RED)
+        bar_w = 30
+        bx = m.center_x - bar_w // 2
+        by = m.center_y + m_size + 8
 
     # 攻击冷却条（血条上方）：_attack_delay 已由基类统一设置。
     # 远端怪物客户端不跑 AI，_attack_timer 恒 0，改读主机广播的 net_attack_anim 快照值
@@ -144,6 +150,20 @@ def _draw_monster(view, m, wb):
         helmet_name = m.helmet.get("name", "头盔")
     if helmet_name:
         view._world_labels.append((m.center_x, label_y, helmet_name, (180, 220, 180), 9))
+
+
+def _draw_skill_prompt(view, m):
+    """绘制怪物技能提示文字（攻击时在头顶显示技能名称，持续1.5秒后消失）"""
+    prompt_timer = getattr(m, '_skill_prompt_timer', 0)
+    if prompt_timer <= 0:
+        return
+    text = getattr(m, '_skill_prompt_text', None)
+    color = getattr(m, '_skill_prompt_color', (255, 255, 100))
+    if not text:
+        return
+    # 文字在怪物头顶上方浮动（随 timer 逐渐上移，使用1.5秒计算）
+    prompt_y = m.center_y + 30 + (1.5 - prompt_timer) * 20
+    view._world_labels.append((m.center_x, prompt_y, text, color, 14))
 
 
 def render_game(view):
@@ -326,6 +346,8 @@ def render_game(view):
     for m in view.monsters:
         if hasattr(m, 'alive') and m.alive and view._in_view(m.center_x, m.center_y):
             _draw_monster(view, m, wb)
+            # 技能提示文字（怪物攻击时在头顶显示技能名称）
+            _draw_skill_prompt(view, m)
 
     # 远端怪物（联机客户端由 MONSTER_SNAPSHOT 维护的纯表现层实体）：
     # 修复「客户端看不到怪物」——之前只维护 remote_monsters 字典却从不绘制，
@@ -334,6 +356,7 @@ def render_game(view):
     for m in view.remote_monsters.values():
         if hasattr(m, 'alive') and m.alive and view._in_view(m.center_x, m.center_y):
             _draw_monster(view, m, wb)
+            _draw_skill_prompt(view, m)
 
     # 世界层一次性绘制
     if wb is not None:
@@ -483,6 +506,9 @@ def render_game(view):
     # ── HUD（屏幕固定位置）──
     view.window.default_camera.use()
     gs = view.window.game_state
+
+    # BOSS 血条（屏幕顶部，仅当 BOSS 激活时显示）
+    draw_boss_hp_bar(view)
 
     # 绘制世界坐标标签
     cam = view.controller.camera.position
@@ -936,3 +962,51 @@ def draw_minimap(view):
             arcade.draw_rect_filled(
                 arcade.XYWH(mm_x + gx, mm_y + gy, 5, 5),
                 (255, 150, 60))
+
+
+def draw_boss_hp_bar(view):
+    """在屏幕顶部绘制 BOSS 血条（仅当 active_boss 存活时显示）
+
+    - 血条宽度 400px，高度 20px，居中显示
+    - 颜色渐变：血量高→绿，中→黄，低→红
+    - 显示 BOSS 名称 + 血量百分比
+    """
+    boss = getattr(view, 'active_boss', None)
+    if boss is None or not boss.alive:
+        return
+    # 血条参数
+    bar_w = 400
+    bar_h = 20
+    bar_x = WINDOW_WIDTH // 2
+    bar_y = WINDOW_HEIGHT - 30
+    hp_ratio = max(0.0, min(1.0, boss.hp / boss.max_hp))
+    # 颜色渐变：血量高→绿，中→黄，低→红
+    if hp_ratio > 0.6:
+        hp_color = arcade.color.GREEN
+    elif hp_ratio > 0.3:
+        hp_color = arcade.color.YELLOW
+    else:
+        hp_color = arcade.color.RED
+    # 背景（深灰）
+    arcade.draw_rect_filled(
+        arcade.XYWH(bar_x, bar_y, bar_w, bar_h),
+        (40, 40, 40))
+    # 血量填充
+    fill_w = bar_w * hp_ratio
+    if fill_w > 0:
+        arcade.draw_rect_filled(
+            arcade.XYWH(bar_x - bar_w // 2 + fill_w // 2, bar_y, fill_w, bar_h),
+            hp_color)
+    # 边框（白色）
+    arcade.draw_rect_outline(
+        arcade.XYWH(bar_x, bar_y, bar_w, bar_h),
+        arcade.color.WHITE, border_width=2)
+    # BOSS 名称 + 血量百分比
+    from entities.monster_defs import MONSTER_METADATA
+    boss_cls = boss.__class__.__name__
+    boss_name = MONSTER_METADATA.get(boss_cls, {}).get("name", boss_cls)
+    hp_text = f"{boss_name}  {int(hp_ratio * 100)}%"
+    arcade.draw_text(
+        hp_text, bar_x, bar_y + bar_h // 2 + 2,
+        arcade.color.WHITE, 12, anchor_x="center", anchor_y="bottom",
+        bold=True)

@@ -32,6 +32,12 @@ def handle_key_press(view, key, modifiers):
     """处理键盘按下事件"""
     gs = view.window.game_state
 
+    # BOSS 介绍向导弹窗激活时：ESC 关闭弹窗，其余按键不响应
+    if getattr(view, "_boss_intro_active", False):
+        if key == arcade.key.ESCAPE:
+            view._boss_intro_active = False
+        return
+
     # 设置界面键 (ESC)：任何模式（含观战）都可打开设置界面调整按键/音量。
     # 放在观战早退之前：观战中玩家也要能开设置。
     if key == arcade.key.ESCAPE:
@@ -194,6 +200,11 @@ def handle_key_release(view, key, modifiers):
 def handle_mouse_motion(view, x, y, dx, dy):
     """处理鼠标移动事件"""
     view._mouse_x, view._mouse_y = x, y
+    # BOSS 介绍弹窗：更新下一步按钮悬停状态
+    if getattr(view, "_boss_intro_active", False):
+        next_rect = getattr(view, "_boss_intro_next_rect", None)
+        view._boss_intro_next_hover = bool(next_rect and next_rect.point_in_rect((x, y)))
+        return
     # 退出观战按钮悬停检测（观战模式下右下角按钮高亮）
     if getattr(view, "_spectating", False):
         exit_rect = getattr(view, "_exit_spectate_rect", None)
@@ -203,6 +214,15 @@ def handle_mouse_motion(view, x, y, dx, dy):
 
 def handle_mouse_press(view, x, y, button, modifiers):
     """处理鼠标按下事件"""
+    # BOSS 介绍弹窗激活时：检测下一步/跳过按钮点击
+    if getattr(view, "_boss_intro_active", False):
+        next_rect = getattr(view, "_boss_intro_next_rect", None)
+        if next_rect and next_rect.point_in_rect((x, y)):
+            view._boss_intro_idx += 1
+            if view._boss_intro_idx >= len(view._boss_intro_pages):
+                view._boss_intro_active = False  # 最后一页：关闭弹窗
+            view._boss_intro_next_hover = False
+        return
     # 退出观战按钮点击（观战模式下优先检测，返回大厅等待下一局）
     if getattr(view, "_spectating", False):
         exit_rect = getattr(view, "_exit_spectate_rect", None)

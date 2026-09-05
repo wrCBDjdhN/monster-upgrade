@@ -14,6 +14,7 @@ import arcade
 from config import WINDOW_WIDTH, WINDOW_HEIGHT
 from views.text_cache import TextCache  # 持久 Text 对象缓存，替代 draw_text
 from entities.character_defs import CHARACTERS, CHARACTER_ORDER
+from game.sound_manager import sound_manager
 
 
 class CharacterSelectView(arcade.View):
@@ -310,6 +311,7 @@ class CharacterSelectView(arcade.View):
                 return
             return
 
+        sound_manager.play_ui()
         # 返回按钮
         if self.back_rect.point_in_rect((x, y)):
             from views.start_view import StartView

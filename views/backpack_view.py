@@ -23,6 +23,7 @@ from entities.weapon_defs import ALL_WEAPONS
 from entities.equipment_defs import HELMETS, ARMORS, BACKPACKS
 from views.scroll_view import ScrollView
 from views.text_cache import TextCache
+from game.sound_manager import sound_manager
 
 
 class BackpackView(ScrollView):
@@ -115,6 +116,7 @@ class BackpackView(ScrollView):
 
     def on_mouse_press(self, x, y, button, modifiers):
         if button == arcade.MOUSE_BUTTON_LEFT:
+            sound_manager.play_ui()
             # 丢弃对话框激活时，优先处理对话框按钮
             if self._discard_dialog_active:
                 self._handle_dialog_click(x, y)
