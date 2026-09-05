@@ -7,6 +7,7 @@ from config import (
     EVAC_COLOR, EVAC_RADIUS, DESERT_THEME,
     SPACE_THEME, ACTION_TIME_SPACE, ACTION_TIME_FOREST, ACTION_TIME_DESERT,
     MAP_WIDTH, MAP_HEIGHT, MINIMAP_SIZE, MINIMAP_PADDING, MINIMAP_VIEW_RADIUS,
+    DOWNED_TIMEOUT,
 )
 
 # 可破坏环境物中文名映射
@@ -446,6 +447,45 @@ def render_game(view):
         gname = getattr(ghost, "net_name", f"玩家{pid}")
         view._world_labels.append((ghost.center_x, ghost.center_y + PLAYER_SIZE + 18,
                                    gname, arcade.color.LIGHT_BLUE, 9))
+
+    # 倒地玩家渲染（联机模式）：半透明橙色 + 倒计时 + 救援提示
+    downed_players = getattr(view, "_downed_players", {})
+    for pid, dp in downed_players.items():
+        dx, dy = dp["x"], dp["y"]
+        timer = dp["timer"]
+        if not view._in_view(dx, dy):
+            continue
+        # 倒地玩家半透明橙色方块
+        alpha = int(180 * (timer / DOWNED_TIMEOUT))  # 越接近超时越透明
+        downed_color = (255, 140, 0, alpha)
+        if pb is not None:
+            pb.rect(dx, dy, PLAYER_SIZE * 2, PLAYER_SIZE * 2, downed_color)
+        else:
+            arcade.draw_rect_filled(arcade.XYWH(dx, dy, PLAYER_SIZE * 2, PLAYER_SIZE * 2),
+                                    downed_color)
+        # 倒计时文字（头顶）
+        timer_text = f"救援 {int(timer)}s"
+        timer_color = arcade.color.GREEN if timer > 20 else (arcade.color.ORANGE if timer > 10 else arcade.color.RED)
+        view._world_labels.append((dx, dy + PLAYER_SIZE + 18, timer_text, timer_color, 10))
+        # "需要救援" 提示
+        view._world_labels.append((dx, dy - PLAYER_SIZE - 10, "需要救援!", arcade.color.ORANGE, 9))
+
+    # 救援进度条（本地玩家正在救援时显示）
+    if getattr(view, "_rescuing", False) and view._rescue_target is not None:
+        progress = getattr(view, "_rescue_progress", 0.0)
+        bar_w = 80
+        bar_h = 8
+        bx = view.player.center_x - bar_w // 2
+        by = view.player.center_y - PLAYER_SIZE - 20
+        # 背景
+        if pb is not None:
+            pb.rect(bx + bar_w // 2, by, bar_w, bar_h, arcade.color.DARK_GRAY)
+            pb.rect(bx + bar_w * progress // 2, by, bar_w * progress, bar_h, arcade.color.CYAN)
+        else:
+            arcade.draw_rect_filled(arcade.XYWH(bx + bar_w // 2, by, bar_w, bar_h), arcade.color.DARK_GRAY)
+            arcade.draw_rect_filled(arcade.XYWH(bx + bar_w * progress // 2, by, bar_w * progress, bar_h), arcade.color.CYAN)
+        # 救援文字
+        view._world_labels.append((view.player.center_x, by - 12, "救援中...", arcade.color.CYAN, 10))
 
     # 近战攻击范围可视化（挥砍刀光）
     if view._attack_visual:
@@ -1001,12 +1041,15 @@ def draw_boss_hp_bar(view):
     arcade.draw_rect_outline(
         arcade.XYWH(bar_x, bar_y, bar_w, bar_h),
         arcade.color.WHITE, border_width=2)
-    # BOSS 名称 + 血量百分比
-    from entities.monster_defs import MONSTER_METADATA
+    # BOSS 名称 + 血量百分比（用 _MONSTER_NAMES 中文映射，MONSTER_METADATA 无 name 键）
     boss_cls = boss.__class__.__name__
-    boss_name = MONSTER_METADATA.get(boss_cls, {}).get("name", boss_cls)
+    boss_name = _MONSTER_NAMES.get(boss_cls, boss_cls)
     hp_text = f"{boss_name}  {int(hp_ratio * 100)}%"
-    arcade.draw_text(
-        hp_text, bar_x, bar_y + bar_h // 2 + 2,
-        arcade.color.WHITE, 12, anchor_x="center", anchor_y="bottom",
-        bold=True)
+    if not hasattr(draw_boss_hp_bar, '_txt'):
+        draw_boss_hp_bar._txt = arcade.Text(
+            "", bar_x, bar_y + bar_h // 2 + 2,
+            arcade.color.WHITE, 12, anchor_x="center", anchor_y="bottom", bold=True)
+    _t = draw_boss_hp_bar._txt
+    _t.value = hp_text
+    _t.position = (bar_x, bar_y + bar_h // 2 + 2)
+    _t.draw()

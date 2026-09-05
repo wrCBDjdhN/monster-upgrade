@@ -281,12 +281,12 @@ class FloatingTextManager:
         self.add(x, y + 20, f"获得 {name}!", (100, 200, 255), life=1.5, font_size=16, vy=40)
 
     def add_damage(self, x, y, amount):
-        """伤害数字"""
-        self.add(x, y, f"-{amount}", (255, 80, 80), life=0.8, font_size=12, vy=80)
+        """伤害数字（取整避免浮点显示）"""
+        self.add(x, y, f"-{int(amount)}", (255, 80, 80), life=0.8, font_size=12, vy=80)
 
     def add_heal(self, x, y, amount):
-        """治疗数字"""
-        self.add(x, y, f"+{amount}", (80, 255, 80), life=0.8, font_size=12, vy=60)
+        """治疗数字（取整避免浮点显示）"""
+        self.add(x, y, f"+{int(amount)}", (80, 255, 80), life=0.8, font_size=12, vy=60)
 
 
 # 全局实例

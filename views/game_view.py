@@ -23,6 +23,8 @@ from config import (
     AURA_SLOW_TICK, AURA_SLOW_LEVEL,  # 攻速光环：减速结算周期与效果等级
     # 等级系统：击杀/撤离经验常量（客户端击杀结算用）
     EXP_KILL_BASE, EXP_BOSS_MULT, EXP_EVAC,
+    # 倒地/救援系统
+    DOWNED_TIMEOUT, RESCUE_DISTANCE, RESCUE_DURATION, REVIVE_HP,
 )
 from net.protocol import MsgType  # 联机消息类型枚举（MONSTER_SNAPSHOT 等）
 from game.map_gen import generate_map
@@ -177,6 +179,12 @@ class GameView(arcade.View):
         self._exit_spectate_hover = False
         # 各玩家本局结束状态：alive/evac/dead/left（主机观战期间全员结束判定用，host=0 固定）
         self._player_status: dict[int, str] = {}
+        # 倒地/救援系统状态（联机模式）
+        self._downed_players: dict[int, dict] = {}  # {player_id: {"x", "y", "timer"}} 倒地玩家信息
+        self._rescuing = False            # 是否正在救援（读条中）
+        self._rescue_target: int | None = None  # 正在救援的玩家 id
+        self._rescue_timer = 0.0          # 救援读条计时器
+        self._rescue_progress = 0.0       # 救援进度 0~1（渲染用）
         # 联机客户端：撤离请求已发送标记（读条完成只发一次 EVAC_REQUEST，B12 单次闸门）
         self._evac_request_sent = False
         # 联机主机：弹丸网络 id 单调递增计数器（从 1 开始，不回收已消亡 id，见 _serialize_projectiles）
@@ -253,16 +261,12 @@ class GameView(arcade.View):
         # 鼠标左键按住状态（用于全自动武器持续射击）
         self._left_mouse_held = False
         # BOSS 战系统
-        self.active_boss = None  # 当前激活的 BOSS 实例（进入 BOSS 房间/火箭台激活时设置）
+        self.active_boss = None  # 当前激活的 BOSS 实例（仅在玩家进入 BOSS 房间/火箭台激活时设置，控制 HP 血条显示）
+        self._boss_instance = None  # BOSS 实例引用（setup 时创建，用于房间锁定判定，不触发 HP 血条）
         self._boss_door_sprite = None  # BOSS 房间门洞遮挡精灵（BOSS 存活时显示，死亡后移除）
         self._boss_room_locked = False  # BOSS 房间是否已锁定（玩家无法离开）
         # BOSS 介绍向导弹窗（进入 BOSS 房间时首次弹出，展示 4 页说明）
-        self._boss_intro_active = False  # BOSS 介绍弹窗是否激活
-        self._boss_intro_pages = []       # BOSS 介绍向导页列表
-        self._boss_intro_idx = 0          # 当前显示的页码
-        self._boss_intro_next_hover = False  # 下一步按钮悬停状态
-        self._boss_intro_next_rect = None    # 下一步按钮矩形
-        self._boss_intro_shown = False   # 本次运行是否已展示过 BOSS 介绍（避免重复弹出）
+
         # 联机客户端本地攻速节流计时器（客户端不再经 combat 冷却，判定已移交主机；
         # 用独立计时器模拟攻速，避免上报 ATTACK_EVENT 的频率超过武器攻速）
         self._net_fire_cd = 0.0
@@ -501,7 +505,7 @@ class GameView(arcade.View):
                 assign_monster_helmet(boss, level=random.randint(*BOSS_GEAR_LEVEL_RANGE), theme=theme)
                 assign_monster_weapon(boss, level=random.randint(*BOSS_WEAPON_LEVEL_RANGE), theme=theme)
                 self.monsters.append(boss)
-                self.active_boss = boss  # 激活屏幕顶部 BOSS 血条
+                self._boss_instance = boss  # 保存 BOSS 引用（不设置 active_boss，进入房间时才激活血条）
 
             # 水井守卫（沙漠主题固定 3 个木乃伊近战）
             for gx, gy, gtype in self.map_data.get("water_well_guards", []):
@@ -1042,6 +1046,7 @@ class GameView(arcade.View):
         - 主机本地玩家 = gs.net_player_id（未接入大厅时为 0 约定值）；
         - 客户端幽灵 = remote_players（HP 权威值，位置暂为出生点，todo 23 补实体同步）；
         - 载荷键名严格遵循 net/protocol.py MESSAGE_SCHEMAS["PLAYER_SNAPSHOT"]。
+        - 倒地玩家：alive=False（客户端侧幽灵消失），但 _player_status 为 "downed"。
         """
         gs = self.window.game_state
         host_id = getattr(gs, "net_player_id", None)
@@ -1053,18 +1058,18 @@ class GameView(arcade.View):
             "hp": self.player.hp, "max_hp": self.player.max_hp,
             "weapon": self._current_weapon_name(),
             "facing": getattr(self.player, "facing", 0.0),
-            # 修复(BUG1)：主机撤离/死亡进入观战后广播 alive=False → 客户端侧主机幽灵
-            # HP 归零、渲染消失，不再作为观战跟随目标（否则客户端观战跟随静止在
-            # 撤离点的主机幽灵，视角卡死无法移动）
-            "alive": self.player.alive and not self._spectating,
+            # 倒地/观战/死亡：alive=False（客户端侧幽灵消失）
+            "alive": self.player.alive and not self._spectating and not self.player.downed,
         }]
         for pid, ghost in self.remote_players.items():
+            # 倒地玩家：alive=False（客户端侧幽灵消失）
+            is_downed = self._player_status.get(pid) == "downed"
             players.append({
                 "player_id": pid,
                 "x": ghost.center_x, "y": ghost.center_y,
                 "hp": getattr(ghost, "hp", 0), "max_hp": getattr(ghost, "max_hp", 0),
                 "weapon": None, "facing": 0.0,
-                "alive": getattr(ghost, "alive", True),
+                "alive": getattr(ghost, "alive", True) and not is_downed,
             })
         return players
 
@@ -1858,6 +1863,257 @@ class GameView(arcade.View):
                            "你已阵亡，进入观战模式（V 键切换视角）",
                            arcade.color.RED, life=3.0, font_size=16)
 
+    # ── 倒地/救援系统 ──
+
+    def _player_downed(self) -> None:
+        """本地玩家进入倒地状态（联机模式）：HP=0 但保留装备，等待队友救援
+
+        倒地期间：不能移动/攻击/拾取，头顶显示倒计时，队友靠近按 E 可救援。
+        超时未被救或主动退出观战 → 真死（清装备 + 观战）。
+        """
+        gs = self.window.game_state
+        if self._spectating:
+            return
+        # 标记倒地状态
+        self.player.downed = True
+        self.player.downed_timer = DOWNED_TIMEOUT
+        self._spectating = True  # 复用观战标志：屏蔽操作/渲染本体
+        self.controller.follow_player = False
+        self._left_mouse_held = False
+        self._chest_key_pressed = False
+        # 通知主机（主机模式下直接处理，客户端模式下发给主机）
+        if gs.net_mode == "host":
+            # 主机本地玩家倒地：广播给所有客户端
+            self._player_status[0] = "downed"
+            self._downed_players[0] = {
+                "x": self.player.center_x, "y": self.player.center_y,
+                "timer": DOWNED_TIMEOUT,
+            }
+            gs.net_server.broadcast(MsgType.PLAYER_DOWNED, {
+                "player_id": 0,
+                "x": self.player.center_x, "y": self.player.center_y,
+            })
+        elif gs.net_mode == "client":
+            # 客户端倒地：通知主机（主机权威裁决）
+            gs.net_client.send((MsgType.PLAYER_DOWNED, {
+                "player_id": gs.net_player_id,
+                "x": self.player.center_x, "y": self.player.center_y,
+            }))
+        floating_texts.add(self.player.center_x, self.player.center_y + 60,
+                           f"你已倒地！等待队友救援（{DOWNED_TIMEOUT}秒超时）",
+                           arcade.color.ORANGE, life=3.0, font_size=16)
+
+    def _apply_player_downed(self, payload: dict) -> None:
+        """客户端收到 PLAYER_DOWNED：标记远端玩家倒地（显示倒地标记）"""
+        gs = self.window.game_state
+        player_id = payload.get("player_id")
+        my_id = getattr(gs, "net_player_id", None)
+        if my_id is not None and player_id == my_id:
+            # 本人倒地：进入倒地状态
+            if not self.player.downed:
+                self._player_downed()
+            return
+        # 远端玩家倒地：记录倒地信息（渲染用）
+        self._downed_players[player_id] = {
+            "x": payload.get("x", 0), "y": payload.get("y", 0),
+            "timer": DOWNED_TIMEOUT,
+        }
+        self._player_status[player_id] = "downed"
+
+    def _apply_rescue_result(self, payload: dict) -> None:
+        """客户端收到 RESCUE_RESULT：救援成功 → 恢复被救者 HP；失败 → 保持倒地"""
+        gs = self.window.game_state
+        target_id = payload.get("target_id")
+        success = payload.get("success", False)
+        hp = payload.get("hp", 0)
+        my_id = getattr(gs, "net_player_id", None)
+        if success:
+            if my_id is not None and target_id == my_id:
+                # 本人被救：恢复 HP，退出倒地状态
+                self.player.hp = hp
+                self.player.downed = False
+                self.player.downed_timer = 0.0
+                self._spectating = False
+                self.controller.follow_player = True
+                floating_texts.add(self.player.center_x, self.player.center_y + 60,
+                                   f"你已被救！HP 恢复为 {int(hp)}",
+                                   arcade.color.GREEN, life=2.0, font_size=16)
+            else:
+                # 远端玩家被救：移除倒地标记
+                self._downed_players.pop(target_id, None)
+                self._player_status[target_id] = "alive"
+            # 救援者提示
+            rescuer_id = payload.get("rescuer_id")
+            if my_id is not None and rescuer_id == my_id:
+                floating_texts.add(self.player.center_x, self.player.center_y + 60,
+                                   "救援成功！",
+                                   arcade.color.GREEN, life=1.5, font_size=16)
+        else:
+            # 救援失败（被救者已超时或离开）
+            self._downed_players.pop(target_id, None)
+
+    def _apply_player_revived(self, payload: dict) -> None:
+        """客户端收到 PLAYER_REVIVED：广播复活成功（所有端恢复该玩家实体）"""
+        gs = self.window.game_state
+        player_id = payload.get("player_id")
+        hp = payload.get("hp", REVIVE_HP)
+        my_id = getattr(gs, "net_player_id", None)
+        if my_id is not None and player_id == my_id:
+            # 本人复活：恢复 HP
+            self.player.hp = hp
+            self.player.downed = False
+            self.player.downed_timer = 0.0
+            self._spectating = False
+            self.controller.follow_player = True
+        else:
+            # 远端玩家复活：恢复幽灵 HP，移除倒地标记
+            ghost = self.remote_players.get(player_id)
+            if ghost is not None:
+                ghost.hp = hp
+            self._downed_players.pop(player_id, None)
+            self._player_status[player_id] = "alive"
+
+    def _apply_spectate_leave(self, payload: dict) -> None:
+        """主机收到 SPECTATE_LEAVE：玩家主动退出观战 → 视为真死，清装备"""
+        gs = self.window.game_state
+        player_id = payload.get("player_id")
+        if player_id == 0:
+            # 主机自己退出观战：清装备 + 观战
+            self._clear_run_equipment(gs)
+            self._enter_spectate("dead")
+        else:
+            # 客户端退出观战：标记真死
+            self._downed_players.pop(player_id, None)
+            self._player_status[player_id] = "dead"
+            # 通知该客户端真死
+            gs.net_server.send_to(player_id, MsgType.PLAYER_DEATH, {
+                "player_id": player_id,
+                "killer_id": None,
+            })
+
+    def _handle_rescue_request(self, sender_id: int, payload: dict) -> None:
+        """主机处理 RESCUE_REQUEST：裁决距离并执行救援"""
+        gs = self.window.game_state
+        rescuer_id = payload.get("rescuer_id")
+        target_id = payload.get("target_id")
+        # 校验：被救者必须处于倒地状态
+        if self._player_status.get(target_id) != "downed":
+            return
+        # 校验：救援者必须存活
+        if self._player_status.get(rescuer_id) != "alive":
+            return
+        # 获取被救者位置
+        downed_info = self._downed_players.get(target_id)
+        if downed_info is None:
+            return
+        target_x, target_y = downed_info["x"], downed_info["y"]
+        # 获取救援者位置
+        if rescuer_id == 0:
+            rescuer_x, rescuer_y = self.player.center_x, self.player.center_y
+        else:
+            ghost = self.remote_players.get(rescuer_id)
+            if ghost is None:
+                return
+            rescuer_x, rescuer_y = ghost.center_x, ghost.center_y
+        # 距离校验
+        dist = math.hypot(rescuer_x - target_x, rescuer_y - target_y)
+        if dist > RESCUE_DISTANCE:
+            # 距离太远：发送失败结果
+            gs.net_server.send_to(rescuer_id, MsgType.RESCUE_RESULT, {
+                "target_id": target_id, "rescuer_id": rescuer_id,
+                "success": False, "hp": 0,
+            })
+            return
+        # 执行救援：被救者 HP 恢复为 REVIVE_HP
+        del self._downed_players[target_id]
+        self._player_status[target_id] = "alive"
+        # 广播救援成功
+        gs.net_server.broadcast(MsgType.RESCUE_RESULT, {
+            "target_id": target_id, "rescuer_id": rescuer_id,
+            "success": True, "hp": REVIVE_HP,
+        })
+        gs.net_server.broadcast(MsgType.PLAYER_REVIVED, {
+            "player_id": target_id, "hp": REVIVE_HP,
+        })
+        # 如果被救者是幽灵：恢复其 HP
+        ghost = self.remote_players.get(target_id)
+        if ghost is not None:
+            ghost.hp = REVIVE_HP
+            ghost.downed = False
+        print(f"[GameView] 玩家 {rescuer_id} 成功救援玩家 {target_id}，HP 恢复为 {REVIVE_HP}")
+
+    def _try_rescue(self) -> None:
+        """本地玩家尝试救援附近的倒地队友（E 键触发）"""
+        gs = self.window.game_state
+        if gs.net_mode == "solo" or self._spectating:
+            return
+        if self.player.downed:
+            return  # 倒地玩家不能救援
+        # 查找最近的倒地玩家
+        nearest_id = None
+        nearest_dist = float("inf")
+        for pid, dp in self._downed_players.items():
+            if pid == 0 and gs.net_mode == "host":
+                continue  # 主机不救援自己
+            if pid == getattr(gs, "net_player_id", None):
+                continue  # 不救援自己
+            dist = math.hypot(
+                self.player.center_x - dp["x"],
+                self.player.center_y - dp["y"],
+            )
+            if dist < RESCUE_DISTANCE and dist < nearest_dist:
+                nearest_dist = dist
+                nearest_id = pid
+        if nearest_id is None:
+            return  # 附近没有倒地玩家
+        # 开始救援读条
+        self._rescuing = True
+        self._rescue_target = nearest_id
+        self._rescue_timer = 0.0
+        self._rescue_progress = 0.0
+
+    def _update_rescue(self, dt: float) -> None:
+        """更新救援读条（每帧调用）"""
+        if not self._rescuing or self._rescue_target is None:
+            return
+        gs = self.window.game_state
+        # 检查目标是否仍在倒地状态
+        if self._rescue_target not in self._downed_players:
+            self._rescuing = False
+            self._rescue_target = None
+            return
+        # 检查距离是否仍在范围内
+        dp = self._downed_players[self._rescue_target]
+        dist = math.hypot(
+            self.player.center_x - dp["x"],
+            self.player.center_y - dp["y"],
+        )
+        if dist > RESCUE_DISTANCE:
+            self._rescuing = False
+            self._rescue_target = None
+            floating_texts.add(self.player.center_x, self.player.center_y + 40,
+                               "救援中断：距离太远",
+                               arcade.color.ORANGE, life=1.0, font_size=12)
+            return
+        # 递增读条
+        self._rescue_timer += dt
+        self._rescue_progress = min(1.0, self._rescue_timer / RESCUE_DURATION)
+        if self._rescue_timer >= RESCUE_DURATION:
+            # 救援完成：发送请求给主机
+            self._rescuing = False
+            self._rescue_target = None
+            if gs.net_mode == "host":
+                # 主机直接执行救援
+                self._handle_rescue_request(0, {
+                    "rescuer_id": 0,
+                    "target_id": self._rescue_target or dp.get("target_id"),
+                })
+            elif gs.net_mode == "client":
+                gs.net_client.send((MsgType.RESCUE_REQUEST, {
+                    "rescuer_id": gs.net_player_id,
+                    "target_id": self._rescue_target,
+                }))
+
     def _on_monster_death(self, monster):
         """怪物死亡回调 - 委托给 entity_callbacks"""
         on_monster_death(self, monster)
@@ -2525,21 +2781,12 @@ class GameView(arcade.View):
     def on_draw(self):
         """渲染 - 委托给 rendering.render_game"""
         render_game(self)
-        # 新手教程（阶段 4）：游戏内引导横幅（HUD 逻辑坐标系下绘制）
+        # 新手教程（阶段 4）：游戏内引导横幅 + BOSS 介绍弹窗（HUD 逻辑坐标系下绘制）
         tut = getattr(self.window.game_state, "tutorial", None)
         if tut is not None and tut.active and tut.stage == 3:
             from views.tutorial import draw_in_game_tutorial
             self.window.default_camera.use()
             draw_in_game_tutorial(self, self._tut_tc)
-        # BOSS 介绍向导弹窗（进入 BOSS 房间时弹出，4 页说明血条/锁定/技能机制）
-        if self._boss_intro_active and self._boss_intro_pages:
-            from views.tutorial import draw_tutorial_page
-            self.window.default_camera.use()
-            page = self._boss_intro_pages[min(self._boss_intro_idx, len(self._boss_intro_pages) - 1)]
-            total = len(self._boss_intro_pages)
-            self._boss_intro_next_rect, _ = draw_tutorial_page(
-                self, page, self._boss_intro_idx, total,
-                self._tut_tc, self._boss_intro_next_hover)
 
     def _apply_free_equip(self, d):
         """无背包拾取空槽位武器/装备/背包时，立即在局内生效（穿戴 / 加防御 / 获得容量）
@@ -2766,6 +3013,15 @@ class GameView(arcade.View):
                 elif msg_type == MsgType.PLAYER_DEATH:
                     # 主机判定本人死亡：走单机失败结算 + 断开离开房间（其余玩家继续）
                     self._apply_player_death(payload)
+                elif msg_type == MsgType.PLAYER_DOWNED:
+                    # 主机广播某玩家倒地：标记倒地状态（渲染用）
+                    self._apply_player_downed(payload)
+                elif msg_type == MsgType.RESCUE_RESULT:
+                    # 主机广播救援结果：成功恢复 HP / 失败保持倒地
+                    self._apply_rescue_result(payload)
+                elif msg_type == MsgType.PLAYER_REVIVED:
+                    # 主机广播玩家复活成功：恢复该玩家实体
+                    self._apply_player_revived(payload)
                 elif msg_type == MsgType.FULL_STATE:
                     # 晚期加入全量状态：初始化远端世界（怪物/掉落/宝箱/环境物/倒计时）
                     self._apply_full_state(payload)
@@ -2867,6 +3123,12 @@ class GameView(arcade.View):
                 elif inbound.get("msg_type") == MsgType.PLAYER_ABANDON.name:
                     # 客户端放弃行动通知：更新 _player_status → 触发全员结束判定
                     self._handle_player_abandon(sender_id, inbound.get("payload") or {})
+                elif inbound.get("msg_type") == MsgType.RESCUE_REQUEST.name:
+                    # 客户端请求救援倒地玩家：主机裁决距离并执行救援
+                    self._handle_rescue_request(sender_id, inbound.get("payload") or {})
+                elif inbound.get("msg_type") == MsgType.SPECTATE_LEAVE.name:
+                    # 客户端主动退出观战：视为真死，清装备
+                    self._apply_spectate_leave(inbound.get("payload") or {})
                 elif inbound.get("msg_type") == MsgType.PLAYER_SNAPSHOT.name:
                     # 客户端 20Hz 上报本人实体：主机据此更新对应幽灵的位置/朝向/存活（Todo 23）
                     self._apply_client_snapshot(sender_id, inbound.get("payload") or {})
@@ -2876,22 +3138,45 @@ class GameView(arcade.View):
                 # 其他客户端消息：确保该玩家幽灵已创建（多目标 AI 与 PLAYER_SNAPSHOT 需要）
                 self._ensure_ghost(sender_id)
 
-            # 主机权威幽灵死亡检测：HP 归零 → 单播 PLAYER_DEATH 给该玩家（其余玩家继续），
-            # 幽灵标记死亡由 PLAYER_SNAPSHOT alive=False 下发，其他端幽灵随之消失（Todo 16）
+            # 主机权威幽灵倒地检测：HP 归零 → 广播 PLAYER_DOWNED（可被救援），
+            # 超时未被救则发 PLAYER_DEATH（真死）；幽灵标记由 PLAYER_SNAPSHOT alive=False 下发
             for pid, ghost in list(self.remote_players.items()):
                 # 已撤离/离开的玩家不是死亡：其幽灵 alive=False 是撤离观战所致
-                # （_send_player_snapshot 观战时上报 alive=False），不得误发 PLAYER_DEATH、
-                # 不得把 _player_status 从 evac/left 覆盖为 dead（修复：撤离误判死亡破坏观战流程）
-                if self._player_status.get(pid) in ("evac", "left"):
+                # （_send_player_snapshot 观战时上报 alive=False），不得误发倒地/死亡通知
+                if self._player_status.get(pid) in ("evac", "left", "dead"):
                     continue
-                if not getattr(ghost, "alive", True) and not getattr(ghost, "_death_notified", False):
-                    ghost._death_notified = True
-                    self._player_status[pid] = "dead"  # 记录死亡状态（全员结束判定用）
-                    gs.net_server.send_to(pid, MsgType.PLAYER_DEATH, {
-                        "player_id": pid,
-                        "killer_id": None,
-                    })
-                    print(f"[GameView] 玩家 {pid} 死亡，已通知该客户端")
+                if not getattr(ghost, "alive", True):
+                    # HP=0 但尚未通知过倒地 → 发送倒地通知
+                    if not getattr(ghost, "_downed_notified", False):
+                        ghost._downed_notified = True
+                        self._player_status[pid] = "downed"
+                        self._downed_players[pid] = {
+                            "x": ghost.center_x, "y": ghost.center_y,
+                            "timer": DOWNED_TIMEOUT,
+                        }
+                        gs.net_server.send_to(pid, MsgType.PLAYER_DOWNED, {
+                            "player_id": pid,
+                            "x": ghost.center_x, "y": ghost.center_y,
+                        })
+                        # 广播给其他客户端（显示倒地标记）
+                        gs.net_server.broadcast(MsgType.PLAYER_DOWNED, {
+                            "player_id": pid,
+                            "x": ghost.center_x, "y": ghost.center_y,
+                        }, exclude=pid)
+                        print(f"[GameView] 玩家 {pid} 倒地，等待救援（{DOWNED_TIMEOUT}秒超时）")
+                    # 已倒地：递减超时计时器，超时则真死
+                    elif pid in self._downed_players:
+                        dp = self._downed_players[pid]
+                        dp["timer"] -= dt
+                        if dp["timer"] <= 0:
+                            # 超时真死：发 PLAYER_DEATH 给该玩家
+                            del self._downed_players[pid]
+                            self._player_status[pid] = "dead"
+                            gs.net_server.send_to(pid, MsgType.PLAYER_DEATH, {
+                                "player_id": pid,
+                                "killer_id": None,
+                            })
+                            print(f"[GameView] 玩家 {pid} 倒地超时，已阵亡")
 
             # 断线感知：服务器房间内已不在线的玩家标记 left（全员结束判定视为已结束）
             online_ids = set(gs.net_server.player_ids)
@@ -2924,7 +3209,11 @@ class GameView(arcade.View):
             return
 
         if not self.player.alive and not self._spectating:
-            self._fail_run("你已阵亡！")
+            # 联机模式：进入倒地状态（等待救援），非联机直接失败
+            if gs.net_mode in ("host", "client"):
+                self._player_downed()
+            else:
+                self._fail_run("你已阵亡！")
             return
 
         # 相机始终跟随玩家并居中（position 即视口中心）；观战模式跟随 V 键选定的目标
@@ -2954,6 +3243,24 @@ class GameView(arcade.View):
         # 粒子和漂浮文字更新
         particle_system.update(dt)
         floating_texts.update(dt)
+
+        # 倒地/救援系统更新（联机模式）
+        if gs.net_mode in ("host", "client"):
+            # 更新倒地玩家计时器（远程玩家倒地超时）
+            for pid in list(self._downed_players.keys()):
+                dp = self._downed_players[pid]
+                dp["timer"] -= dt
+                if dp["timer"] <= 0:
+                    # 超时真死
+                    del self._downed_players[pid]
+                    self._player_status[pid] = "dead"
+                    if gs.net_mode == "host":
+                        gs.net_server.send_to(pid, MsgType.PLAYER_DEATH, {
+                            "player_id": pid, "killer_id": None,
+                        })
+                    print(f"[GameView] 玩家 {pid} 倒地超时，已阵亡")
+            # 更新救援读条
+            self._update_rescue(dt)
 
         # 记录受击前 HP
         hp_before = self.player.hp
@@ -3009,34 +3316,32 @@ class GameView(arcade.View):
         # 玩家移动
         self.controller.update(dt)
 
-        # 新手教程：检测玩家是否进入 BOSS 房间区域，设置 boss_taught = True
-        tut = getattr(gs, "tutorial", None)
-        if tut is not None and tut.active and tut.stage == 3 and not tut.boss_taught:
-            boss_spawn = self.map_data.get("boss_spawn")
-            if boss_spawn:
-                # 计算玩家与 BOSS 生成点的距离（使用 TILE_SIZE 作为判定半径）
-                dx = self.player.center_x - boss_spawn[0]
-                dy = self.player.center_y - boss_spawn[1]
-                if abs(dx) < TILE_SIZE * 3 and abs(dy) < TILE_SIZE * 3:
-                    tut.boss_taught = True
-
         # BOSS 房间锁定逻辑
         boss_rect = self.map_data.get("boss_rect")
-        if boss_rect and self.active_boss and self.active_boss.alive:
+        boss = self._boss_instance or self.active_boss
+        if boss_rect and boss and boss.alive:
             # 检查玩家是否在 BOSS 房间内（含 1 块瓦片缓冲）
             in_boss_room = (boss_rect[0] - TILE_SIZE <= self.player.center_x <= boss_rect[2] + TILE_SIZE and
                            boss_rect[1] - TILE_SIZE <= self.player.center_y <= boss_rect[3] + TILE_SIZE)
             if in_boss_room and not self._boss_room_locked:
-                # 进入 BOSS 房间：锁定门洞
-                self._boss_room_locked = True
-                self._create_boss_door_block()
-                # 首次进入 BOSS 房间：弹出 BOSS 介绍向导弹窗
-                if not self._boss_intro_shown:
-                    from views.tutorial import build_boss_intro_pages
-                    self._boss_intro_pages = build_boss_intro_pages()
-                    self._boss_intro_active = True
-                    self._boss_intro_idx = 0
-                    self._boss_intro_shown = True
+                # 检查玩家是否在门洞区域（避免在门洞处创建门块导致卡墙）
+                boss_door = self.map_data.get("boss_door")
+                in_door_gap = False
+                if boss_door:
+                    door_x = boss_door["x"]
+                    door_y = boss_door["y"]
+                    door_w = boss_door["width"]
+                    door_h = TILE_SIZE
+                    # 检查玩家是否在门块区域内
+                    if (door_x - door_w / 2 <= self.player.center_x <= door_x + door_w / 2 and
+                        door_y - door_h / 2 <= self.player.center_y <= door_y + door_h / 2):
+                        in_door_gap = True
+                # 只有玩家不在门洞区域时才锁定门洞
+                if not in_door_gap:
+                    # 进入 BOSS 房间：锁定门洞 + 激活 BOSS 血条
+                    self._boss_room_locked = True
+                    self.active_boss = boss  # 玩家进入 BOSS 房间才激活屏幕顶部 BOSS 血条
+                    self._create_boss_door_block()
             elif not in_boss_room and self._boss_room_locked:
                 # 尝试离开 BOSS 房间：推回边界
                 # 计算最近的边界点并推回
@@ -3044,7 +3349,7 @@ class GameView(arcade.View):
                 push_y = max(boss_rect[1] - TILE_SIZE, min(self.player.center_y, boss_rect[3] + TILE_SIZE))
                 self.player.center_x = push_x
                 self.player.center_y = push_y
-        elif self._boss_room_locked and (not self.active_boss or not self.active_boss.alive):
+        elif self._boss_room_locked and (not boss or not boss.alive):
             # BOSS 死亡：解锁门洞
             self._boss_room_locked = False
             self._remove_boss_door_block()
@@ -3763,7 +4068,8 @@ class GameView(arcade.View):
         """主机观战期间全员结束判定：主机已结束（evac/dead）+ 全部客户端结束/离开
 
         - 满足条件时广播 ROOM_ENDED(all_finished)（房间保留，回房等待再次开局）；
-        - 断线客户端：server.player_ids 不再包含 → 标记 left（此处按在线玩家判定）。
+        - 断线客户端：server.player_ids 不再包含 → 标记 left（此处按在线玩家判定）；
+        - 注意：downed 玩家不视为"已结束"——游戏继续等待其被救或超时真死。
         """
         gs = self.window.game_state
         if not self._spectating or gs.net_mode != "host" or gs.net_server is None:
@@ -3771,11 +4077,13 @@ class GameView(arcade.View):
         if self._player_status.get(0, "alive") not in ("evac", "dead"):
             return False  # 主机本局未结束：不判定
         # 在线玩家全部结束（evac/dead/left 之一）即全员结束
+        # 注意：downed 玩家不计入"已结束"，游戏继续等待救援或超时
         for pid in gs.net_server.player_ids:
             if pid == 0:
                 continue  # 主机自己已在上方判定
-            if self._player_status.get(pid, "alive") not in ("evac", "dead", "left"):
-                return False
+            status = self._player_status.get(pid, "alive")
+            if status not in ("evac", "dead", "left"):
+                return False  # 还有玩家存活或倒地：不结束
         return True
 
     def on_key_press(self, key, modifiers):

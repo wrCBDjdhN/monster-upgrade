@@ -68,22 +68,19 @@ class WarehouseView(ScrollView):
             total = header_height + 30 + max(resource_count, 1) * 30 + 36 * resource_count  # 标题 + 列表 + 售卖按钮
         elif self._tab == "武器":
             from entities.weapon_defs import ALL_WEAPONS  # 延迟导入
-            # 神器武器每条占两行（名称行+特效行=48px），普通武器一行（32px）
-            normal_count = len([w for w in weapons if not ALL_WEAPONS.get(w["item_id"], {}).get("artifact")])
-            artifact_count = len([w for w in weapons if ALL_WEAPONS.get(w["item_id"], {}).get("artifact")])
-            total = header_height + 50 + normal_count * 32 + artifact_count * 48 + 100
+            # 每条武器基础占 32px；带效果词条或神器武器额外占 16px（效果/特效行）
+            extra = sum(16 for w in weapons
+                        if w["effects"] or ALL_WEAPONS.get(w["item_id"], {}).get("artifact"))
+            total = header_height + 50 + len(weapons) * 32 + extra + 100
         else:  # 装备
             from entities.equipment_defs import HELMETS, ARMORS, BACKPACKS  # 延迟导入
-            # 神器装备每条占两行（名称行+特效行=48px），普通装备一行（32px）
-            normal_count = 0
-            artifact_count = 0
+            # 每条装备基础占 32px；带效果词条或神器装备额外占 16px（效果/特效行）
+            extra = 0
             for eq in equipment:
                 edef = HELMETS.get(eq["item_id"]) or ARMORS.get(eq["item_id"]) or BACKPACKS.get(eq["item_id"])
-                if edef and edef.get("artifact"):
-                    artifact_count += 1
-                else:
-                    normal_count += 1
-            total = header_height + 50 + normal_count * 32 + artifact_count * 48 + 100
+                if eq["effects"] or (edef and edef.get("artifact")):
+                    extra += 16
+            total = header_height + 50 + len(equipment) * 32 + extra + 100
         return max(total, WINDOW_HEIGHT)
 
     def get_bg_color(self):
@@ -181,6 +178,11 @@ class WarehouseView(ScrollView):
                 self._tc.text(f"wep_sell_{i}", f"卖{sell_price}金币", sv_btn.center_x, sv_btn.center_y,
                               arcade.color.WHITE, 10, anchor_x="center", anchor_y="center")
                 y -= 32
+                # 特殊属性（effects）行：武器带效果词条时在名称下方显示（如"剧毒+2、燃烧+4"）
+                if w["effects"]:
+                    self._tc.text(f"wep_eff_{i}", f"    效果: {self._effects_value_desc(w['effects'])}", 70, y,
+                                  arcade.color.LIGHT_GRAY, 11)
+                    y -= 16
                 # 神器武器：在名称下方追加特效描述行
                 if is_artifact:
                     wdef = ALL_WEAPONS[w["item_id"]]
@@ -228,6 +230,11 @@ class WarehouseView(ScrollView):
                 self._tc.text(f"eq_sell_{i}", f"卖{sell_price}金币", sv_btn.center_x, sv_btn.center_y,
                               arcade.color.WHITE, 10, anchor_x="center", anchor_y="center")
                 y -= 32
+                # 特殊属性（effects）行：装备带效果词条时在名称下方显示（如"吸血+3%、致命+5%"）
+                if eq["effects"]:
+                    self._tc.text(f"eq_eff_{i}", f"    效果: {self._effects_value_desc(eq['effects'])}", 70, y,
+                                  arcade.color.LIGHT_GRAY, 11)
+                    y -= 16
                 # 神器装备：在名称下方追加特效描述行
                 if is_artifact:
                     desc = self._equipment_effect_desc(edef, eq["slot"])
@@ -257,6 +264,28 @@ class WarehouseView(ScrollView):
             if wdef["name"] == w["name"]:
                 return wdef.get("range", 50)
         return 50
+
+    @staticmethod
+    def _effects_value_desc(effects) -> str:
+        """效果词条 -> 带数值的中文描述（如"吸血+3%、致命+5%"），空返回"无"
+
+        比例类效果（value<1，如吸血/暴击率）显示为百分比，数值类效果（如中毒/防御）直接显示数值。
+        """
+        from entities.effects_defs import parse_effect_item, effect_params  # 延迟导入
+        parts = []
+        for e in effects:
+            eid, lvl = parse_effect_item(e)
+            params = effect_params(eid, lvl)
+            name = params.get("name", eid)
+            value = params.get("value", 0)
+            if isinstance(value, (int, float)) and value > 0:
+                if value < 1:
+                    parts.append(f"{name}+{int(round(value * 100))}%")
+                else:
+                    parts.append(f"{name}+{int(value)}")
+            else:
+                parts.append(name)
+        return "、".join(parts) if parts else "无"
 
     @staticmethod
     def _artifact_effect_desc(wdef: dict) -> str:

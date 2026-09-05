@@ -58,6 +58,12 @@ class MsgType(Enum):
     EVAC_RESULT = "EVAC_RESULT"        # 主机→各端：撤离结算清单（各端据此本地入库）
     # ── 交互（宝箱/水井/火箭发射台）──
     INTERACTION_REQUEST = "INTERACTION_REQUEST"  # 客户端→主机：交互请求（宝箱/水井/火箭台）
+    # ── 倒地 / 救援 ──
+    PLAYER_DOWNED = "PLAYER_DOWNED"      # 主机→全部：广播某玩家倒地（可被救援）
+    RESCUE_REQUEST = "RESCUE_REQUEST"    # 客户端→主机：请求救援倒地玩家
+    RESCUE_RESULT = "RESCUE_RESULT"      # 主机→全部：救援结果（成功/失败）
+    PLAYER_REVIVED = "PLAYER_REVIVED"    # 主机→全部：广播玩家复活成功
+    SPECTATE_LEAVE = "SPECTATE_LEAVE"    # 客户端→主机：主动退出观战（视为主机判定真死）
     # ── 放弃行动 ──
     PLAYER_ABANDON = "PLAYER_ABANDON"  # 客户端→主机：放弃行动通知（主机更新状态触发全员结束判定）
     # ── 运行期同步 ──
@@ -247,6 +253,42 @@ MESSAGE_SCHEMAS: dict[MsgType, str] = {
         "payload: {\n"
         "  'player_id': int,         死亡玩家 id\n"
         "  'killer_id': int|None}    击杀者 id（怪物 net_id / 玩家 id，未知为 None）\n"
+        "}"
+    ),
+    MsgType.PLAYER_DOWNED: (
+        "主机广播某玩家倒地（HP 归零但可被救援），倒地玩家保留装备，等待队友救援。\n"
+        "payload: {\n"
+        "  'player_id': int,         倒地玩家 id\n"
+        "  'x': float, 'y': float}  倒地位置坐标（客户端渲染用）\n"
+        "}"
+    ),
+    MsgType.RESCUE_REQUEST: (
+        "客户端请求救援倒地玩家（靠近后按 E 键触发），主机裁决距离并广播结果。\n"
+        "payload: {\n"
+        "  'rescuer_id': int,    救援者玩家 id\n"
+        "  'target_id': int}     被救援者玩家 id\n"
+        "}"
+    ),
+    MsgType.RESCUE_RESULT: (
+        "主机广播救援结果（成功/失败），成功时被救者 HP 恢复为 10。\n"
+        "payload: {\n"
+        "  'target_id': int,      被救援者玩家 id\n"
+        "  'rescuer_id': int,     救援者玩家 id\n"
+        "  'success': bool,       是否成功\n"
+        "  'hp': float}           复活后 HP（成功时为 10，失败时为 0）\n"
+        "}"
+    ),
+    MsgType.PLAYER_REVIVED: (
+        "主机广播玩家复活成功（全部端收到后恢复该玩家实体）。\n"
+        "payload: {\n"
+        "  'player_id': int,    复活玩家 id\n"
+        "  'hp': float}         复活后 HP（固定 10）\n"
+        "}"
+    ),
+    MsgType.SPECTATE_LEAVE: (
+        "客户端通知主机主动退出观战（倒地超时/玩家选择），主机标记该玩家真死并清装备。\n"
+        "payload: {\n"
+        "  'player_id': int}    退出观战的玩家 id\n"
         "}"
     ),
     MsgType.POTION_USE: (

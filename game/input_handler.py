@@ -32,12 +32,6 @@ def handle_key_press(view, key, modifiers):
     """处理键盘按下事件"""
     gs = view.window.game_state
 
-    # BOSS 介绍向导弹窗激活时：ESC 关闭弹窗，其余按键不响应
-    if getattr(view, "_boss_intro_active", False):
-        if key == arcade.key.ESCAPE:
-            view._boss_intro_active = False
-        return
-
     # 设置界面键 (ESC)：任何模式（含观战）都可打开设置界面调整按键/音量。
     # 放在观战早退之前：观战中玩家也要能开设置。
     if key == arcade.key.ESCAPE:
@@ -67,6 +61,11 @@ def handle_key_press(view, key, modifiers):
     # 宝箱交互键
     if key in _action_keys(view, "interact"):
         view._chest_key_pressed = True
+        # 联机模式：E 键同时触发救援（附近有倒地队友时）
+        gs = view.window.game_state
+        if gs.net_mode in ("host", "client") and not getattr(view, "_spectating", False):
+            if not getattr(view.player, "downed", False) if view.player else True:
+                view._try_rescue()
 
     # 角色技能键 (F)：释放当前角色的特殊技能（法师奥术爆发/骑士圣盾/刺客影袭）。
     # 单机/主机本地直接释放；联机客户端上报主机裁决 + 本地纯表现（与 ATTACK_EVENT 同构）。
@@ -200,11 +199,6 @@ def handle_key_release(view, key, modifiers):
 def handle_mouse_motion(view, x, y, dx, dy):
     """处理鼠标移动事件"""
     view._mouse_x, view._mouse_y = x, y
-    # BOSS 介绍弹窗：更新下一步按钮悬停状态
-    if getattr(view, "_boss_intro_active", False):
-        next_rect = getattr(view, "_boss_intro_next_rect", None)
-        view._boss_intro_next_hover = bool(next_rect and next_rect.point_in_rect((x, y)))
-        return
     # 退出观战按钮悬停检测（观战模式下右下角按钮高亮）
     if getattr(view, "_spectating", False):
         exit_rect = getattr(view, "_exit_spectate_rect", None)
@@ -214,20 +208,21 @@ def handle_mouse_motion(view, x, y, dx, dy):
 
 def handle_mouse_press(view, x, y, button, modifiers):
     """处理鼠标按下事件"""
-    # BOSS 介绍弹窗激活时：检测下一步/跳过按钮点击
-    if getattr(view, "_boss_intro_active", False):
-        next_rect = getattr(view, "_boss_intro_next_rect", None)
-        if next_rect and next_rect.point_in_rect((x, y)):
-            view._boss_intro_idx += 1
-            if view._boss_intro_idx >= len(view._boss_intro_pages):
-                view._boss_intro_active = False  # 最后一页：关闭弹窗
-            view._boss_intro_next_hover = False
-        return
     # 退出观战按钮点击（观战模式下优先检测，返回大厅等待下一局）
     if getattr(view, "_spectating", False):
         exit_rect = getattr(view, "_exit_spectate_rect", None)
         if exit_rect is not None and exit_rect.point_in_rect((x, y)):
             gs = view.window.game_state
+            # 倒地玩家退出观战：通知主机真死
+            if getattr(view.player, "downed", False) if view.player else False:
+                if gs.net_mode == "host":
+                    view._apply_spectate_leave({"player_id": 0})
+                elif gs.net_mode == "client" and gs.net_client is not None:
+                    from net.protocol import MsgType
+                    gs.net_client.send((MsgType.SPECTATE_LEAVE, {
+                        "player_id": gs.net_player_id,
+                    }))
+                return
             if gs.net_mode == "host":
                 view._broadcast_room_ended("all_finished")
             else:

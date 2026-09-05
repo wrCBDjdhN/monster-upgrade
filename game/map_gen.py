@@ -344,7 +344,9 @@ def generate_map(seed: int, num_rooms: int = 6, theme: str = "forest") -> dict:
     # 建筑矩形（用于其他生成点避让）
     boss_rect = None
     if boss_spawn:
-        boss_rect = (bx, by, bx + boss_w, bx + boss_h)
+        # 修复：第 4 元素应为 by + boss_h（原误写为 bx + boss_h，导致 y 范围错误，
+        # 玩家在 BOSS 建筑外也可能被判定为"在 BOSS 房间内"而莫名触发 BOSS 战）
+        boss_rect = (bx, by, bx + boss_w, by + boss_h)
 
     def _in_building(px, py):
         """判断坐标是否落在 BOSS 建筑内部（含 1 块瓦片缓冲）"""

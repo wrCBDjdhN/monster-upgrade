@@ -107,16 +107,31 @@ class LobbyView(arcade.View):
         self._discovery_scroll_offset = 0  # 房间列表滚动偏移
         self._manual_ip_mode = False  # 是否切换到手动输入IP模式
         self._client_theme = "forest"  # 客户端加入房间时的地图主题（用于战备检查）
+        # 联机教程状态
+        self._tutorial_shown = False  # 本次会话是否已显示教程
+        self._tutorial_page = 0  # 教程当前页码（0-based）
+        self._tutorial_pages = self._build_tutorial_pages()  # 教程页面内容
+        self._tutorial_next_rect = arcade.XYWH(WINDOW_WIDTH // 2 + 100, 80, 160, 40)
+        self._tutorial_prev_rect = arcade.XYWH(WINDOW_WIDTH // 2 - 100, 80, 160, 40)
+        self._tutorial_close_rect = arcade.XYWH(WINDOW_WIDTH // 2, 30, 160, 36)
+        self._tutorial_next_hover = False
+        self._tutorial_prev_hover = False
+        self._tutorial_close_hover = False
         # 从市场/仓库/锻造等房间内页面返回时：自动复用 GameState 中的联机连接（房间保持）
         self._restore_net_connection()
+        # 首次进入：显示教程
+        if not self._tutorial_shown and not self._restore_net_connection():
+            self.mode = "tutorial"
+            self._tutorial_shown = True
 
-    def _restore_net_connection(self):
+    def _restore_net_connection(self) -> bool:
         """复用 GameState 中已建立的联机连接进入对应等待模式。
 
         从市场/仓库/锻造/背包等页面返回大厅时新建 LobbyView 并进入此方法：
         - host 且 net_server 存活 → host_wait（复用服务器，房间保持）
         - client 且 net_client 存活 → client_wait（复用客户端，已连上不重复握手）
         - 单机 / 连接已清理 → 保持 menu
+        返回 True 表示已恢复连接（不需要显示教程），False 表示需要显示教程。
         """
         gs = self.window.game_state
         if getattr(gs, "net_mode", "solo") == "host" and gs.net_server is not None:
@@ -125,11 +140,143 @@ class LobbyView(arcade.View):
             self.bridge = getattr(gs.net_server, "bridge", None)
             self._players_info = gs.net_server.player_info()
             self._status = f"房间已创建，等待玩家加入…（{len(self._players_info) + 1}/4）"
+            return True  # 已恢复连接，不需要显示教程
         elif getattr(gs, "net_mode", "solo") == "client" and gs.net_client is not None:
             self.mode = "client_wait"
             self.client = gs.net_client
             self._handshake_sent = True  # 连接已建立：不重复握手
             self._status = "已回到房间，等待主机开始…"
+            return True  # 已恢复连接，不需要显示教程
+        return False  # 未恢复连接，需要显示教程
+
+    def _build_tutorial_pages(self) -> list[dict]:
+        """构建联机教程页面内容"""
+        return [
+            {
+                "title": "局域网联机 - 概述",
+                "content": [
+                    "局域网联机支持最多 4 人同时游戏。",
+                    "主机创建房间，其他玩家通过 IP 加入。",
+                    "主机负责裁决伤害/拾取/撤离，客户端同步显示。",
+                    "每局新地图：同一房间多次开局自动重新随机种子。",
+                ],
+            },
+            {
+                "title": "建房（主机）",
+                "content": [
+                    "点击「建房」创建房间，获得房间号。",
+                    "选择地图主题：幽暗森林（普通）/ 沙漠荒地（困难）/ 航天基地（极难）。",
+                    "选择角色后等待其他玩家加入。",
+                    "全员就绪后点击「开始游戏」。",
+                    "主机可在房间内访问市场/仓库补充装备。",
+                ],
+            },
+            {
+                "title": "加入（客户端）",
+                "content": [
+                    "点击「加入」搜索局域网内的房间。",
+                    "选择房间或手动输入主机 IP 连接。",
+                    "连接后选择角色并点击「准备」。",
+                    "等待主机开始游戏。",
+                    "战备检查：装备价值需达到地图要求。",
+                ],
+            },
+            {
+                "title": "操作与快捷键",
+                "content": [
+                    "WASD / 方向键：移动",
+                    "鼠标：瞄准（远程武器）",
+                    "鼠标左键：攻击",
+                    "E：交互（宝箱/水井/发射台）/ 救援倒地队友",
+                    "F：释放角色技能",
+                    "TAB：打开/关闭背包",
+                    "V：观战模式切换视角（联机）",
+                    "M：小地图放大/缩小",
+                    "ESC：设置界面 / 关闭弹窗",
+                    "F11：全屏切换",
+                ],
+            },
+            {
+                "title": "战斗与协作",
+                "content": [
+                    "击杀怪物获取经验、金币和掉落物。",
+                    "拾取武器/装备/药水提升实力。",
+                    "BOSS 镇守火箭发射台，击败可夺宝或启用撤离。",
+                    "找到撤离点读条 3 秒撤离，带走本局战利品。",
+                    "死亡/超时则丢失全部装备。",
+                ],
+            },
+            {
+                "title": "玩家救援机制",
+                "content": [
+                    "当队友 HP 归零时，会进入「倒地」状态。",
+                    "倒地玩家保留装备，头顶显示倒计时（60秒）。",
+                    "靠近倒地队友按 E 键可发起救援（3秒读条）。",
+                    "救援成功：被救者 HP 恢复为 10，装备保留。",
+                    "超时未被救：倒地玩家真死，清空装备，进入观战。",
+                    "倒地玩家可主动退出观战（视为真死）。",
+                    "全场玩家均阵亡/观战 → 全员阵亡，结束本局。",
+                ],
+            },
+            {
+                "title": "观战模式",
+                "content": [
+                    "死亡/撤离后自动进入观战模式。",
+                    "V 键切换跟随不同的存活玩家。",
+                    "观战期间世界继续模拟（怪物 AI/掉落/快照）。",
+                    "全员结束后回房等待下一局。",
+                    "倒地玩家可选择退出观战（视为真死）。",
+                ],
+            },
+        ]
+
+    def _draw_tutorial(self, cx: int):
+        """绘制联机教程页面"""
+        # 半透明遮罩
+        overlay = arcade.ShapeElementList()
+        overlay.append(arcade.create_rect_filled(
+            arcade.XYWH(cx, WINDOW_HEIGHT // 2, WINDOW_WIDTH, WINDOW_HEIGHT),
+            (0, 0, 0, 180)))
+        overlay.draw()
+        # 教程面板背景
+        panel_rect = arcade.XYWH(cx, WINDOW_HEIGHT // 2, 700, 500)
+        arcade.draw_rect_filled(panel_rect, (30, 40, 60))
+        arcade.draw_rect_outline(panel_rect, arcade.color.GOLD, border_width=3)
+        # 标题
+        page = self._tutorial_pages[self._tutorial_page]
+        self._tc.text("tut_title", page["title"], cx, WINDOW_HEIGHT // 2 + 210,
+                      arcade.color.GOLD, size=24, anchor_x="center", bold=True)
+        # 内容
+        y = WINDOW_HEIGHT // 2 + 170
+        for line in page["content"]:
+            self._tc.text(f"tut_{y}", f"• {line}", cx - 300, y,
+                          arcade.color.WHITE, size=14)
+            y -= 28
+        # 页码
+        total = len(self._tutorial_pages)
+        self._tc.text("tut_page", f"第 {self._tutorial_page + 1}/{total} 页",
+                      cx, WINDOW_HEIGHT // 2 - 200, arcade.color.LIGHT_GRAY, size=12,
+                      anchor_x="center")
+        # 上一页按钮
+        if self._tutorial_page > 0:
+            pcolor = arcade.color.CORNFLOWER_BLUE if self._tutorial_prev_hover else arcade.color.STEEL_BLUE
+            arcade.draw_rect_filled(self._tutorial_prev_rect, pcolor)
+            self._tc.text("tut_prev", "上一页", self._tutorial_prev_rect.center_x,
+                          self._tutorial_prev_rect.center_y, arcade.color.WHITE, 14,
+                          anchor_x="center", anchor_y="center")
+        # 下一页按钮
+        if self._tutorial_page < total - 1:
+            ncolor = arcade.color.CORNFLOWER_BLUE if self._tutorial_next_hover else arcade.color.STEEL_BLUE
+            arcade.draw_rect_filled(self._tutorial_next_rect, ncolor)
+            self._tc.text("tut_next", "下一页", self._tutorial_next_rect.center_x,
+                          self._tutorial_next_rect.center_y, arcade.color.WHITE, 14,
+                          anchor_x="center", anchor_y="center")
+        # 关闭按钮
+        ecolor = arcade.color.DARK_RED if self._tutorial_close_hover else (120, 40, 40)
+        arcade.draw_rect_filled(self._tutorial_close_rect, ecolor)
+        self._tc.text("tut_close", "我知道了", self._tutorial_close_rect.center_x,
+                      self._tutorial_close_rect.center_y, arcade.color.WHITE, 14,
+                      anchor_x="center", anchor_y="center")
 
     def on_show_view(self):
         self.window.background_color = arcade.color.DARK_SLATE_GRAY
@@ -554,7 +701,9 @@ class LobbyView(arcade.View):
         # 标题
         self._tc.text("lobby_title", "局域网联机", cx, WINDOW_HEIGHT - 80,
                       arcade.color.GOLD, size=40, anchor_x="center", bold=True)
-        if self.mode == "menu":
+        if self.mode == "tutorial":
+            self._draw_tutorial(cx)
+        elif self.mode == "menu":
             self._draw_menu(cx)
         elif self.mode == "host_wait":
             self._draw_host_wait(cx)
@@ -874,6 +1023,10 @@ class LobbyView(arcade.View):
         self.ready_hover = self.ready_rect.point_in_rect((x, y))
         self.warehouse_hover = self.warehouse_rect.point_in_rect((x, y))
         self.market_hover = self.market_rect.point_in_rect((x, y))
+        # 教程按钮 hover
+        self._tutorial_next_hover = self._tutorial_next_rect.point_in_rect((x, y))
+        self._tutorial_prev_hover = self._tutorial_prev_rect.point_in_rect((x, y))
+        self._tutorial_close_hover = self._tutorial_close_rect.point_in_rect((x, y))
         # 房间内角色选择按钮 hover（host_wait/client_wait 有效）
         self.char_hover = ""
         if self.mode in ("host_wait", "client_wait"):
@@ -931,6 +1084,19 @@ class LobbyView(arcade.View):
 
     def on_mouse_press(self, x, y, button, modifiers):
         sound_manager.play_ui()
+        # 教程模式：处理教程按钮点击
+        if self.mode == "tutorial":
+            total = len(self._tutorial_pages)
+            # 下一页
+            if self._tutorial_page < total - 1 and self._tutorial_next_rect.point_in_rect((x, y)):
+                self._tutorial_page += 1
+            # 上一页
+            elif self._tutorial_page > 0 and self._tutorial_prev_rect.point_in_rect((x, y)):
+                self._tutorial_page -= 1
+            # 关闭教程
+            elif self._tutorial_close_rect.point_in_rect((x, y)):
+                self.mode = "menu"
+            return
         # 返回按钮（除 join 的输入框点击外，各模式共用；host_wait 返回=关闭房间，客户端能看到"房主已关闭房间"）
         if self.mode != "join" and self.back_rect.point_in_rect((x, y)):
             if self.mode == "host_wait":

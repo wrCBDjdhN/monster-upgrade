@@ -24,7 +24,7 @@ from config import (
     PROJECTILE_SPEED, PROJECTILE_SIZE, PROJECTILE_LIFETIME,
     ROCKET_TROOP_AOE_RADIUS,
 )
-from .effects import particle_system  # 爆炸粒子效果
+from .effects import particle_system, floating_texts  # 爆炸粒子效果 + 漂浮文字（暴击提示）
 from .batch_shapes import ShapeBatch  # 批量绘制：激光一次 draw call 提交（性能优化）
 
 
@@ -105,6 +105,9 @@ class CombatSystem:
         is_crit = random.random() < crit_chance
         if is_crit:
             weapon_damage *= 1.5  # 暴击伤害 ×1.5
+            # 暴击提示：在玩家位置显示"暴击!"浮动文字（金色醒目）
+            floating_texts.add(player.center_x, player.center_y + 30, "暴击!",
+                               (255, 200, 50), life=0.8, font_size=16, vy=70)
 
         # 装备吸血：从玩家装备 passive 效果 lifesteal 获取吸血比例
         equip_lifesteal = getattr(player, "equip_lifesteal", 0.0)

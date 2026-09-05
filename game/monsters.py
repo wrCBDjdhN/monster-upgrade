@@ -937,6 +937,10 @@ class BossZombie(_MeleeMonsterBase):
                 summoned = _boss_summon_minions(self, cfg.get("summons", []), self._theme)
                 if self._summon_callback and summoned:
                     self._summon_callback(self, summoned)
+                # 召唤提示文字
+                from game.effects import floating_texts
+                floating_texts.add(self.center_x, self.center_y + 40,
+                                  "召唤僵尸!", (255, 100, 50), life=1.0, font_size=14, vy=50)
                 break
 
 
@@ -1021,6 +1025,10 @@ class BossSkeleton(_RangedMonsterBase):
                 summoned = _boss_summon_minions(self, cfg.get("summons", []), self._theme)
                 if self._summon_callback and summoned:
                     self._summon_callback(self, summoned)
+                # 召唤提示文字
+                from game.effects import floating_texts
+                floating_texts.add(self.center_x, self.center_y + 40,
+                                  "召唤骷髅!", (100, 150, 255), life=1.0, font_size=14, vy=50)
                 break
 
 
@@ -1107,6 +1115,10 @@ class BossMummy(_MeleeMonsterBase):
                 summoned = _boss_summon_minions(self, cfg.get("summons", []), self._theme)
                 if self._summon_callback and summoned:
                     self._summon_callback(self, summoned)
+                # 召唤提示文字
+                from game.effects import floating_texts
+                floating_texts.add(self.center_x, self.center_y + 40,
+                                  "召唤木乃伊!", (180, 160, 100), life=1.0, font_size=14, vy=50)
                 break
 
 
@@ -1266,6 +1278,10 @@ class BossSpace(_RangedMonsterBase):
                 summoned = _boss_summon_minions(self, cfg.get("summons", []), self._theme)
                 if self._summon_callback and summoned:
                     self._summon_callback(self, summoned)
+                # 召唤提示文字
+                from game.effects import floating_texts
+                floating_texts.add(self.center_x, self.center_y + 40,
+                                  "召唤援军!", (255, 80, 30), life=1.0, font_size=14, vy=50)
                 break
 
     def try_attack(self, player=None, players=None) -> Projectile | None:

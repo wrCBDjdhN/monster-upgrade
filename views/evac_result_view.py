@@ -35,9 +35,11 @@ class EvacResultView(arcade.View):
         self.tut_next_hover = False
 
     def _build_tutorial_pages(self):
-        """新手教程阶段 5：航天基地火箭发射台教学（撤离结算页上覆盖展示）"""
-        from views.tutorial import TutorialPage
-        return [
+        """新手教程阶段 5：BOSS 介绍 + 航天基地火箭发射台教学（撤离结算页上覆盖展示）"""
+        from views.tutorial import TutorialPage, build_boss_intro_pages
+        # BOSS 介绍页（4 页）+ 火箭发射台教学页（1 页）
+        boss_pages = build_boss_intro_pages()
+        rocket_pages = [
             TutorialPage("航天基地 · 火箭发射台", [
                 "航天基地（极难地图）有火箭发射台：走近按 E 激活，召唤镇守 BOSS。",
                 "击败 BOSS 后二选一：",
@@ -46,6 +48,7 @@ class EvacResultView(arcade.View):
                 "本局你从普通撤离点撤离成功，战利品已入库。",
             ], next_text="查看收益"),
         ]
+        return boss_pages + rocket_pages
 
     def _tut_showing(self):
         """教程教学页是否正在本界面显示（阶段 5 且未翻完页）"""
@@ -227,10 +230,13 @@ class EvacResultView(arcade.View):
                     finish_tutorial(self.window)
                     return
                 if self.tut_next_rect and self.tut_next_rect.point_in_rect((x, y)):
-                    # 翻完教学：露出撤离结算页（查看收益后点返回按钮）
+                    # 翻页：下一页或完成教学
                     tut = getattr(self.window.game_state, "tutorial", None)
                     if tut is not None:
-                        tut.page = len(self.tut_pages)
+                        tut.page += 1
+                        if tut.page >= len(self.tut_pages):
+                            # 翻完全部教学页：露出撤离结算页（查看收益后点返回按钮）
+                            pass
                     return
                 return
 

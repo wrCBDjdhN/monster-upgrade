@@ -75,6 +75,10 @@ class Player(arcade.SpriteSolidColor):
         # 用于广播 PLAYER_HURT（HP 主机权威，见 views/game_view.py _record_hurt）。
         # 仅当主机模式且已注入网络对象时才被设置，其余模式恒为 None。
         self.on_take_damage = None  # Callable[[float], None] | None
+        # 倒地/救援系统（联机模式）：
+        # downed=True 表示 HP=0 但可被队友救援（保留装备），超时未被救则真死
+        self.downed = False
+        self.downed_timer = 0.0    # 倒地计时器（秒），归零时真死
 
     def clamp_to_map(self):
         """将玩家位置限制在地图边界内"""

@@ -211,6 +211,9 @@ def modify_attack_damage(player, damage: float) -> float:
     crit = passive.get("crit_chance", 0.0)
     if crit > 0 and random.random() < crit:
         dmg *= float(passive.get("crit_mult", 2.0))
+        # 暴击提示：刺客被动暴击触发时在玩家位置显示"暴击!"浮动文字
+        floating_texts.add(player.center_x, player.center_y + 30, "暴击!",
+                           (255, 200, 50), life=0.8, font_size=16, vy=70)
     # 狂暴药水：伤害倍率（power_effect_timer 归零时 power_mult 已复位为 1.0）
     dmg *= getattr(player, "power_mult", 1.0)
     return dmg

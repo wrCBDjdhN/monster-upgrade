@@ -24,6 +24,11 @@ PLAYER_SPEED = 4             # 像素/帧（PhysicsEngineSimple 不乘 delta_tim
 PLAYER_HP = 100
 PLAYER_SIZE = 16             # 半径（总大小 32x32）
 PLAYER_COLOR = (80, 180, 255)
+# 倒地/救援系统（联机模式）
+DOWNED_TIMEOUT = 60.0        # 倒地超时（秒），超时未被救则真死
+RESCUE_DISTANCE = 80         # 救援触发距离（像素）
+RESCUE_DURATION = 3.0        # 救援读条时长（秒）
+REVIVE_HP = 10               # 复活后血量
 
 # ── 战斗 ──
 ATTACK_COOLDOWN = 0.4          # 秒

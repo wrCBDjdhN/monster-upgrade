@@ -143,25 +143,20 @@ def draw_in_game_tutorial(view, tc):
         # 已拾取：引导看小地图（若尚未讲解过）
         tut_banner(view, "按 M 切换小地图视野/全图  图例: 浅灰=房间 黄=宝箱 绿=撤离点 金=BOSS 白=自己 橙=队友",
                    tc, "tut_banner_map")
-    elif not tut.boss_taught:
-        # 小地图已讲解：引导BOSS房间 + 展示BOSS介绍弹窗
-        tut_banner(view, "BOSS 房间：小地图上金色方块标记，击败BOSS可获得神器",
-                   tc, "tut_banner_boss")
     else:
-        # 小地图已讲解：引导撤离
+        # 小地图已讲解：引导撤离（BOSS 介绍在撤离后单独展示）
         tut_banner(view, "去地图绿色标记的撤离点，站上去读条 3 秒即可撤离（倒计时结束前）",
                    tc, "tut_banner_evac")
 
 
 def build_boss_intro_pages():
-    """BOSS 介绍向导页（4 页）：进入 BOSS 房间时弹出，说明血条/房间锁定/技能机制"""
+    """BOSS 介绍向导页（4 页）：撤离后展示，介绍 BOSS 房间机制"""
     return [
-        TutorialPage("⚔ BOSS 战即将开始！", [
+        TutorialPage("BOSS 房间介绍", [
+            "地图上标有金色方块的房间是 BOSS 房间。",
+            "",
             "进入 BOSS 房间后，门洞会被封锁，",
             "你将无法离开，直到击败 BOSS 或阵亡。",
-            "",
-            "屏幕顶部会出现 BOSS 血条，",
-            "可以实时查看 BOSS 的剩余血量。",
         ]),
         TutorialPage("🔒 房间锁定", [
             "BOSS 房间门洞会被不透明方块封住：",
@@ -177,7 +172,7 @@ def build_boss_intro_pages():
             "注意观察 BOSS 的动作前摇：",
             "技能释放前会有短暂的粒子特效提示。",
         ]),
-        TutorialPage("准备战斗", [
+        TutorialPage("准备挑战", [
             "确保装备充足、药水备好！",
             "",
             "推荐 Lv5+ 装备再挑战 BOSS。",
