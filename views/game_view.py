@@ -757,53 +757,53 @@ class GameView(arcade.View):
     def _broadcast_damage(self, monster, damage: float, hit: bool = True,
                           crit: bool = False, debuffs=None) -> None:
         """委托 → net_sync._broadcast_damage"""
-        return self.net_sync._broadcast_damage(self, monster, damage, hit, crit, debuffs)
+        return self.net_sync._broadcast_damage(monster, damage, hit, crit, debuffs)
 
     def _resolve_attack_event(self, sender_id: int, payload: dict) -> None:
         """委托 → net_sync._resolve_attack_event"""
-        return self.net_sync._resolve_attack_event(self, sender_id, payload)
+        return self.net_sync._resolve_attack_event(sender_id, payload)
 
     def _resolve_skill_use(self, sender_id: int, payload: dict) -> None:
         """委托 → net_sync._resolve_skill_use"""
-        return self.net_sync._resolve_skill_use(self, sender_id, payload)
+        return self.net_sync._resolve_skill_use(sender_id, payload)
 
     def _apply_damage_result(self, payload: dict) -> None:
         """委托 → net_sync._apply_damage_result"""
-        return self.net_sync._apply_damage_result(self, payload)
+        return self.net_sync._apply_damage_result(payload)
 
     def _ensure_ghost(self, player_id: int) -> Player:
         """委托 → net_sync._ensure_ghost"""
-        return self.net_sync._ensure_ghost(self, player_id)
+        return self.net_sync._ensure_ghost(player_id)
 
     def _broadcast_player_hurt(self, player_id: int, damage: float,
                                debuff=None, debuff_level: int = 1,
                                debuffs: list = None) -> None:
         """委托 → net_sync._broadcast_player_hurt"""
-        return self.net_sync._broadcast_player_hurt(self, player_id, damage, debuff, debuff_level, debuffs)
+        return self.net_sync._broadcast_player_hurt(player_id, damage, debuff, debuff_level, debuffs)
 
     def _serialize_players(self) -> list:
         """委托 → net_sync._serialize_players"""
-        return self.net_sync._serialize_players(self)
+        return self.net_sync._serialize_players()
 
     def _apply_player_hurt(self, payload: dict) -> None:
         """委托 → net_sync._apply_player_hurt"""
-        return self.net_sync._apply_player_hurt(self, payload)
+        return self.net_sync._apply_player_hurt(payload)
 
     def _apply_player_snapshot(self, payload) -> None:
         """委托 → net_sync._apply_player_snapshot"""
-        return self.net_sync._apply_player_snapshot(self, payload)
+        return self.net_sync._apply_player_snapshot(payload)
 
     def _send_player_snapshot(self) -> None:
         """委托 → net_sync._send_player_snapshot"""
-        return self.net_sync._send_player_snapshot(self)
+        return self.net_sync._send_player_snapshot()
 
     def _apply_client_snapshot(self, sender_id: int, payload: dict) -> None:
         """委托 → net_sync._apply_client_snapshot"""
-        return self.net_sync._apply_client_snapshot(self, sender_id, payload)
+        return self.net_sync._apply_client_snapshot(sender_id, payload)
 
     def _broadcast_room_ended(self, reason: str, close_room: bool = False) -> None:
         """委托 → net_sync._broadcast_room_ended"""
-        return self.net_sync._broadcast_room_ended(self, reason, close_room)
+        return self.net_sync._broadcast_room_ended(reason, close_room)
 
     def _back_to_lobby(self, notice: str = "") -> None:
         """本局结束回房等待（房间保留）：新建 LobbyView 并复用现有 server/client 连接
@@ -835,11 +835,11 @@ class GameView(arcade.View):
 
     def _apply_room_ended(self, payload: dict) -> None:
         """委托 → net_sync._apply_room_ended"""
-        return self.net_sync._apply_room_ended(self, payload)
+        return self.net_sync._apply_room_ended(payload)
 
     def _handle_potion_use(self, sender_id: int, payload: dict) -> None:
         """委托 → net_sync._handle_potion_use"""
-        return self.net_sync._handle_potion_use(self, sender_id, payload)
+        return self.net_sync._handle_potion_use(sender_id, payload)
 
     def _reject_potion(self, sender_id: int, potion_id: str) -> None:
         """广播药水使用被拒（库存不足/无效药水）：客户端保持原状"""
@@ -851,19 +851,19 @@ class GameView(arcade.View):
 
     def _apply_potion_ack(self, payload: dict) -> None:
         """委托 → net_sync._apply_potion_ack"""
-        return self.net_sync._apply_potion_ack(self, payload)
+        return self.net_sync._apply_potion_ack(payload)
 
     def _record_player_pickup(self, player_id: int, drop: DropItem) -> None:
         """委托 → pickup_loot._record_player_pickup"""
-        return self.pickup_loot._record_player_pickup(self, player_id, drop)
+        return self.pickup_loot._record_player_pickup(player_id, drop)
 
     def _handle_pickup_request(self, sender_id: int, payload: dict) -> None:
         """委托 → net_sync._handle_pickup_request"""
-        return self.net_sync._handle_pickup_request(self, sender_id, payload)
+        return self.net_sync._handle_pickup_request(sender_id, payload)
 
     def _handle_evac_request(self, sender_id: int, payload: dict) -> None:
         """委托 → net_sync._handle_evac_request"""
-        return self.net_sync._handle_evac_request(self, sender_id, payload)
+        return self.net_sync._handle_evac_request(sender_id, payload)
 
     def _serialize_evac_carried(self, carried: dict) -> dict:
         """将携带物清单的 tuple 键转为 JSON 安全字符串键（EVAC_RESULT 载荷）
@@ -905,27 +905,27 @@ class GameView(arcade.View):
 
     def _apply_map_change(self, payload: dict) -> None:
         """委托 → net_sync._apply_map_change"""
-        return self.net_sync._apply_map_change(self, payload)
+        return self.net_sync._apply_map_change(payload)
 
     def _broadcast_map_changes(self) -> None:
         """委托 → net_sync._broadcast_map_changes"""
-        return self.net_sync._broadcast_map_changes(self)
+        return self.net_sync._broadcast_map_changes()
 
     def _broadcast_env_damage(self, obj_id: int, damage: float) -> None:
         """委托 → net_sync._broadcast_env_damage"""
-        return self.net_sync._broadcast_env_damage(self, obj_id, damage)
+        return self.net_sync._broadcast_env_damage(obj_id, damage)
 
     def _broadcast_env_spawn(self, obj_id: int, x: float, y: float, resource_type: str) -> None:
         """委托 → net_sync._broadcast_env_spawn"""
-        return self.net_sync._broadcast_env_spawn(self, obj_id, x, y, resource_type)
+        return self.net_sync._broadcast_env_spawn(obj_id, x, y, resource_type)
 
     def _apply_pickup_result(self, payload: dict) -> None:
         """委托 → net_sync._apply_pickup_result"""
-        return self.net_sync._apply_pickup_result(self, payload)
+        return self.net_sync._apply_pickup_result(payload)
 
     def _apply_evac_result(self, payload: dict) -> None:
         """委托 → net_sync._apply_evac_result"""
-        return self.net_sync._apply_evac_result(self, payload)
+        return self.net_sync._apply_evac_result(payload)
 
     def _remove_drop_visual(self, net_id) -> None:
         """按网络 id 从本地视觉掉落列表移除（幂等；不存在则跳过）"""
@@ -938,25 +938,25 @@ class GameView(arcade.View):
 
     def _apply_player_death(self, payload: dict) -> None:
         """委托 → net_sync._apply_player_death"""
-        return self.net_sync._apply_player_death(self, payload)
+        return self.net_sync._apply_player_death(payload)
 
     # ── 倒地/救援系统 ──
 
     def _player_downed(self) -> None:
         """委托 → spectate._player_downed"""
-        return self.spectate._player_downed(self)
+        return self.spectate._player_downed()
 
     def _apply_player_downed(self, payload: dict) -> None:
         """委托 → net_sync._apply_player_downed"""
-        return self.net_sync._apply_player_downed(self, payload)
+        return self.net_sync._apply_player_downed(payload)
 
     def _apply_rescue_result(self, payload: dict) -> None:
         """委托 → net_sync._apply_rescue_result"""
-        return self.net_sync._apply_rescue_result(self, payload)
+        return self.net_sync._apply_rescue_result(payload)
 
     def _apply_player_revived(self, payload: dict) -> None:
         """委托 → net_sync._apply_player_revived"""
-        return self.net_sync._apply_player_revived(self, payload)
+        return self.net_sync._apply_player_revived(payload)
 
     def _apply_spectate_leave(self, payload: dict) -> None:
         """主机收到 SPECTATE_LEAVE：玩家主动退出观战 → 视为真死，清装备"""
@@ -1059,7 +1059,7 @@ class GameView(arcade.View):
 
     def _update_rescue(self, dt: float) -> None:
         """委托 → spectate._update_rescue"""
-        return self.spectate._update_rescue(self, dt)
+        return self.spectate._update_rescue(dt)
 
     def _on_monster_death(self, monster):
         """怪物死亡回调 - 委托给 entity_callbacks"""
@@ -1067,7 +1067,7 @@ class GameView(arcade.View):
 
     def _handle_harvestable_combat(self, dt):
         """委托 → pickup_loot._handle_harvestable_combat"""
-        return self.pickup_loot._handle_harvestable_combat(self, dt)
+        return self.pickup_loot._handle_harvestable_combat(dt)
 
     def _client_visual_collisions(self):
         """客户端本地弹丸的纯视觉碰撞（伤害判定收敛主机，这里只做表现层反馈）
@@ -1118,27 +1118,27 @@ class GameView(arcade.View):
 
     def _handle_chest_interaction(self):
         """委托 → pickup_loot._handle_chest_interaction"""
-        return self.pickup_loot._handle_chest_interaction(self)
+        return self.pickup_loot._handle_chest_interaction()
 
     def _handle_well_interaction(self):
         """委托 → pickup_loot._handle_well_interaction"""
-        return self.pickup_loot._handle_well_interaction(self)
+        return self.pickup_loot._handle_well_interaction()
 
     def _handle_rocket_pad_interaction(self):
         """委托 → pickup_loot._handle_rocket_pad_interaction"""
-        return self.pickup_loot._handle_rocket_pad_interaction(self)
+        return self.pickup_loot._handle_rocket_pad_interaction()
 
     def _send_client_interaction_request(self, gs) -> None:
         """委托 → pickup_loot._send_client_interaction_request"""
-        return self.pickup_loot._send_client_interaction_request(self, gs)
+        return self.pickup_loot._send_client_interaction_request(gs)
 
     def _handle_interaction_request(self, sender_id: int, payload: dict) -> None:
         """委托 → net_sync._handle_interaction_request"""
-        return self.net_sync._handle_interaction_request(self, sender_id, payload)
+        return self.net_sync._handle_interaction_request(sender_id, payload)
 
     def _handle_player_abandon(self, sender_id: int, payload: dict) -> None:
         """委托 → net_sync._handle_player_abandon"""
-        return self.net_sync._handle_player_abandon(self, sender_id, payload)
+        return self.net_sync._handle_player_abandon(sender_id, payload)
 
     def _scatter_drops(self, drops, center_x, center_y, radius=30):
         """分散掉落物 - 委托给 entity_callbacks（带障碍物避让，防掉落物卡墙）"""
@@ -1196,27 +1196,27 @@ class GameView(arcade.View):
 
     def _serialize_monsters(self) -> list:
         """委托 → net_sync._serialize_monsters"""
-        return self.net_sync._serialize_monsters(self)
+        return self.net_sync._serialize_monsters()
 
     def _serialize_projectiles(self) -> dict:
         """委托 → net_sync._serialize_projectiles"""
-        return self.net_sync._serialize_projectiles(self)
+        return self.net_sync._serialize_projectiles()
 
     def _apply_monster_snapshot(self, payload) -> None:
         """委托 → net_sync._apply_monster_snapshot"""
-        return self.net_sync._apply_monster_snapshot(self, payload)
+        return self.net_sync._apply_monster_snapshot(payload)
 
     def _apply_projectile_snapshot(self, payload) -> None:
         """委托 → net_sync._apply_projectile_snapshot"""
-        return self.net_sync._apply_projectile_snapshot(self, payload)
+        return self.net_sync._apply_projectile_snapshot(payload)
 
     def _serialize_full_state(self) -> dict:
         """委托 → net_sync._serialize_full_state"""
-        return self.net_sync._serialize_full_state(self)
+        return self.net_sync._serialize_full_state()
 
     def _apply_full_state(self, payload) -> None:
         """委托 → net_sync._apply_full_state"""
-        return self.net_sync._apply_full_state(self, payload)
+        return self.net_sync._apply_full_state(payload)
 
     def on_show_view(self):
         self.window.background_color = (20, 25, 20)
@@ -1263,15 +1263,15 @@ class GameView(arcade.View):
 
     def _apply_free_equip(self, d):
         """委托 → pickup_loot._apply_free_equip"""
-        return self.pickup_loot._apply_free_equip(self, d)
+        return self.pickup_loot._apply_free_equip(d)
 
     def _fold_run_potions(self, gs) -> None:
         """委托 → evac_manager._fold_run_potions"""
-        return self.evac_manager._fold_run_potions(self, gs)
+        return self.evac_manager._fold_run_potions(gs)
 
     def _add_equipped_to_carried(self, gs):
         """委托 → pickup_loot._add_equipped_to_carried"""
-        return self.pickup_loot._add_equipped_to_carried(self, gs)
+        return self.pickup_loot._add_equipped_to_carried(gs)
 
     def on_update(self, delta_time):
         self._frame += 1
@@ -2201,27 +2201,27 @@ class GameView(arcade.View):
 
     def _clear_run_equipment(self, gs) -> None:
         """委托 → evac_manager._clear_run_equipment"""
-        return self.evac_manager._clear_run_equipment(self, gs)
+        return self.evac_manager._clear_run_equipment(gs)
 
     def _fail_run(self, reason: str):
         """委托 → evac_manager._fail_run"""
-        return self.evac_manager._fail_run(self, reason)
+        return self.evac_manager._fail_run(reason)
 
     def _enter_spectate(self, outcome: str) -> None:
         """委托 → spectate._enter_spectate"""
-        return self.spectate._enter_spectate(self, outcome)
+        return self.spectate._enter_spectate(outcome)
 
     def _cycle_spectate_target(self) -> None:
         """委托 → spectate._cycle_spectate_target"""
-        return self.spectate._cycle_spectate_target(self)
+        return self.spectate._cycle_spectate_target()
 
     def _spectate_camera_target(self):
         """委托 → spectate._spectate_camera_target"""
-        return self.spectate._spectate_camera_target(self)
+        return self.spectate._spectate_camera_target()
 
     def _check_all_finished(self) -> bool:
         """委托 → spectate._check_all_finished"""
-        return self.spectate._check_all_finished(self)
+        return self.spectate._check_all_finished()
 
     def on_key_press(self, key, modifiers):
         handle_key_press(self, key, modifiers)
