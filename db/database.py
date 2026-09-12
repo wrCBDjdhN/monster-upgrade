@@ -195,6 +195,23 @@ from db.warehouse import add_warehouse_item, get_warehouse, sell_warehouse_item 
 # 药水管理
 from db.potions import add_potion, get_potions, use_potion, remove_potion  # noqa: F401, E402
 
+
+def clear_run_equipment(pid: int, weapon_db_id: int | None = None) -> None:
+    """清空玩家本局已装备的武器/头盔/护甲/背包和所有药水（死亡/撤离失败用）
+
+    weapon_db_id：已装备武器的 DB row id（weapons 表），为 None 时跳过武器删除。
+    操作范围：
+    - weapons 表：删除指定武器行
+    - equipment 表：删除 is_equipped=1 的全部行（头盔/护甲/背包）
+    - potions 表：删除该玩家全部药水行
+    """
+    from db.connection import _conn
+    with _conn() as c:
+        if weapon_db_id is not None:
+            c.execute("DELETE FROM weapons WHERE id=? AND player_id=?", (weapon_db_id, pid))
+        c.execute("DELETE FROM equipment WHERE player_id=? AND is_equipped=1", (pid,))
+        c.execute("DELETE FROM potions WHERE player_id=?", (pid,))
+
 # 角色管理（购买解锁持久化）
 from db.characters import get_unlocked_characters, is_character_unlocked, unlock_character  # noqa: F401, E402
 

@@ -37,6 +37,14 @@ MELEE_ARC_DEGREES = 120        # 近战扇形角度
 PROJECTILE_SPEED = 400
 PROJECTILE_SIZE = 6
 PROJECTILE_LIFETIME = 1.5      # 秒
+CRIT_DAMAGE_MULT = 1.5         # 暴击伤害倍率
+PLAYER_EXPLOSION_RADIUS = 80   # 玩家弹丸爆炸半径
+MELEE_HIT_BUFFER = 30          # 近战命中范围缓冲（武器射程外额外判定距离）
+RANGED_KEEP_MIN = 120          # 远程怪物最小保持距离
+RANGED_KEEP_MAX = 200          # 远程怪物最大保持距离
+DEBUFF_TICK_INTERVAL = 0.5     # debuff 结算周期（秒）
+HIT_FLASH_DURATION = 0.15      # 受击闪白时长（秒）
+CHEST_WELL_INTERACT_RANGE = 40 # 宝箱/水井交互距离
 
 # ── 怪物数值定义（hp/damage/speed/color 等）已统一迁移到 entities/monster_defs.py ──
 

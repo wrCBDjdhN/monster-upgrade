@@ -23,6 +23,7 @@ from config import (
     ATTACK_COOLDOWN, MELEE_RANGE, MELEE_ARC_DEGREES,
     PROJECTILE_SPEED, PROJECTILE_SIZE, PROJECTILE_LIFETIME,
     ROCKET_TROOP_AOE_RADIUS,
+    CRIT_DAMAGE_MULT, MELEE_HIT_BUFFER, PLAYER_EXPLOSION_RADIUS,
 )
 from .effects import particle_system, floating_texts  # 爆炸粒子效果 + 漂浮文字（暴击提示）
 from .batch_shapes import ShapeBatch  # 批量绘制：激光一次 draw call 提交（性能优化）
@@ -37,28 +38,33 @@ class CombatSystem:
         self.wall_list = wall_list or arcade.SpriteList()
         # 激光束列表（陨星炮神器武器用）
         self.lasers: list = []
+        # 弹丸/激光移除暂存列表（复用，避免每帧 list() 拷贝）
+        self._pending_remove: list = []
 
-    def update(self, delta_time: float):
+    def update(self, delta_time: float) -> None:
         # 各攻击者的冷却独立递减，归零后移除该键（与旧版单值递减语义一致）
-        for k in list(self._cooldowns):
-            v = self._cooldowns[k] - delta_time
-            if v <= 0:
-                del self._cooldowns[k]
-            else:
-                self._cooldowns[k] = v
+        # 注意：dict 迭代中 del 会报错，需提前收集 keys；dict_keys 比 list() 更轻量
+        expired_keys = [k for k, v in self._cooldowns.items() if v - delta_time <= 0]
+        for k in expired_keys:
+            del self._cooldowns[k]
+        for k, v in self._cooldowns.items():
+            self._cooldowns[k] = v - delta_time
         # 更新弹丸
         for p in self.projectiles:
             p.update(delta_time)
-        # 移除过期弹丸 或 碰墙弹丸
-        for p in [p for p in self.projectiles]:
+        # 移除过期弹丸 或 碰墙弹丸（使用 _pending_remove 列表收集后统一移除，避免每帧 list() 拷贝）
+        self._pending_remove.clear()
+        for p in self.projectiles:
             if p.expired:
-                p.remove_from_sprite_lists()
+                self._pending_remove.append(p)
                 continue
             if arcade.check_for_collision_with_list(p, self.wall_list):
                 # 爆炸弹丸碰墙时触发爆炸特效
                 if p.special == "explosive":
                     self._emit_explosion(p.center_x, p.center_y)
-                p.remove_from_sprite_lists()
+                self._pending_remove.append(p)
+        for p in self._pending_remove:
+            p.remove_from_sprite_lists()
 
     def _emit_explosion(self, x: float, y: float):
         """发射爆炸粒子特效"""
@@ -82,7 +88,7 @@ class CombatSystem:
         """
         return self._cooldowns.get(attacker_id, 0.0) <= 0
 
-    def melee_attack(self, player, monsters: arcade.SpriteList, weapon_damage: float, weapon_range: float, mouse_x: float = 0, mouse_y: float = 0, weapon_speed: float = 1.0, attacker_id: int = 0, lifesteal: float = 0.0, debuffs: list = None) -> list:
+    def melee_attack(self, player: "Player", monsters: arcade.SpriteList, weapon_damage: float, weapon_range: float, mouse_x: float = 0, mouse_y: float = 0, weapon_speed: float = 1.0, attacker_id: int = 0, lifesteal: float = 0.0, debuffs: list = None) -> list:
         """近战攻击：扇形命中检测，返回被击中的怪物列表
 
         attacker_id：攻击者标识（联机时各玩家独立冷却），默认 0 = 单人模式
@@ -104,7 +110,7 @@ class CombatSystem:
         crit_chance = getattr(player, "crit_chance", 0.0)
         is_crit = random.random() < crit_chance
         if is_crit:
-            weapon_damage *= 1.5  # 暴击伤害 ×1.5
+            weapon_damage *= CRIT_DAMAGE_MULT  # 暴击伤害 ×1.5
             # 暴击提示：在玩家位置显示"暴击!"浮动文字（金色醒目）
             floating_texts.add(player.center_x, player.center_y + 30, "暴击!",
                                (255, 200, 50), life=0.8, font_size=16, vy=70)
@@ -125,7 +131,7 @@ class CombatSystem:
             mdx = m.center_x - player.center_x
             mdy = m.center_y - player.center_y
             dist = math.hypot(mdx, mdy)
-            if dist > weapon_range + 30:
+            if dist > weapon_range + MELEE_HIT_BUFFER:
                 continue
             monster_angle = math.degrees(math.atan2(mdy, mdx))
             angle_diff = abs((monster_angle - attack_angle + 180) % 360 - 180)
@@ -167,7 +173,7 @@ class CombatSystem:
                 player.heal(heal_amount)
         return hit
 
-    def ranged_attack(self, player, weapon_damage: float, weapon_proj_speed: float, mouse_x: float = 0, mouse_y: float = 0, weapon_special: str = "", debuff_id: str = None, weapon_speed: float = 1.0, attacker_id: int = 0, debuffs: list = None, lifesteal: float = 0.0, spread_count: int = 1, spread_angle: float = 0.0) -> None:
+    def ranged_attack(self, player: "Player", weapon_damage: float, weapon_proj_speed: float, mouse_x: float = 0, mouse_y: float = 0, weapon_special: str = "", debuff_id: str = None, weapon_speed: float = 1.0, attacker_id: int = 0, debuffs: list = None, lifesteal: float = 0.0, spread_count: int = 1, spread_angle: float = 0.0) -> None:
         """远程攻击：生成弹丸，支持特殊属性（穿透/爆炸）与附带 debuff
 
         attacker_id：攻击者标识（联机时各玩家独立冷却），默认 0 = 单人模式
@@ -222,7 +228,9 @@ class CombatSystem:
         """检查弹丸命中怪物，支持穿透和爆炸效果，返回 [(monster, actual_damage)] 列表"""
         hit_monsters = []  # [(monster, actual_damage)]
         hit_set = set()    # 已命中怪物集合：O(1) 查重，替代每次重建列表线性查找（性能优化）
-        for proj in list(self.projectiles):
+        # 复用 _pending_remove 暂存需要移除的弹丸，避免每帧 list() 拷贝或迭代中修改列表
+        self._pending_remove.clear()
+        for proj in self.projectiles:
             # 本弹丸独立命中的怪物（吸血按本弹丸实际伤害结算，避免累计其他弹丸命中）
             proj_hits = []
             hits = arcade.check_for_collision_with_list(proj, monsters)
@@ -245,7 +253,7 @@ class CombatSystem:
                                 proj_hits.append((m, actual))
                         # 爆炸弹丸：对命中点周围所有怪物造成伤害
                         elif proj.special == "explosive":
-                            explosion_radius = 80  # 爆炸范围
+                            explosion_radius = PLAYER_EXPLOSION_RADIUS  # 爆炸范围
                             # 爆炸粒子特效
                             self._emit_explosion(proj.center_x, proj.center_y)
                             for m2 in monsters:
@@ -258,7 +266,7 @@ class CombatSystem:
                                         hit_monsters.append((m2, actual))
                                         hit_set.add(m2)
                                         proj_hits.append((m2, actual))
-                            proj.remove_from_sprite_lists()
+                            self._pending_remove.append(proj)
                             break
                         else:
                             actual = m.take_damage(proj.damage)
@@ -266,9 +274,9 @@ class CombatSystem:
                                 hit_monsters.append((m, actual))
                                 hit_set.add(m)
                                 proj_hits.append((m, actual))
-                # 非穿透弹丸命中后移除
-                if proj.special != "penetrating" and proj in self.projectiles:
-                    proj.remove_from_sprite_lists()
+                # 非穿透弹丸命中后标记移除
+                if proj.special != "penetrating" and proj not in self._pending_remove:
+                    self._pending_remove.append(proj)
             # 吸血：本弹丸命中造成实际伤害后，按比例回复攻击者生命（如吸血剑）
             # 同时检查虹吸 debuff（武器效果）和装备吸血 passive
             proj_lifesteal = getattr(proj, "lifesteal", 0)
@@ -288,9 +296,12 @@ class CombatSystem:
                 )
                 if heal_amount > 0 and owner is not None and hasattr(owner, "heal"):
                     owner.heal(heal_amount)
+        # 统一移除标记弹丸（避免迭代中修改列表）
+        for p in self._pending_remove:
+            p.remove_from_sprite_lists()
         return hit_monsters
 
-    def check_projectile_aoe(self, player, aoe_radius: float = ROCKET_TROOP_AOE_RADIUS) -> list:
+    def check_projectile_aoe(self, player: "Player", aoe_radius: float = ROCKET_TROOP_AOE_RADIUS) -> list:
         """检查怪物弹丸的 AOE 伤害：火箭兵弹丸爆炸时对玩家周围造成范围伤害
 
         注意：这是怪物弹丸对玩家的 AOE，不是玩家弹丸对怪物的 AOE
@@ -300,7 +311,7 @@ class CombatSystem:
         # 实际 AOE 逻辑在 game_view.py 的弹丸碰撞检测中处理
         return []
 
-    def emit_aoe_explosion(self, x: float, y: float, radius: float, damage: float, player):
+    def emit_aoe_explosion(self, x: float, y: float, radius: float, damage: float, player: "Player") -> int:
         """AOE 爆炸：对半径内的玩家造成伤害并触发爆炸特效（供 game_view.py 调用）"""
         dist = math.hypot(player.center_x - x, player.center_y - y)
         if dist <= radius:
@@ -310,7 +321,7 @@ class CombatSystem:
             return actual
         return 0
 
-    def spawn_laser(self, player, damage: float, mouse_x: float, mouse_y: float,
+    def spawn_laser(self, player: "Player", damage: float, mouse_x: float, mouse_y: float,
                     length: float = 600, width: float = 24, duration: float = 3.0,
                     attacker_id: int = 0, debuffs: list = None):
         """陨星炮：放出一道持续激光，实时跟随鼠标方向，可穿透墙壁
@@ -331,14 +342,17 @@ class CombatSystem:
         self.lasers.append(beam)
         return beam
 
-    def update_lasers(self, delta_time: float, mouse_x: float, mouse_y: float):
+    def update_lasers(self, delta_time: float, mouse_x: float, mouse_y: float) -> None:
         """更新所有激光（角度实时跟随鼠标），移除过期激光"""
-        for beam in list(self.lasers):
+        self._pending_remove.clear()
+        for beam in self.lasers:
             beam.update(delta_time, mouse_x, mouse_y)
             if beam.expired:
-                self.lasers.remove(beam)
+                self._pending_remove.append(beam)
+        for beam in self._pending_remove:
+            self.lasers.remove(beam)
 
-    def check_laser_hits(self, monsters) -> list:
+    def check_laser_hits(self, monsters: arcade.SpriteList) -> list:
         """激光命中检测：对激光路径上的怪物持续造成伤害
 
         返回 [(monster, actual_damage)] 列表（每0.1秒结算一次）
@@ -348,7 +362,7 @@ class CombatSystem:
             hit_monsters.extend(beam.hit_monsters(monsters))
         return hit_monsters
 
-    def draw(self):
+    def draw(self) -> None:
         self.projectiles.draw()
         # 绘制激光束（即时模式，支持半透明光晕）
         for beam in self.lasers:

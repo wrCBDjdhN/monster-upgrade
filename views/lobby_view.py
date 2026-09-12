@@ -22,6 +22,7 @@ import random
 from config import WINDOW_WIDTH, WINDOW_HEIGHT, NET_PORT, NET_SPAWN_OFFSET
 from entities.character_defs import CHARACTERS, CHARACTER_ORDER  # 房间内选角（联机开局前必选）
 from views.text_cache import TextCache  # 持久 Text 对象缓存，替代 draw_text
+from views.lobby_tutorial import LobbyTutorial  # 教程辅助模块（页面构建 + 覆盖层绘制）
 from game.sound_manager import sound_manager
 
 
@@ -108,6 +109,7 @@ class LobbyView(arcade.View):
         self._manual_ip_mode = False  # 是否切换到手动输入IP模式
         self._client_theme = "forest"  # 客户端加入房间时的地图主题（用于战备检查）
         # 联机教程状态
+        self.tutorial = LobbyTutorial(self)  # 教程辅助对象（页面构建 + 覆盖层绘制委托）
         self._tutorial_shown = False  # 本次会话是否已显示教程
         self._tutorial_page = 0  # 教程当前页码（0-based）
         self._tutorial_pages = self._build_tutorial_pages()  # 教程页面内容
@@ -150,133 +152,12 @@ class LobbyView(arcade.View):
         return False  # 未恢复连接，需要显示教程
 
     def _build_tutorial_pages(self) -> list[dict]:
-        """构建联机教程页面内容"""
-        return [
-            {
-                "title": "局域网联机 - 概述",
-                "content": [
-                    "局域网联机支持最多 4 人同时游戏。",
-                    "主机创建房间，其他玩家通过 IP 加入。",
-                    "主机负责裁决伤害/拾取/撤离，客户端同步显示。",
-                    "每局新地图：同一房间多次开局自动重新随机种子。",
-                ],
-            },
-            {
-                "title": "建房（主机）",
-                "content": [
-                    "点击「建房」创建房间，获得房间号。",
-                    "选择地图主题：幽暗森林（普通）/ 沙漠荒地（困难）/ 航天基地（极难）。",
-                    "选择角色后等待其他玩家加入。",
-                    "全员就绪后点击「开始游戏」。",
-                    "主机可在房间内访问市场/仓库补充装备。",
-                ],
-            },
-            {
-                "title": "加入（客户端）",
-                "content": [
-                    "点击「加入」搜索局域网内的房间。",
-                    "选择房间或手动输入主机 IP 连接。",
-                    "连接后选择角色并点击「准备」。",
-                    "等待主机开始游戏。",
-                    "战备检查：装备价值需达到地图要求。",
-                ],
-            },
-            {
-                "title": "操作与快捷键",
-                "content": [
-                    "WASD / 方向键：移动",
-                    "鼠标：瞄准（远程武器）",
-                    "鼠标左键：攻击",
-                    "E：交互（宝箱/水井/发射台）/ 救援倒地队友",
-                    "F：释放角色技能",
-                    "TAB：打开/关闭背包",
-                    "V：观战模式切换视角（联机）",
-                    "M：小地图放大/缩小",
-                    "ESC：设置界面 / 关闭弹窗",
-                    "F11：全屏切换",
-                ],
-            },
-            {
-                "title": "战斗与协作",
-                "content": [
-                    "击杀怪物获取经验、金币和掉落物。",
-                    "拾取武器/装备/药水提升实力。",
-                    "BOSS 镇守火箭发射台，击败可夺宝或启用撤离。",
-                    "找到撤离点读条 3 秒撤离，带走本局战利品。",
-                    "死亡/超时则丢失全部装备。",
-                ],
-            },
-            {
-                "title": "玩家救援机制",
-                "content": [
-                    "当队友 HP 归零时，会进入「倒地」状态。",
-                    "倒地玩家保留装备，头顶显示倒计时（60秒）。",
-                    "靠近倒地队友按 E 键可发起救援（3秒读条）。",
-                    "救援成功：被救者 HP 恢复为 10，装备保留。",
-                    "超时未被救：倒地玩家真死，清空装备，进入观战。",
-                    "倒地玩家可主动退出观战（视为真死）。",
-                    "全场玩家均阵亡/观战 → 全员阵亡，结束本局。",
-                ],
-            },
-            {
-                "title": "观战模式",
-                "content": [
-                    "死亡/撤离后自动进入观战模式。",
-                    "V 键切换跟随不同的存活玩家。",
-                    "观战期间世界继续模拟（怪物 AI/掉落/快照）。",
-                    "全员结束后回房等待下一局。",
-                    "倒地玩家可选择退出观战（视为真死）。",
-                ],
-            },
-        ]
+        """委托 → tutorial._build_tutorial_pages"""
+        return self.tutorial._build_tutorial_pages()
 
     def _draw_tutorial(self, cx: int):
-        """绘制联机教程页面"""
-        # 半透明遮罩
-        overlay = arcade.ShapeElementList()
-        overlay.append(arcade.create_rect_filled(
-            arcade.XYWH(cx, WINDOW_HEIGHT // 2, WINDOW_WIDTH, WINDOW_HEIGHT),
-            (0, 0, 0, 180)))
-        overlay.draw()
-        # 教程面板背景
-        panel_rect = arcade.XYWH(cx, WINDOW_HEIGHT // 2, 700, 500)
-        arcade.draw_rect_filled(panel_rect, (30, 40, 60))
-        arcade.draw_rect_outline(panel_rect, arcade.color.GOLD, border_width=3)
-        # 标题
-        page = self._tutorial_pages[self._tutorial_page]
-        self._tc.text("tut_title", page["title"], cx, WINDOW_HEIGHT // 2 + 210,
-                      arcade.color.GOLD, size=24, anchor_x="center", bold=True)
-        # 内容
-        y = WINDOW_HEIGHT // 2 + 170
-        for line in page["content"]:
-            self._tc.text(f"tut_{y}", f"• {line}", cx - 300, y,
-                          arcade.color.WHITE, size=14)
-            y -= 28
-        # 页码
-        total = len(self._tutorial_pages)
-        self._tc.text("tut_page", f"第 {self._tutorial_page + 1}/{total} 页",
-                      cx, WINDOW_HEIGHT // 2 - 200, arcade.color.LIGHT_GRAY, size=12,
-                      anchor_x="center")
-        # 上一页按钮
-        if self._tutorial_page > 0:
-            pcolor = arcade.color.CORNFLOWER_BLUE if self._tutorial_prev_hover else arcade.color.STEEL_BLUE
-            arcade.draw_rect_filled(self._tutorial_prev_rect, pcolor)
-            self._tc.text("tut_prev", "上一页", self._tutorial_prev_rect.center_x,
-                          self._tutorial_prev_rect.center_y, arcade.color.WHITE, 14,
-                          anchor_x="center", anchor_y="center")
-        # 下一页按钮
-        if self._tutorial_page < total - 1:
-            ncolor = arcade.color.CORNFLOWER_BLUE if self._tutorial_next_hover else arcade.color.STEEL_BLUE
-            arcade.draw_rect_filled(self._tutorial_next_rect, ncolor)
-            self._tc.text("tut_next", "下一页", self._tutorial_next_rect.center_x,
-                          self._tutorial_next_rect.center_y, arcade.color.WHITE, 14,
-                          anchor_x="center", anchor_y="center")
-        # 关闭按钮
-        ecolor = arcade.color.DARK_RED if self._tutorial_close_hover else (120, 40, 40)
-        arcade.draw_rect_filled(self._tutorial_close_rect, ecolor)
-        self._tc.text("tut_close", "我知道了", self._tutorial_close_rect.center_x,
-                      self._tutorial_close_rect.center_y, arcade.color.WHITE, 14,
-                      anchor_x="center", anchor_y="center")
+        """委托 → tutorial._draw_tutorial"""
+        return self.tutorial._draw_tutorial(cx)
 
     def on_show_view(self):
         self.window.background_color = arcade.color.DARK_SLATE_GRAY
