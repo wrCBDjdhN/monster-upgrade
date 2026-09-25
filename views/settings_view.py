@@ -111,9 +111,11 @@ class SettingsView(arcade.View):
         self._close_rect = arcade.XYWH(0, 0, 140, 40)
         self._row_rects: dict[str, arcade.XYWH] = {}
         self._hover_row: str | None = None
-        self._hover_btn: str | None = None   # "mute"/"reset"/"close"/"abandon"
+        self._hover_btn: str | None = None   # "mute"/"reset"/"close"/"codex"/"abandon"
         # 放弃行动按钮矩形（_layout 会更新位置，此处防首次鼠标事件崩溃）
         self._abandon_rect = arcade.XYWH(0, 0, 150, 40)
+        # 图鉴按钮矩形（_layout 会更新位置，此处防首次鼠标事件崩溃）
+        self._codex_rect = arcade.XYWH(0, 0, 140, 40)
 
     # ── 布局计算 ──
     def _layout(self):
@@ -139,10 +141,12 @@ class SettingsView(arcade.View):
             rx = x0 + col * (self.ROW_W + self.COL_GAP)
             ry = y_top - row * (self.ROW_H + self.ROW_GAP)
             self._row_rects[action] = arcade.XYWH(rx, ry, self.ROW_W, self.ROW_H)
-        # 底部按钮：恢复默认 / 返回 / 放弃行动（仅游戏中）
-        self._reset_rect = arcade.XYWH(cx - 240, 40, 150, 40)
-        self._close_rect = arcade.XYWH(cx - 70, 40, 140, 40)
-        self._abandon_rect = arcade.XYWH(cx + 110, 40, 150, 40)
+        # 底部按钮：恢复默认 / 返回 / 图鉴 / 放弃行动（仅游戏中）
+        # 新增图鉴后重新平衡 x 位置：左右对称、间隙 20px 均匀
+        self._reset_rect = arcade.XYWH(cx - 245, 40, 150, 40)
+        self._close_rect = arcade.XYWH(cx - 80, 40, 140, 40)
+        self._codex_rect = arcade.XYWH(cx + 80, 40, 140, 40)
+        self._abandon_rect = arcade.XYWH(cx + 245, 40, 150, 40)
 
     # ── 绘制 ──
     def on_show_view(self):
@@ -228,6 +232,11 @@ class SettingsView(arcade.View):
         arcade.draw_rect_filled(self._close_rect, arcade.color.DARK_BLUE if self._hover_btn != "close" else (70, 100, 160))
         self._tc.text("set_close", "返回游戏", self._close_rect.center_x, self._close_rect.center_y,
                       arcade.color.WHITE, 14, anchor_x="center", anchor_y="center")
+        # 图鉴按钮（查看怪物/装备/资源图鉴；开始菜单与游戏内两种模式均显示）
+        codex_color = (60, 90, 160) if self._hover_btn != "codex" else (85, 120, 200)
+        arcade.draw_rect_filled(self._codex_rect, codex_color)
+        self._tc.text("set_codex", "图 鉴", self._codex_rect.center_x, self._codex_rect.center_y,
+                      arcade.color.WHITE, 14, anchor_x="center", anchor_y="center")
         # 放弃行动按钮：仅在游戏内显示，视为撤离失败
         # 主页面设置显示"退出游戏"，直接关闭窗口
         if self.game_view is not None:
@@ -255,6 +264,8 @@ class SettingsView(arcade.View):
             self._hover_btn = "reset"
         elif self._close_rect.point_in_rect((x, y)):
             self._hover_btn = "close"
+        elif self._codex_rect.point_in_rect((x, y)):
+            self._hover_btn = "codex"
         elif hasattr(self, '_abandon_rect') and (self.game_view is not None or not self._from_game) and self._abandon_rect.point_in_rect((x, y)):
             self._hover_btn = "abandon"
         else:
@@ -285,6 +296,11 @@ class SettingsView(arcade.View):
         # 返回游戏
         if self._close_rect.point_in_rect((x, y)):
             self._close()
+            return
+        # 图鉴按钮：进入图鉴（返回链 codex→settings→game）
+        if self._codex_rect.point_in_rect((x, y)):
+            from views.codex_view import CodexView
+            self.window.show_view(CodexView(self.window_ref, back_view=self))
             return
         # 放弃行动（游戏内）：关闭设置页 → 清空装备 → 进入观战模式
         if self.game_view is not None and self._abandon_rect.point_in_rect((x, y)):

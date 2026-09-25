@@ -628,9 +628,13 @@ def render_game(view):
                        f"背包: {equip['backpack']['name']} ({used_cap}/{total_cap})",
                        10, equip_y, arcade.color.LIGHT_BLUE, 11)
 
-    # 玩家 debuff 显示（中毒/燃烧/冰冻/减速/眩晕，含剩余时间）
-    _DEBUFF_NAMES = {"poison": "中毒", "burn": "燃烧", "freeze": "冰冻",
-                     "slow": "减速", "stun": "眩晕"}
+    # 玩家 debuff 显示（含剩余时间）：补全 effects_defs.DEBUFF_POOL 与怪物技能全部 ID，
+    # 避免状态行回落英文 ID（原仅 5 个，vulnerable/bleed/armor_break/leech 会显示英文）
+    _DEBUFF_NAMES = {
+        "poison": "中毒", "burn": "燃烧", "freeze": "冰冻",
+        "slow": "减速", "stun": "眩晕", "vulnerable": "易伤",
+        "bleed": "流血", "armor_break": "破甲", "leech": "虹吸",
+    }
     _active_debuffs = getattr(view.player, "debuffs", None)
     if _active_debuffs:
         # 逐条显示效果名 + 剩余秒数（duration 由 _update_debuffs 每帧递减）

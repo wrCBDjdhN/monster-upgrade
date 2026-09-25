@@ -1,5 +1,7 @@
 """药水管理：购买/使用/删除"""
 from db.connection import _conn
+# 图鉴解锁：直接 import db.codex（禁经 db.database，否则 database re-export potions 形成循环导入）
+from db.codex import unlock_codex_entry
 
 
 def add_potion(pid: int, item_id: str, name: str, effect: str, value: float, duration: float = 0):
@@ -16,6 +18,8 @@ def add_potion(pid: int, item_id: str, name: str, effect: str, value: float, dur
                 "INSERT INTO potions(player_id, item_id, name, effect, value, duration, quantity) VALUES(?,?,?,?,?,?,1)",
                 (pid, item_id, name, effect, value, duration),
             )
+    # 图鉴解锁：药水写入数据库后解锁对应条目（事务提交后再写，避免嵌套连接锁冲突）
+    unlock_codex_entry(pid, "potion", item_id)
 
 
 def get_potions(pid: int) -> list[dict]:

@@ -1,5 +1,7 @@
 """武器管理：创建/获取/升级/售卖/删除"""
 from db.connection import _conn
+# 图鉴解锁：直接 import db.codex（禁经 db.database，否则 database re-export weapons 形成循环导入）
+from db.codex import unlock_codex_entry
 
 
 def create_weapon(pid: int, item_id: str, kind: str, name: str, damage: float, attack_speed: float, level: int = 1, effects: list | None = None) -> int:
@@ -19,11 +21,15 @@ def create_weapon(pid: int, item_id: str, kind: str, name: str, damage: float, a
             "INSERT INTO weapons(player_id,item_id,kind,name,damage,attack_speed,level,effects) VALUES(?,?,?,?,?,?,?,?)",
             (pid, item_id, kind, name, damage, attack_speed, level, effects_str),
         )
-        return c.execute("SELECT last_insert_rowid()").fetchone()[0]
+        wid = c.execute("SELECT last_insert_rowid()").fetchone()[0]
+    # 图鉴解锁：武器写入数据库后解锁对应条目（事务提交后再写，避免嵌套连接锁冲突）
+    unlock_codex_entry(pid, "weapon", item_id)
+    return wid
 
 
 def add_weapon(pid: int, item_id: str, name: str, kind: str, damage: float, attack_speed: float = 1.0, level: int = 1, effects: list | None = None) -> int:
     """通过 item_id 创建武器（市场购买/开箱用）"""
+    # 图鉴解锁由 create_weapon 统一处理（本函数委托其完成插入）
     return create_weapon(pid, item_id, kind, name, damage, attack_speed, level, effects)
 
 

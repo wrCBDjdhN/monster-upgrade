@@ -42,6 +42,9 @@ class MarketView(ScrollView):
         # 批量购买弹窗状态（None = 关闭）
         self._bulk_state = None
         self._input_cursor_timer = 0.0  # 输入框光标闪烁计时
+        # 图鉴解锁 toast：购买/开箱产生新解锁时短暂显示（on_update 递减）
+        self._toast_text = ""
+        self._toast_timer = 0.0
         # 批量购买弹窗 + 开箱逻辑（拆分至 market_bulk.py，经 self.bulk 委托）
         self.bulk = MarketBulkOverlay(self)
         # 新手教程（阶段 6）：市场买卖教学向导（教程最后一站，完成后标记）
@@ -346,9 +349,20 @@ class MarketView(ScrollView):
             return
         super().on_mouse_scroll(x, y, scroll_x, scroll_y)
 
+    def show_toast(self, text: str, duration: float = 3.0):
+        """图鉴解锁等短暂提示：设置文案并启动倒计时（on_draw 顶层绘制）"""
+        self._toast_text = text
+        self._toast_timer = duration
+
     def on_update(self, delta_time: float):
         """更新开箱动画计时器（批量：逐个播放结果队列）"""
         self._input_cursor_timer += delta_time
+        # 图鉴解锁 toast 倒计时
+        if self._toast_timer > 0.0:
+            self._toast_timer -= delta_time
+            if self._toast_timer <= 0.0:
+                self._toast_timer = 0.0
+                self._toast_text = ""
         if self._box_opening:
             self._box_open_timer += delta_time
             if self._box_open_timer >= self._box_open_duration:
@@ -574,6 +588,18 @@ class MarketView(ScrollView):
 
         # === 批量购买弹窗覆盖层 ===
         self._draw_bulk_overlay()
+
+        # === 图鉴解锁 toast（画在弹窗之上、教程之下，短暂显示后自动消失）===
+        if self._toast_timer > 0.0 and self._toast_text:
+            toast_w = max(280, len(self._toast_text) * 14 + 40)
+            arcade.draw_rect_filled(
+                arcade.XYWH(WINDOW_WIDTH // 2, WINDOW_HEIGHT - 180, toast_w, 36),
+                (30, 35, 20),
+            )
+            self._tc.text(
+                "codex_toast", self._toast_text, WINDOW_WIDTH // 2, WINDOW_HEIGHT - 180,
+                arcade.color.GOLD, 14, anchor_x="center", anchor_y="center",
+            )
 
         # === 新手教程（阶段 6）：买卖教学向导弹窗（画在最上层）===
         if self._tut_showing():

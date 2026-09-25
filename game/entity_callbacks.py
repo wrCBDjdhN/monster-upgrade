@@ -58,6 +58,18 @@ def _on_rocket_boss_defeated(view, boss, pad):
     # 等级经验：火箭台 BOSS 击杀经验（与普通 BOSS 同规则 EXP_BOSS_MULT；
     # 该死亡回调不走 on_monster_death，需在此单独发放）
     _award_kill_exp(view, boss)
+    # 图鉴解锁：火箭台 BOSS 击败解锁对应条目（player_id 解析与经验发放同一模式）
+    gs = view.window.game_state
+    if getattr(gs, "player_id", None):
+        from db.database import unlock_codex_entry
+        boss_cls = boss.__class__.__name__
+        if unlock_codex_entry(gs.player_id, "monster", boss_cls):
+            # 新解锁：BOSS 位置弹金色浮动文字
+            from views.codex_view import _MONSTER_NAMES
+            mname = _MONSTER_NAMES.get(boss_cls, boss_cls)
+            floating_texts.add(boss.center_x, boss.center_y + 30,
+                               f"图鉴解锁: {mname}",
+                               (255, 215, 0), life=2.0, font_size=14, vy=50)
     # BOSS 掉落：武器 + 护甲 + 头盔 + 金币 + 矿石
     drops = []
     # 掉落武器
@@ -100,6 +112,17 @@ def on_monster_death(view, monster):
 
     # 死亡粒子爆炸（死亡颜色从 MONSTER_METADATA 按怪物类名读取）
     cls_name = monster.__class__.__name__
+    # 图鉴解锁：击杀怪物解锁对应条目（player_id 解析复用 _award_kill_exp 的模式）
+    gs = view.window.game_state
+    if getattr(gs, "player_id", None):
+        from db.database import unlock_codex_entry
+        if unlock_codex_entry(gs.player_id, "monster", cls_name):
+            # 新解锁：尸体位置弹金色浮动文字（中文名延迟导入 views.codex_view 的映射表）
+            from views.codex_view import _MONSTER_NAMES
+            mname = _MONSTER_NAMES.get(cls_name, cls_name)
+            floating_texts.add(monster.center_x, monster.center_y + 30,
+                               f"图鉴解锁: {mname}",
+                               (255, 215, 0), life=2.0, font_size=14, vy=50)
     meta = MONSTER_METADATA.get(cls_name)
     color = meta["death_color"] if meta else (255, 255, 255)
     particle_system.emit(monster.center_x, monster.center_y, 20, color, speed=150, life=0.6, size=4, gravity=100)

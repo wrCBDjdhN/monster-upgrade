@@ -144,6 +144,47 @@ def _calc_carried_capacity(run_carried: dict) -> int:
     return total
 
 
+def _unlock_codex_pickup(category: str, item_id: str,
+                         x: float | None = None, y: float | None = None) -> bool:
+    """图鉴解锁：局内拾取武器/装备/药水时立即解锁（不等撤离）
+
+    返回 True 表示本次为新解锁。传入 x/y 时在该位置弹金色浮动文字提示。
+    player_id 经 arcade 全局窗口解析（game/ 层既有模式，见 player.py）；
+    无 player_id（异常上下文）时静默跳过，不影响拾取主流程。
+    """
+    win = arcade.get_window()
+    gs = getattr(win, "game_state", None)
+    pid = getattr(gs, "player_id", None) if gs is not None else None
+    if pid is None:
+        return False
+    from db.database import unlock_codex_entry
+    newly = unlock_codex_entry(pid, category, item_id)
+    if newly and x is not None and y is not None:
+        # 新解锁：掉落点弹金色浮动文字（名称按分类从定义表解析）
+        name = _codex_display_name(category, item_id)
+        from game.effects import floating_texts
+        floating_texts.add(x, y + 24, f"图鉴解锁: {name}",
+                           (255, 215, 0), life=2.0, font_size=14, vy=50)
+    return newly
+
+
+def _codex_display_name(category: str, item_id: str) -> str:
+    """按图鉴分类解析条目中文显示名；未知条目回退 item_id"""
+    if category == "weapon":
+        from entities.weapon_defs import ALL_WEAPONS
+        return ALL_WEAPONS.get(item_id, {}).get("name", item_id)
+    if category == "equipment":
+        from entities.equipment_defs import HELMETS, ARMORS, BACKPACKS
+        for table in (HELMETS, ARMORS, BACKPACKS):
+            if item_id in table:
+                return table[item_id].get("name", item_id)
+        return item_id
+    if category == "potion":
+        from entities.equipment_defs import POTIONS
+        return POTIONS.get(item_id, {}).get("name", item_id)
+    return item_id
+
+
 def try_pickup(player, drops: list[DropItem], run_carried: dict,
                equipped_weapon_id: int | None = None,
                equipped_helmet_id: str | None = None,
@@ -208,6 +249,12 @@ def try_pickup(player, drops: list[DropItem], run_carried: dict,
             # 免费装备：直接装备到装备栏（不存入 run_carried，不占容量）
             # 通过 on_free_equip 回调更新 GameState 和玩家属性
             picked.append(d)
+            # 图鉴解锁：拾取即穿上的武器/装备同样瞬间解锁（不走 run_carried 分支，需在此单独挂钩）
+            # 传掉落物坐标：新解锁时在掉落点弹浮动提示
+            if d.item_type == "weapon":
+                _unlock_codex_pickup("weapon", d.item_id, d.center_x, d.center_y)
+            elif d.item_type in ("helmet", "armor", "backpack"):
+                _unlock_codex_pickup("equipment", d.item_id, d.center_x, d.center_y)
             if on_free_equip is not None:
                 on_free_equip(d)
             continue
@@ -220,6 +267,8 @@ def try_pickup(player, drops: list[DropItem], run_carried: dict,
                 skipped_full.append(d)
                 continue
             run_potions[d.item_id] = run_potions.get(d.item_id, 0) + d.quantity
+            # 图鉴解锁：药水进入本局药水槽即解锁（不等撤离）；新解锁在掉落点弹提示
+            _unlock_codex_pickup("potion", d.item_id, d.center_x, d.center_y)
             picked.append(d)
             continue
 
@@ -267,6 +316,13 @@ def try_pickup(player, drops: list[DropItem], run_carried: dict,
         else:
             key = d.item_id
         run_carried[d.item_type][key] = run_carried[d.item_type].get(key, 0) + d.quantity
+        # 图鉴解锁：武器/装备/药水进入 run_carried 即解锁（不等撤离）；新解锁在掉落点弹提示
+        if d.item_type == "weapon":
+            _unlock_codex_pickup("weapon", d.item_id, d.center_x, d.center_y)
+        elif d.item_type in ("helmet", "armor", "backpack"):
+            _unlock_codex_pickup("equipment", d.item_id, d.center_x, d.center_y)
+        elif d.item_type == "potion":
+            _unlock_codex_pickup("potion", d.item_id, d.center_x, d.center_y)
         picked.append(d)
 
     for d in picked:

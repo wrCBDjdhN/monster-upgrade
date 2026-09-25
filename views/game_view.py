@@ -440,16 +440,10 @@ class GameView(arcade.View):
             self.harvestables.append(h)
             self.obstacle_list.append(h)
 
-        # 地图初始掉落（野外金币 + 房间资源）：掉落一律由主机生成并随快照同步（B1/B13），客户端跳过，
+        # 地图初始掉落（房间资源）：掉落一律由主机生成并随快照同步（B1/B13），客户端跳过，
         # 避免本地掉落列表与主机快照冲突
         # TODO(联机): 怪物/掉落/宝箱由主机快照驱动
         if gs.net_mode != "client":
-            # 野外金币（地图上随机分布的拾取物，永不消失）
-            for gx, gy in self.map_data.get("wild_coins", []):
-                coin = DropItem(gx, gy, "gold", "gold", 1)
-                coin._lifetime = None  # 地图初始金币永不消失
-                self.drops.append(coin)
-
             # 房间内资源点（每个房间 3~5 个，永不消失）
             for rx, ry, rtype in self.map_data.get("resources", []):
                 res = DropItem(rx, ry, "resource", rtype, 1)

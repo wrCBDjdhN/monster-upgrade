@@ -30,6 +30,7 @@ def init_db():
     5. potions: 药水（含效果、数值、持续时间）
     6. character_unlocks: 角色解锁记录（购买过的付费角色）
     7. character_levels: 角色等级（等级/经验/待选升级次数/永久属性加成，按角色独立）
+    8. codex_unlocks: 图鉴解锁记录（怪物/武器/装备/药水条目，UNIQUE(player_id, category, item_id)）
     """
     with _conn() as c:
         # 玩家表
@@ -101,6 +102,18 @@ def init_db():
                 character_id TEXT NOT NULL,
                 unlocked_at TEXT NOT NULL,
                 UNIQUE(player_id, character_id),
+                FOREIGN KEY(player_id) REFERENCES players(id)
+            )
+        """)
+        # 图鉴解锁表（怪物/武器/装备/药水条目解锁记录；UNIQUE 保证同一玩家同一条目只记一次）
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS codex_unlocks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                player_id INTEGER NOT NULL,
+                category TEXT NOT NULL,
+                item_id TEXT NOT NULL,
+                unlocked_at TEXT DEFAULT (datetime('now', 'localtime')),
+                UNIQUE(player_id, category, item_id),
                 FOREIGN KEY(player_id) REFERENCES players(id)
             )
         """)
@@ -224,3 +237,6 @@ from db.settings import (  # noqa: F401, E402
     get_key_bindings, set_key_bindings, reset_key_bindings,
     get_volume, set_volume, get_sound_enabled, set_sound_enabled,
 )
+
+# 图鉴解锁管理（怪物/武器/装备/药水条目解锁记录，codex_view 读取）
+from db.codex import unlock_codex_entry, get_codex_unlocks  # noqa: F401, E402

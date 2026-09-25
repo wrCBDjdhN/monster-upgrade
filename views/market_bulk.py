@@ -100,7 +100,10 @@ class MarketBulkOverlay:
             return
 
     def _confirm_bulk(self):
-        """确认批量购买：一次性扣费，按数量循环入库；宝箱则批量开箱并播放序列动画"""
+        """确认批量购买：一次性扣费，按数量循环入库；宝箱则批量开箱并播放序列动画
+
+        购买前后对比 codex_unlocks 集合：有新增条目时在市场界面弹「图鉴解锁」toast。
+        """
         st = self.mv._bulk_state
         if not st:
             return
@@ -113,6 +116,9 @@ class MarketBulkOverlay:
         # 再次校验金币足够（防止弹窗停留期间余额变动）
         if get_gold(pid) < total_cost:
             return
+        # 购买前记录已解锁集合：购买/开箱会经 add_* 内部 unlock_codex_entry 写入
+        from db.database import get_codex_unlocks
+        unlocks_before = get_codex_unlocks(pid)
         spend_gold(pid, total_cost)
         sound_manager.play_upgrade()
         if item_type in ("buy_helmet", "buy_armor", "buy_backpack"):
@@ -134,6 +140,17 @@ class MarketBulkOverlay:
             self._start_box_sequence()
         self.mv._bulk_state = None
         self.mv._rebuild_keep_view()
+        # 购买后 diff：新解锁条目弹 toast（最多展示 3 个名称，超出用「等」省略）
+        unlocks_after = get_codex_unlocks(pid)
+        new_entries = unlocks_after - unlocks_before
+        if new_entries:
+            from game.loot import _codex_display_name
+            names = [_codex_display_name(cat, iid) for cat, iid in sorted(new_entries)]
+            if len(names) > 3:
+                toast = f"图鉴解锁: {', '.join(names[:3])} 等 {len(names)} 项"
+            else:
+                toast = f"图鉴解锁: {', '.join(names)}"
+            self.mv.show_toast(toast, 3.0)
 
     def _roll_box(self, box_type, box_id):
         """开一个宝箱：随机产出并入库存，结果追加到 _box_results 队列

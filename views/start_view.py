@@ -12,16 +12,19 @@ class StartView(arcade.View):
         self.window_ref = window
         self._tc = TextCache()  # 持久 Text 对象缓存，避免 draw_text 每帧重建纹理
         self.title = "打怪升级"
-        self.btn_rect = arcade.XYWH(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - 60, 220, 50)
-        self.wh_rect = arcade.XYWH(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - 130, 220, 50)
-        self.market_rect = arcade.XYWH(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - 200, 220, 50)
-        self.forge_rect = arcade.XYWH(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - 270, 220, 50)  # 锻造坊入口
+        # 按钮纵向排列：新增图鉴后整体重排，间距 55px 均匀分布（保持风格统一）
+        self.btn_rect = arcade.XYWH(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - 55, 220, 50)
+        self.wh_rect = arcade.XYWH(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - 110, 220, 50)
+        self.market_rect = arcade.XYWH(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - 165, 220, 50)
+        self.forge_rect = arcade.XYWH(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - 220, 220, 50)  # 锻造坊入口
+        self.codex_rect = arcade.XYWH(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - 275, 220, 50)  # 图鉴入口
         self.net_rect = arcade.XYWH(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - 330, 220, 46)  # 局域网联机入口
         self.settings_gear_rect = arcade.XYWH(35, WINDOW_HEIGHT - 35, 40, 40)  # 左上角齿轮图标
         self.btn_hover = False
         self.wh_hover = False
         self.market_hover = False
         self.forge_hover = False
+        self.codex_hover = False  # 图鉴按钮悬停态
         self.net_hover = False
         self.settings_hover = False
         # 新手教程（阶段 1）：向导弹窗状态
@@ -56,6 +59,11 @@ class StartView(arcade.View):
                 "【锻造坊】升级装备：",
                 "用材料升级武器/装备，还可合成强力神器。",
             ], highlight=self.forge_rect),
+            TutorialPage("图鉴", [
+                "【图鉴】记录你遭遇过的怪物与获得过的物品：",
+                "击杀怪物、拾取装备药水、商店购买均可解锁条目，",
+                "解锁后可查看完整属性与图鉴进度。",
+            ], highlight=self.codex_rect),
             TutorialPage("局域网联机", [
                 "【局域网联机】最多 4 人联机：",
                 "建房或加入好友房间，一起打怪一起撤离。",
@@ -160,6 +168,18 @@ class StartView(arcade.View):
             arcade.color.WHITE, size=22, anchor_x="center", anchor_y="center",
         )
 
+        # 图鉴按钮（查看怪物/装备/资源图鉴）
+        codex_color = (60, 90, 160) if self.codex_hover else (45, 65, 115)
+        arcade.draw_rect_filled(self.codex_rect, codex_color)
+        arcade.draw_rect_outline(self.codex_rect, arcade.color.WHITE, border_width=2)
+        # 持久 Text 对象，避免 draw_text 每帧重建纹理
+        self._tc.text(
+            "btn_codex",
+            "图 鉴",
+            self.codex_rect.center_x, self.codex_rect.center_y,
+            arcade.color.WHITE, size=22, anchor_x="center", anchor_y="center",
+        )
+
         # 局域网联机按钮
         net_color = (40, 160, 120) if self.net_hover else (30, 110, 85)
         arcade.draw_rect_filled(self.net_rect, net_color)
@@ -211,6 +231,7 @@ class StartView(arcade.View):
         self.wh_hover = self.wh_rect.point_in_rect((x, y))
         self.market_hover = self.market_rect.point_in_rect((x, y))
         self.forge_hover = self.forge_rect.point_in_rect((x, y))
+        self.codex_hover = self.codex_rect.point_in_rect((x, y))  # 图鉴按钮悬停
         self.net_hover = self.net_rect.point_in_rect((x, y))
         self.settings_hover = self.settings_gear_rect.point_in_rect((x, y))
 
@@ -270,6 +291,15 @@ class StartView(arcade.View):
             gs.player_id = get_or_create_player(gs.player_name)
             from views.forge_view import ForgeView
             self.window.show_view(ForgeView(self.window_ref))
+            return
+
+        # 图鉴按钮
+        if self.codex_rect.point_in_rect((x, y)):
+            init_db()
+            gs = self.window.game_state
+            gs.player_id = get_or_create_player(gs.player_name)
+            from views.codex_view import CodexView
+            self.window.show_view(CodexView(self.window_ref))
             return
 
         # 仓库按钮

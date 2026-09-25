@@ -92,7 +92,7 @@ MELEE_WEAPONS = {
         "kind": "melee",
         "item_id": "wado_ichimonji",
         "name": "和道一文字",
-        "damage": 100,
+        "damage": 60,  # 平衡调整：原100，降低避免秒杀（常规最高狙击枪35）
         "attack_speed": 1.0,
         "range": 150,
         "price": 0,  # 价格为0：不可在市场购买，仅锻造获得
@@ -105,7 +105,7 @@ MELEE_WEAPONS = {
         "kind": "melee",
         "item_id": "storm_hammer",
         "name": "雷神之锤",
-        "damage": 95,
+        "damage": 58,  # 平衡调整：原95
         "attack_speed": 0.6,  # 慢速重击流
         "range": 110,
         "price": 0,
@@ -119,7 +119,7 @@ MELEE_WEAPONS = {
         "kind": "melee",
         "item_id": "frost_blade",
         "name": "霜之哀伤",
-        "damage": 70,
+        "damage": 42,  # 平衡调整：原70
         "attack_speed": 1.4,  # 中速风筝流
         "range": 130,
         "price": 0,
@@ -133,7 +133,7 @@ MELEE_WEAPONS = {
         "kind": "melee",
         "item_id": "flame_blade",
         "name": "赤焰魔剑",
-        "damage": 75,
+        "damage": 45,  # 平衡调整：原75
         "attack_speed": 1.6,  # 高攻速输出流
         "range": 120,
         "price": 0,
@@ -147,14 +147,14 @@ MELEE_WEAPONS = {
         "kind": "melee",
         "item_id": "vampiric_blade",
         "name": "吸血剑",
-        "damage": 85,
+        "damage": 52,  # 平衡调整：原85
         "attack_speed": 1.2,
         "range": 120,
         "price": 0,
         "color": (200, 30, 60),  # 血红色
         "shape": "sword",
         "capacity_cost": 3,
-        "lifesteal": 0.15,  # 造成伤害的15%转化为生命回复
+        "lifesteal": 0.10,  # 平衡调整：原0.15，削弱自愈避免几乎不死
         "artifact": True,
     },
 }
@@ -295,7 +295,7 @@ RANGED_WEAPONS = {
         "kind": "ranged",
         "item_id": "meteor_cannon",
         "name": "陨星炮",
-        "damage": 80,
+        "damage": 48,  # 平衡调整：原80（激光持续伤害，降幅略大）
         "attack_speed": 1.0,
         "projectile_speed": 0,  # 激光武器不走弹丸
         "range": 600,
@@ -310,7 +310,7 @@ RANGED_WEAPONS = {
         "kind": "ranged",
         "item_id": "annihilation_cannon",
         "name": "湮灭炮",
-        "damage": 90,
+        "damage": 55,  # 平衡调整：原90
         "attack_speed": 0.5,  # 慢速重型攻坚
         "projectile_speed": PROJECTILE_SPEED + 150,
         "range": 320,
@@ -325,7 +325,7 @@ RANGED_WEAPONS = {
         "kind": "ranged",
         "item_id": "piercing_bow",
         "name": "贯穿之弓",
-        "damage": 45,
+        "damage": 30,  # 平衡调整：原45（攻速2.5，DPS仍居前）
         "attack_speed": 2.5,  # 极速连射
         "projectile_speed": PROJECTILE_SPEED + 150,
         "range": 400,
@@ -340,7 +340,7 @@ RANGED_WEAPONS = {
         "kind": "ranged",
         "item_id": "plague_staff",
         "name": "瘟疫法杖",
-        "damage": 40,
+        "damage": 26,  # 平衡调整：原40
         "attack_speed": 1.5,
         "projectile_speed": PROJECTILE_SPEED + 80,
         "range": 350,
@@ -355,7 +355,7 @@ RANGED_WEAPONS = {
         "kind": "ranged",
         "item_id": "tri_shot_cannon",
         "name": "三连散射炮",
-        "damage": 30,
+        "damage": 20,  # 平衡调整：原30（一次3发，合计60）
         "attack_speed": 1.5,
         "projectile_speed": PROJECTILE_SPEED + 100,
         "range": 300,
@@ -371,7 +371,7 @@ RANGED_WEAPONS = {
         "kind": "ranged",
         "item_id": "frost_aura_staff",
         "name": "冰霜领域",
-        "damage": 50,
+        "damage": 32,  # 平衡调整：原50
         "attack_speed": 0.9,
         "projectile_speed": PROJECTILE_SPEED + 50,
         "range": 280,

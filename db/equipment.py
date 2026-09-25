@@ -1,5 +1,7 @@
 """装备管理：头盔/护甲/背包 - 装备/卸下/升级/售卖"""
 from db.connection import _conn
+# 图鉴解锁：直接 import db.codex（禁经 db.database，否则 database re-export equipment 形成循环导入）
+from db.codex import unlock_codex_entry
 
 
 def get_equipment(pid: int) -> dict:
@@ -124,10 +126,13 @@ def add_equipment(pid: int, item_id: str, slot: str, level: int = 1, effects: li
                 "INSERT INTO equipment(player_id, slot, item_id, name, defense, capacity, level, is_equipped, effects) VALUES(?,?,?,?,?,?,?,0,?)",
                 (pid, slot, item_id, info["name"], defense, info.get("capacity", 0), level, effects_str),
             )
-            return c.execute("SELECT last_insert_rowid()").fetchone()[0]
+            equip_id = c.execute("SELECT last_insert_rowid()").fetchone()[0]
         else:
             # 部位为空，直接装备
-            return equip_item(pid, slot, item_id, info["name"], defense, info.get("capacity", 0), level, effects)
+            equip_id = equip_item(pid, slot, item_id, info["name"], defense, info.get("capacity", 0), level, effects)
+    # 图鉴解锁：装备写入数据库后解锁对应条目（事务提交后再写，避免嵌套连接锁冲突）
+    unlock_codex_entry(pid, "equipment", item_id)
+    return equip_id
 
 
 def get_equipment_materials(pid: int, slot: str, name: str, level: int, exclude_id: int = None) -> list[int]:

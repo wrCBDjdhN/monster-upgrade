@@ -4,7 +4,7 @@
 1. 在地图上随机放置不重叠的房间
 2. 每个房间有一扇门通向野外
 3. 房间内生成资源点和怪物刷新点
-4. 野外生成怪物、金币和可破坏环境物
+4. 野外生成怪物和可破坏环境物
 
 返回数据结构：
 - rooms: 房间列表
@@ -13,7 +13,6 @@
 - evac_points: 撤离点
 - spawn_points: 房间内怪物刷新点
 - wild_spawns: 野外怪物刷新点
-- wild_coins: 野外金币位置
 - chest_positions: 宝箱位置
 - harvestables: 野外可破坏环境物
 """
@@ -63,7 +62,7 @@ def generate_map(seed: int, num_rooms: int = 6, theme: str = "forest") -> dict:
     """
     地图设计：
     - 房间散布在地图上，每个房间有一扇门通向野外
-    - 野外是房间之间的空地，会刷新金币和怪物
+    - 野外是房间之间的空地，会刷新怪物
     - theme: 主题（forest=幽暗森林 / desert=沙漠荒地），决定怪物/资源池与 BOSS 建筑样式
 
     返回:
@@ -73,7 +72,6 @@ def generate_map(seed: int, num_rooms: int = 6, theme: str = "forest") -> dict:
       evac_points: list[(x,y)]            撤离点
       spawn_points: list[(x,y,type)]      房间内怪物刷新点
       wild_spawns: list[(x,y,type)]       野外怪物刷新点
-      wild_coins:  list[(x,y)]            野外金币位置
       map_size:    (w, h)
       theme:       str                   当前主题
       boss_spawn:  (x,y)|None            BOSS 建筑内部生成点（每局 1 个）
@@ -447,14 +445,6 @@ def generate_map(seed: int, num_rooms: int = 6, theme: str = "forest") -> dict:
         else:
             wild_spawns.append((wx, wy, mtype))
 
-    # ── 野外金币（地图上随机分布）──
-    wild_coins = []
-    for _ in range(15):
-        wx = rng.randint(TILE_SIZE * 3, MAP_WIDTH - TILE_SIZE * 3)
-        wy = rng.randint(TILE_SIZE * 3, MAP_HEIGHT - TILE_SIZE * 3)
-        if _wild_free(wx, wy):
-            wild_coins.append((wx, wy))
-
     # ── 宝箱位置（每个房间1个，但跳过出生房间0，避免宝箱压在玩家出生点上）──
     # 同时确保宝箱不与撤离点重合（保持至少 150 像素距离）
     chest_positions = []
@@ -518,7 +508,6 @@ def generate_map(seed: int, num_rooms: int = 6, theme: str = "forest") -> dict:
         "evac_points": evac_points,
         "spawn_points": spawn_points,
         "wild_spawns": wild_spawns,
-        "wild_coins": wild_coins,
         "map_size": (MAP_WIDTH, MAP_HEIGHT),
         "chest_positions": chest_positions,
         "harvestables": harvestables,
