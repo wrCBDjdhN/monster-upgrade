@@ -101,12 +101,11 @@ class LobbyTutorial:
     def _draw_tutorial(self, cx: int):
         """绘制联机教程页面（状态经 self.lv 访问）"""
         lv = self.lv
-        # 半透明遮罩
-        overlay = arcade.ShapeElementList()
-        overlay.append(arcade.create_rect_filled(
+        # 半透明遮罩（arcade 3.x 已移除顶层 ShapeElementList/create_rect_filled，
+        # 改用即时模式 draw_rect_filled，与 views/tutorial.py 遮罩写法一致）
+        arcade.draw_rect_filled(
             arcade.XYWH(cx, WINDOW_HEIGHT // 2, WINDOW_WIDTH, WINDOW_HEIGHT),
-            (0, 0, 0, 180)))
-        overlay.draw()
+            (0, 0, 0, 180))
         # 教程面板背景
         panel_rect = arcade.XYWH(cx, WINDOW_HEIGHT // 2, 700, 500)
         arcade.draw_rect_filled(panel_rect, (30, 40, 60))

@@ -110,7 +110,6 @@ class LobbyView(arcade.View):
         self._client_theme = "forest"  # 客户端加入房间时的地图主题（用于战备检查）
         # 联机教程状态
         self.tutorial = LobbyTutorial(self)  # 教程辅助对象（页面构建 + 覆盖层绘制委托）
-        self._tutorial_shown = False  # 本次会话是否已显示教程
         self._tutorial_page = 0  # 教程当前页码（0-based）
         self._tutorial_pages = self._build_tutorial_pages()  # 教程页面内容
         self._tutorial_next_rect = arcade.XYWH(WINDOW_WIDTH // 2 + 100, 80, 160, 40)
@@ -121,10 +120,12 @@ class LobbyView(arcade.View):
         self._tutorial_close_hover = False
         # 从市场/仓库/锻造等房间内页面返回时：自动复用 GameState 中的联机连接（房间保持）
         self._restore_net_connection()
-        # 首次进入：显示教程
-        if not self._tutorial_shown and not self._restore_net_connection():
+        # 联机教程：仅第一次进入时显示（DB 持久化标记 lobby_tutorial_done，
+        # 看完点「我知道了」才标记——中途强退/未看完不标记，下次进入仍会弹；
+        # 已看完 → 直接进菜单）
+        from db.settings import is_lobby_tutorial_done
+        if not is_lobby_tutorial_done() and not self._restore_net_connection():
             self.mode = "tutorial"
-            self._tutorial_shown = True
 
     def _restore_net_connection(self) -> bool:
         """复用 GameState 中已建立的联机连接进入对应等待模式。
@@ -965,6 +966,8 @@ class LobbyView(arcade.View):
 
     def on_mouse_press(self, x, y, button, modifiers):
         sound_manager.play_ui()
+        # 屏幕中心 x（join 房间列表按钮定位用，与 on_draw 保持一致）
+        cx = WINDOW_WIDTH // 2
         # 教程模式：处理教程按钮点击
         if self.mode == "tutorial":
             total = len(self._tutorial_pages)
@@ -974,8 +977,10 @@ class LobbyView(arcade.View):
             # 上一页
             elif self._tutorial_page > 0 and self._tutorial_prev_rect.point_in_rect((x, y)):
                 self._tutorial_page -= 1
-            # 关闭教程
+            # 关闭教程（看完 → 标记完成，仅第一次弹出，中途退出不标记）
             elif self._tutorial_close_rect.point_in_rect((x, y)):
+                from db.settings import mark_lobby_tutorial_done
+                mark_lobby_tutorial_done()
                 self.mode = "menu"
             return
         # 返回按钮（除 join 的输入框点击外，各模式共用；host_wait 返回=关闭房间，客户端能看到"房主已关闭房间"）

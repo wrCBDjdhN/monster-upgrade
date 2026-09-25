@@ -107,3 +107,17 @@ def is_tutorial_done() -> bool:
 def mark_tutorial_done() -> None:
     """标记新手教程已完成（永久关闭教程）"""
     set_setting("tutorial_done", "1")
+
+
+# ── 联机大厅教程标记 ──
+# 首次点击「局域网联机」进入大厅时显示联机教程；看完点「我知道了」才标记
+# lobby_tutorial_done，之后不再出现。中途退出（未看完）不标记，下次进入重新弹出。
+
+def is_lobby_tutorial_done() -> bool:
+    """联机大厅教程是否已看完（settings 表 lobby_tutorial_done=1）"""
+    return get_setting("lobby_tutorial_done") == "1"
+
+
+def mark_lobby_tutorial_done() -> None:
+    """标记联机大厅教程已看完（永久关闭）"""
+    set_setting("lobby_tutorial_done", "1")

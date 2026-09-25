@@ -236,6 +236,7 @@ from db.settings import (  # noqa: F401, E402
     get_setting, set_setting,
     get_key_bindings, set_key_bindings, reset_key_bindings,
     get_volume, set_volume, get_sound_enabled, set_sound_enabled,
+    is_lobby_tutorial_done, mark_lobby_tutorial_done,
 )
 
 # 图鉴解锁管理（怪物/武器/装备/药水条目解锁记录，codex_view 读取）
