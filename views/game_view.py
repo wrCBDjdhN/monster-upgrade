@@ -9,7 +9,9 @@ import arcade
 from config import (
     WINDOW_WIDTH, WINDOW_HEIGHT, PLAYER_HP,
     PLAYER_SIZE, PLAYER_COLOR, TILE_SIZE, PLAYER_SPEED,
-    EVAC_COLOR, EVAC_RADIUS,
+    EVAC_RADIUS,
+    evac_activate_cost, EVAC_INTERACT_RANGE,  # 阶段2 防守撤离：按主题的激活/修复消耗 helper 与交互距离
+    EVAC_WAVE_SIZE, EVAC_WAVE_GROWTH, EVAC_STATE_BCAST_SEC,  # 阶段2 防守撤离：波次规模与状态广播周期
     WELL_HEAL, WELL_SPEED_MULT, WELL_SPEED_DURATION,
     CACTUS_THORN_DAMAGE,  # 仙人掌反伤：客户端近战攻击环境物命中时作用于攻击者（幽灵）
     MONSTER_WEAPON_LEVEL_RANGE, MONSTER_GEAR_LEVEL_RANGE,
@@ -25,6 +27,8 @@ from config import (
     EXP_KILL_BASE, EXP_BOSS_MULT, EXP_EVAC,
     # 倒地/救援系统
     DOWNED_TIMEOUT, RESCUE_DISTANCE, RESCUE_DURATION, REVIVE_HP,
+    # 阶段8 难度星级：评星条件表 + 单图星上限（数值口径唯一来源）
+    MAP_STAR_CRITERIA, MAP_MAX_STARS,
 )
 from net.protocol import MsgType  # 联机消息类型枚举（MONSTER_SNAPSHOT 等）
 from game.map_gen import generate_map
@@ -33,26 +37,34 @@ from game.monsters import Zombie, MummyMelee  # 刷怪映射兜底（未知类�
 from game.combat import CombatSystem
 from game.batch_shapes import ShapeBatch
 from game.loot import DropItem, roll_loot, try_pickup
+from game.blessings import BlessingState  # 阶段5 祝福状态机（ids 复用 GameState.blessings）
 from views.game.network_sync import NetworkSyncManager
 from views.game.spectate_system import SpectateManager
 from views.game.pickup_loot import PickupLootManager
 from views.game.evac_manager import EvacManager
-from game.evac import EvacState, commit_run_to_warehouse, clear_run
+from game.evac import EvacPoint, EvacState, commit_run_to_warehouse, clear_run
+from game.respawn import spawn_wave  # 阶段2 防守撤离：进攻波次生成
+from entities.resource_defs import RESOURCES  # 激活/修复消耗提示的资源中文名
+from game.build_system import BuildSystem  # 局内建造系统（阶段1）
+from game.monster_base import _get_wall_grid  # 怪物碰撞网格索引（建筑注册用）
 from game.harvestable import HarvestableEntity, spawn_harvestables
 from game.chest import Chest, spawn_chests
 from db.database import get_weapons, get_gold, get_equipment
+from db.database import get_stars, record_stars  # 阶段8 星级：评星结果落库（只升不降）
+from game.level_progress import evaluate_stars  # 阶段8 星级：单局统计 → 0~3 星（纯函数）
 from game.sound_manager import sound_manager
 from game.effects import particle_system, floating_texts
 
 # 新模块导入
 from game.monster_utils import lookup_weapon_range, assign_monster_armor, assign_monster_helmet, assign_monster_weapon
 from game.entity_callbacks import (
-    on_monster_death, handle_harvestable_combat, on_harvestable_destroyed,
+    on_monster_death, handle_harvestable_combat,
     handle_chest_interaction, handle_well_interaction, spawn_chest_loot,
     get_drop_display_name, scatter_drops, sync_obstacles,
     _award_exp,  # 等级经验发放（客户端击杀/撤离经验共用，各端本地结算）
 )
-from game.respawn import respawn_harvestables, respawn_monsters
+from game.respawn import respawn_harvestables, respawn_monsters, update_elite_spawner  # 阶段3：update_elite_spawner 精英定时刷新
+from game.monster_affixes import update_fire_zones  # 阶段3：火墙词缀燃烧区结算
 from game.rendering import render_game
 from game.input_handler import (
     handle_key_press, handle_key_release, handle_mouse_motion,
@@ -186,6 +198,23 @@ class GameView(arcade.View):
         # 联机主机：观战模式标志（主机撤离/死亡后房间保留、后台继续模拟，禁操作禁结算）。
         # 客户端各端状态由 _player_status 跟踪，全员结束后广播 ROOM_ENDED(all_finished) 回房等待
         self._spectating = False
+        # 阶段8 星级：本局统计（判定入参口径见 game/level_progress.evaluate_stars）
+        #   kills/elite_kills/boss_kills —— 击杀计数，唯一计数端=主机（solo 即本地），
+        #     累加点 = game/entity_callbacks.record_run_stat（与任务事件同点）；
+        #   carried_gold —— 撤离结算处由 _settle_run_stars 定格（clear_run 之前读）；
+        #   evac —— 撤离成功处置 True（_fail_run 路径不评星，保持 False）。
+        # setup() 每次开新一局复位，避免上一局数据串到下一局。
+        self.run_stats: dict = {
+            "kills": 0, "elite_kills": 0, "boss_kills": 0,
+            "carried_gold": 0, "evac": False,
+        }
+        # 阶段5 祝福：状态机在 setup() 内按本局 GameState.blessings 重建（ids 复用同一 list），
+        # blessing_pending = 待选择的祝福次数（>0 时 on_update 自动打开祝福面板）
+        self.blessing_state: BlessingState | None = None
+        self.blessing_pending = 0
+        # 祝福面板已打开标记：防止面板关闭回 GameView 的那一帧被 on_update 再次弹出
+        # （面板内部逐次消费 blessing_pending，靠 GameView 复位此标记决定是否续弹）
+        self._blessing_panel_open = False
         self._spectate_target_id: int | None = None   # 观战跟随目标玩家 id（None=跟随自己玩家）
         # 退出观战按钮（观战模式下屏幕右下角显示，点击返回大厅等待下一局）
         self._exit_spectate_rect = arcade.XYWH(WINDOW_WIDTH - 120, 80, 180, 40)
@@ -208,6 +237,11 @@ class GameView(arcade.View):
         self._broadcasted_env: set = set()         # 已广播「已摧毁」的环境物序号
         self._well_broadcasted = False             # 水井首次开启是否已广播
         self._broadcasted_pads: dict = {}          # 火箭台序号 -> 上次广播的状态键（state 或 (state,countdown)）
+        # 11.1 接线核查：阶段1 局内建筑（按建筑 bid 广播 build_place/build_destroy）
+        # + 阶段3 火墙词缀燃烧区（按区域 zid 广播 fire_zone 建/删）的已广播跟踪
+        self._broadcasted_buildings: set = set()   # 已广播落成的建筑 bid 集合
+        self._next_fire_zone_zid: int = 1          # 火墙区域 zid 自增序号（主机分配，两端同口径）
+        self._fire_zone_broadcasted: set = set()   # 已广播的火墙区域 zid 集合
         self.drops: list[DropItem] = []
         # 新手教程：游戏内引导横幅文字缓存（TextCache，避免每帧重建纹理）
         from views.text_cache import TextCache
@@ -225,6 +259,26 @@ class GameView(arcade.View):
         self._monster_respawn_interval = 10.0  # 每 10 秒尝试补刷一次
         self._monster_respawn_batch = 2        # 每次最多补刷数量
         self._monster_cap = 20                 # 野外怪物上限（含初始）
+        # 阶段4 随机地图事件：未加倍率的上限基线（apply_event 按事件倍率反算 _monster_cap）
+        self._monster_cap_base = 20
+        # ── 阶段4 随机事件（核心逻辑在 game/map_events.py，此处仅存状态与薄调用）──
+        # 本局事件 id（"" = 无事件，教程局恒为 ""）
+        self.event_id = ""
+        # 事件参数命名空间：monster_cap_mult / reward_mult / artifact_bonus
+        self.event_flags: dict = {"monster_cap_mult": 1.0, "reward_mult": 1.0, "artifact_bonus": 0.0}
+        self._event_banner_timer = 0.0        # 开局横幅剩余显示时长（秒）
+        self._event_airdrop_timer = 0.0       # 空投落地计时（秒）
+        self._event_airdrop_done = False       # 空投是否已落地（落地后不再重复刷箱）
+        self._event_spawned: set = set()       # 已广播的事件实体序号（防重复广播）
+        self._event_scaled_drops: dict = {}    # id(掉落) → 掉落对象（尸潮倍率去重，持引用防 id 复用）
+        self.caravan_point = None              # 商队交互点（map_events.CaravanPoint 或 None）
+        self._caravan_panel_open = False       # 商队换购弹层是否打开
+        self._caravan_index = 0                # 弹层高亮行
+        self._caravan_hint_cd = 0.0            # 商队提示节流（秒）
+        # 阶段3 精英词缀怪：刷新计时器（开局 ELITE_SPAWN_INTERVAL 秒后首刷，之后同周期）
+        self._elite_spawn_timer = 0.0
+        # 火墙词缀死亡后留下的燃烧地面区域 [{x, y, r, life, dps, burn_duration, tick}]
+        self.fire_zones: list = []
         # 宝箱
         self.chests: list = []
         # 火箭发射台（仅 space 主题有内容，防御性初始化为空列表）
@@ -233,7 +287,6 @@ class GameView(arcade.View):
         self._rocket_pad_menu = None
         # 精灵列表（wall_list/obstacle_list 启用空间哈希，碰撞检测从 O(P×W) 降至哈希查找）
         self.wall_list = arcade.SpriteList(use_spatial_hash=True)
-        self.evac_sprites = arcade.SpriteList()
         # 死亡/撤离消息
         self._message = ""
         self._message_timer = 0.0
@@ -252,8 +305,19 @@ class GameView(arcade.View):
         # HUD 文本对象缓存：用持久 arcade.Text，仅在字符串变化时重绘纹理，
         # 避免每帧 draw_text 重建纹理导致的卡顿
         self._hud_texts: dict = {}
-        # 撤离圈单位圆环多边形缓存（形状固定，仅平移）
-        self._evac_unit_ring = None
+        # ── 阶段2 防守式撤离（三图统一）──
+        # 主撤离点：setup 时按地图撤离点坐标建立（防守聚焦单点，避免双线分兵）
+        self.evac_point: EvacPoint | None = None
+        # 波次序号（单调递增，随地图重开重置；强度加成的依据）
+        self.evac_wave_index = 0
+        # 撤离点提示节流（E 键资源不足/状态提示防刷屏）
+        self._evac_prompt_cd = 0.0
+        # 撤离点状态变化检测（用于联机广播与提示，仅主机裁决）
+        self._evac_last_state = None
+        self._evac_last_hp = None
+        # 联机主机：撤离点状态广播（EVAC_STATE_BCAST_SEC 周期 + 状态变化立即广播）
+        self._evac_bcast_timer = 0.0
+        self._evac_last_bcast = None
         # 宝箱按键状态
         self._chest_key_pressed = False
         # 键位绑定：{动作名: [arcade.key 属性名, ...]}，从 db settings 加载（默认 config.KEY_BINDINGS）。
@@ -332,6 +396,12 @@ class GameView(arcade.View):
         # 清空上一局残留的漂浮文字（撤离成功提示等）
         from game.effects import floating_texts
         floating_texts.texts.clear()
+
+        # 阶段8 星级：开新一局复位本局统计（kills/elite_kills/boss_kills/carried_gold/evac）
+        self.run_stats = {
+            "kills": 0, "elite_kills": 0, "boss_kills": 0,
+            "carried_gold": 0, "evac": False,
+        }
 
         seed = gs.current_map_seed
         # 按所选地图主题生成（forest 森林 / desert 沙漠荒地）
@@ -510,6 +580,7 @@ class GameView(arcade.View):
                     for sm in summoned_list:
                         sm.set_on_death(_view._on_monster_death)
                         sm._walls = _view.map_data.get("walls", [])
+                        _view.build_system.attach_monster(sm)
                         _view.monsters.append(sm)
                 boss._summon_callback = _on_boss_summon
                 # BOSS 穿戴护甲、头盔和武器（BOSS 装备等级 Lv20-30，按主题分策略）
@@ -645,6 +716,16 @@ class GameView(arcade.View):
             gs.weapon_damage += ld["bonus_damage"]
             gs.weapon_speed += ld["bonus_atk_speed"]
 
+        # ── 阶段5 祝福初始化 ──────────────────────────────────────
+        # 装备/等级属性全部结算完毕后，固定「无祝福基准」：玩家属性快照 + 武器数值基准。
+        # 之后祝福只按这份基准做绝对重算（换装/升级时调 refresh_blessing_stats() 重新定基准），
+        # 避免在已加成值上叠加导致属性越叠越高。
+        self.blessing_state = BlessingState(gs.blessings)
+        self.blessing_pending = 0
+        gs.weapon_damage_base = gs.weapon_damage
+        gs.weapon_speed_base = gs.weapon_speed
+        self.refresh_blessing_stats()
+
         # 战斗系统 - CombatSystem 只需要 wall_list 用于弹丸碰撞检测
         self.combat = CombatSystem(self.wall_list)
         # 攻速光环结算计时器（冰霜领域神器：每 AURA_SLOW_TICK 秒对周围怪物施加减速）
@@ -652,6 +733,13 @@ class GameView(arcade.View):
 
         # 撤离状态
         self.evac = EvacState()
+        # 局内建造系统（阶段1）：BuildSystem 持有建筑列表与放置/伤害逻辑；
+        # monster_grid 基于同一 walls 列表构建的怪物碰撞网格索引（建筑 add_rect/remove_rect 注册用）
+        self.build_system = BuildSystem(self)
+        self.monster_grid = _get_wall_grid(self.map_data["walls"])
+        # 初始怪物注入建筑查询/伤害回调；怪物只持有回调，不持有 GameView
+        for monster in self.monsters:
+            self.build_system.attach_monster(monster)
         # 联机客户端：撤离请求闸门重置（进入新一局后可再次请求撤离，B12）
         self._evac_request_sent = False
         # 联机主机：运行期地图改动已广播跟踪重置（新一局地图对象全新，旧广播记录作废，Todo 20）
@@ -659,20 +747,38 @@ class GameView(arcade.View):
         self._broadcasted_env = set()
         self._well_broadcasted = False
         self._broadcasted_pads = {}
+        # 11.1 接线核查：建筑/火墙区域广播跟踪跨局重置（同实例复用不残留旧 bid/zid）
+        self._broadcasted_buildings = set()
+        self._next_fire_zone_zid = 1
+        self._fire_zone_broadcasted = set()
         # 水井首次开启状态重置（与 _well_broadcasted 对称；同实例跨局复用不残留）
         self._well_opened = False
 
-        # 撤离圈精灵
-        self.evac_sprites.clear()
-        self.evac_sprites = arcade.SpriteList()
-        for s in self.map_data["evac_points"]:
-            sprite = arcade.SpriteSolidColor(20, 20, color=EVAC_COLOR)
-            sprite.center_x = s[0]
-            sprite.center_y = s[1]
-            self.evac_sprites.append(sprite)
+        # ── 阶段2 防守撤离：主撤离点接线 ──
+        # 三图统一为「单点防守」：仅取第一个撤离点坐标建 EvacPoint，其余坐标不启用
+        # （防守聚焦单点，避免玩家分兵两处、也避免两套倒计时并行难以收口）。
+        # 航天图不在此处建立：火箭台在击败 BOSS 后才建点（见 _sync_evac_point_from_rocket_pad）。
+        self.evac_point = None
+        self.evac_wave_index = 0
+        self._evac_prompt_cd = 0.0
+        self._evac_last_state = None
+        self._evac_last_hp = None
+        self._evac_bcast_timer = 0.0
+        self._evac_last_bcast = None
+        if self.map_data.get("theme", "forest") != "space":
+            pts = self.map_data.get("evac_points") or []
+            if pts:
+                self.evac_point = EvacPoint(pts[0][0], pts[0][1], self.map_data["theme"])
+
+        # ── 阶段3 精英词缀怪：新一局重置刷新计时器与燃烧区残留 ──
+        self._elite_spawn_timer = 0.0
+        self.fire_zones = []
 
         # 重置携带物
         gs.run_carried = {}
+        # 新一局默认退出建造模式并恢复默认建筑，避免上一局状态串入
+        gs.build_mode = False
+        gs.build_kind = "barricade"
         # 重置本局药水槽（run_potions：不占容量、上限 RUN_POTION_SLOTS）
         gs.run_potions = {}
         # 重置局内免费拾取记录：free_equipped_item_ids 是会话级集合，若不随新一局清空，
@@ -735,6 +841,70 @@ class GameView(arcade.View):
 
         # 重置携带物
         gs.run_carried = {}
+
+        # ── 阶段4 随机地图事件：抽选并生效（仅 host/solo；教程局与客户端不抽选）──
+        # 核心逻辑在 game/map_events.py；此处只做重置 + 抽选调用 + 主机广播
+        from game.map_events import setup_event
+        event_id = setup_event(self)
+        if event_id:
+            # 主机：开局立即广播 EVENT_START，客户端据此镜像 event_id/参数并显示横幅
+            self.net_sync._broadcast_event_start()
+
+    # ── 阶段5 祝福：薄编排（纯计算在 game/blessings.py，本处只做状态接线）──────────
+    def refresh_blessing_stats(self, rebase_weapon: bool = False) -> None:
+        """重新固定「无祝福基准」并按当前持有的祝福绝对重算属性
+
+        调用时机：装备/等级属性发生变化后（开局 setup、局内换装/拾取装备）。
+        基准重定后立即重算，保证已有祝福既不丢失也不被重复叠加。
+        rebase_weapon=True 用于换武器：gs.weapon_damage/speed 已被重置为新武器数值，
+        必须覆盖旧武器基准，否则祝福倍率会乘在上一把武器的数值上。
+        """
+        if self.blessing_state is None or self.player is None:
+            return
+        gs = self.window.game_state
+        # 反推真实基准：减去「上次已应用」的祝福加成（平铺减法、比率除法），
+        # 这样局内换装的 += 叠加即使写在含祝福的当前值上也能精确还原，不会越叠越高
+        self.player.snapshot_base_stats(self.blessing_state.applied_bonus())
+        # 武器数值基准同步刷新（换武器时强制覆盖；其余情况未初始化则兜底取当前值）
+        if rebase_weapon or getattr(gs, "weapon_damage_base", None) is None:
+            gs.weapon_damage_base = gs.weapon_damage
+        if rebase_weapon or getattr(gs, "weapon_speed_base", None) is None:
+            gs.weapon_speed_base = gs.weapon_speed
+        self.blessing_state.recompute(self.player, gs)
+
+    def clear_blessings(self) -> None:
+        """本局结束（撤离成功/失败）清空祝福并把属性还原到无祝福基准"""
+        if self.blessing_state is None:
+            return
+        gs = self.window.game_state
+        self.blessing_state.clear()
+        self.blessing_pending = 0
+        gs.blessing_pending = 0
+        # clear() 只清持有列表，必须紧接一次重算才能把已生效的属性加还回去
+        self.blessing_state.recompute(self.player, gs)
+
+    def grant_blessing_choice(self, source: str = "") -> bool:
+        """登记一次「待选祝福」（由宝箱/精英/撤离点触发点调用），返回是否登记成功
+
+        只累加待选次数，不直接开面板——面板由 on_update 在下一帧统一打开，
+        避免在战斗/宝箱回调中途切视图导致的状态撕裂。
+        """
+        gs = self.window.game_state
+        if self.blessing_state is None:
+            return False
+        # 已达持有上限时不再登记（否则玩家只能反复看到选不上的面板）
+        from config import BLESSING_MAX
+        if len(gs.blessings) >= BLESSING_MAX:
+            return False
+        self.blessing_pending += 1
+        gs.blessing_pending = self.blessing_pending
+        # 新增待选时必须重新武装自动弹出：玩家在面板里选「稍后再选」会把
+        # _blessing_panel_open 置 True（面板已开、内容待消费），若不清回 False，
+        # 之后每次新触发都会被 on_update 的守卫挡掉，祝福再也弹不出来。
+        self._blessing_panel_open = False
+        if source:
+            print(f"[Blessing] 触发待选：来源={source}，累计 {self.blessing_pending} 次")
+        return True
 
     def _current_weapon_name(self) -> str:
         """当前武器中文名（联机 ATTACK_EVENT 载荷 weapon 字段用）
@@ -901,6 +1071,10 @@ class GameView(arcade.View):
         """委托 → net_sync._apply_map_change"""
         return self.net_sync._apply_map_change(payload)
 
+    def _apply_event_start(self, payload: dict) -> None:
+        """委托 → net_sync._apply_event_start（阶段4 客户端镜像本局事件）"""
+        return self.net_sync._apply_event_start(payload)
+
     def _broadcast_map_changes(self) -> None:
         """委托 → net_sync._broadcast_map_changes"""
         return self.net_sync._broadcast_map_changes()
@@ -1056,8 +1230,13 @@ class GameView(arcade.View):
         return self.spectate._update_rescue(dt)
 
     def _on_monster_death(self, monster):
-        """怪物死亡回调 - 委托给 entity_callbacks"""
+        """怪物死亡回调 - 委托给 entity_callbacks + 阶段4 尸潮经验倍率补发"""
         on_monster_death(self, monster)
+        # 阶段4 尸潮事件：按 reward_mult 补发本端击杀经验（归属口径与
+        # entity_callbacks._award_kill_exp 一致；客户端在 _apply_damage_result
+        # 自行补发，此处返回 0，不会重复结算）。entity_callbacks 本阶段只读。
+        from game.map_events import award_event_kill_exp
+        award_event_kill_exp(self, monster)
 
     def _handle_harvestable_combat(self, dt):
         """委托 → pickup_loot._handle_harvestable_combat"""
@@ -1106,10 +1285,6 @@ class GameView(arcade.View):
                         # 本地 proj.damage 可能为升级武器实际值（72），与主机裁决值叠加会造成假伤害数字
                     break
 
-    def _on_harvestable_destroyed(self, harvestable):
-        """环境物被摧毁 - 委托给 entity_callbacks"""
-        on_harvestable_destroyed(self, harvestable)
-
     def _handle_chest_interaction(self):
         """委托 → pickup_loot._handle_chest_interaction"""
         return self.pickup_loot._handle_chest_interaction()
@@ -1121,6 +1296,335 @@ class GameView(arcade.View):
     def _handle_rocket_pad_interaction(self):
         """委托 → pickup_loot._handle_rocket_pad_interaction"""
         return self.pickup_loot._handle_rocket_pad_interaction()
+
+    # ── 阶段2 防守式撤离：访问器 / 状态机驱动 / E 键交互 / 结算清理 ──
+
+    def get_evac_point(self):
+        """返回当前主撤离点
+
+        怪物侧只注入本方法作为 provider，不持有 GameView/EvacPoint 引用，
+        以便撤离点重建（航天图击败 BOSS 后建点）后仍能取到"当前"撤离点。
+        """
+        return self.evac_point
+
+    def _sync_evac_point_from_rocket_pad(self, pad) -> None:
+        """航天图：火箭台击败 BOSS 后在台心建主撤离点并免费进入防守
+
+        阶段2 统一口径——航天图不再走"火箭台自带撤离倒计时"，改为与其余两图一致的
+        防守式撤离点：BOSS_DEFEATED 触发建点 → activate(free=True) 直接进入 defending
+        （激活成本已由"击败 BOSS"支付，不扣资源）→ 波次由 _update_evac_point 统一驱动。
+        幂等：仅当发射台确为 BOSS_DEFEATED 且 evac_point 仍为 None 时建点
+        （调用方也有同样守卫，这里再兜一层，保证"BOSS 未死不出现撤离点"）。
+        """
+        if self.evac_point is not None or pad.state != "boss_defeated":
+            return
+        self.evac_point = EvacPoint(pad.center_x, pad.center_y, "space")
+        self.evac_point.activate(free=True)
+        self._evac_last_state = None
+        self._evac_last_hp = None
+        self._evac_prompt_cd = 0.0
+        self._message = "BOSS 已击败！台心出现撤离点，守住即可撤离"
+        self._message_timer = 3.0
+        particle_system.emit(pad.center_x, pad.center_y, 20, (255, 215, 0),
+                            speed=90, life=0.8, size=4)
+
+    def _update_evac_point(self, dt: float) -> None:
+        """推进主撤离点状态机并按波次间隔生成进攻怪（主机/solo 权威）
+
+        - point.update(dt) 递减防守倒计时，归零置 secured 并记录一次待生成波次事件；
+        - consume_wave_event() 读取事件后立即 spawn_wave，事件只消费一次（防同帧重复刷怪）；
+        - 状态迁移与低血量经 _evac_prompt 反馈（带节流，不逐帧刷屏）。
+        """
+        point = self.evac_point
+        if point is None:
+            return
+        if self._evac_prompt_cd > 0:
+            self._evac_prompt_cd = max(0.0, self._evac_prompt_cd - dt)
+        point.update(dt)
+        # 波次事件：读取即清（EvacPoint 保证同一波次只触发一次事件）
+        if point.consume_wave_event():
+            count = EVAC_WAVE_SIZE + EVAC_WAVE_GROWTH * point.wave_no
+            spawned = spawn_wave(
+                self, self.map_data.get("theme", "forest"),
+                (point.x, point.y), count, aggro_xy=(point.x, point.y),
+            )
+            self._evac_prompt(
+                f"第 {point.wave_no} 波来袭：{len(spawned)} 只！", color=arcade.color.RED)
+        # 状态迁移提示
+        if point.state != self._evac_last_state:
+            if point.state == "secured":
+                self._evac_prompt("撤离点已守住！前往读条撤离", color=arcade.color.GREEN)
+            elif point.state == "destroyed":
+                self._evac_prompt("撤离点被摧毁！按 E 消耗资源修复", color=arcade.color.RED)
+            self._evac_last_state = point.state
+        # 低血量告警：仅在跨过 30% 阈值那一刻提示一次
+        ratio = (point.hp / point.max_hp) if point.max_hp else 0.0
+        if point.state == "defending" and ratio <= 0.3 and (self._evac_last_hp or 1.0) > 0.3:
+            self._evac_prompt("撤离点告急！", color=arcade.color.RED)
+        self._evac_last_hp = ratio
+
+    def _handle_evac_point_interaction(self) -> None:
+        """E 键撤离点交互：dormant→激活进入防守 / destroyed→修复 / defending→查进度
+
+        资源校验与扣减放在主机编排层（GameView）：EvacPoint 不直接操作
+        GameState.run_carried（game/evac.py 不依赖 main.GameState）。
+        联机客户端不在此执行，改发 EVAC_POINT_ACTION 由主机裁决（Task 2.5）。
+        """
+        point = self.evac_point
+        if point is None or self._spectating or self.player is None:
+            return
+        if not getattr(self, "_chest_key_pressed", False):
+            return
+        # 交互距离判定
+        if math.hypot(self.player.center_x - point.x,
+                      self.player.center_y - point.y) > EVAC_INTERACT_RANGE:
+            return
+        if point.state == "secured":
+            # 已守住：交给 EvacState 三秒读条，E 键不干预
+            return
+        if point.state == "defending":
+            # 防守中：消费按键避免按住 E 反复判定，并提示剩余时间
+            self._chest_key_pressed = False
+            self._evac_prompt(
+                f"防守中：剩余 {point.defend_left:.0f} 秒（第 {point.wave_no} 波）",
+                color=arcade.color.YELLOW)
+            return
+        # dormant / destroyed 需消耗资源：单次动作，先消费按键再结算
+        self._chest_key_pressed = False
+        # 激活与修复同价（config.evac_activate_cost 按地图主题取值，三图分造价 2026-09-26）
+        cost = evac_activate_cost(self.map_data.get("theme", "forest"))
+        gs = self.window.game_state
+        if not self._pay_resource_cost(gs, cost):
+            self._evac_prompt(f"资源不足，需要 {self._evac_cost_text(cost)}",
+                              color=arcade.color.RED)
+            return
+        if point.state == "dormant":
+            point.activate()
+            self._evac_prompt("撤离点已激活，防守开始！守住倒计时", color=arcade.color.GREEN)
+            # 阶段5 祝福：撤离点激活（进入防守）保底发 1 次待选，奖励玩家推进到关键阶段。
+            # 联机客户端走 _apply_evac_point_state 镜像同一转换（每玩家各自发，不经主机仲裁）。
+            self.grant_blessing_choice("evac_activate")
+        else:
+            point.repair()
+            self._evac_prompt("撤离点已修复，继续防守！", color=arcade.color.GREEN)
+
+    def _client_request_evac_point(self) -> None:
+        """客户端 E 键：向主机请求激活/修复撤离点（本地不裁决，禁本地仲裁）
+
+        客户端只发 EVAC_POINT_ACTION，请求内容 = 当前撤离点状态推导出的动作
+        （dormant→activate / destroyed→repair）；防守中与 secured 不发请求
+        （前者由主机广播倒计时，后者交给 EvacState 读条）。
+        """
+        gs = self.window.game_state
+        point = self.evac_point
+        if point is None or gs.net_client is None:
+            return
+        if point.state == "dormant":
+            action = "activate"
+        elif point.state == "destroyed":
+            action = "repair"
+        else:
+            return  # defending / secured：无需请求
+        if math.hypot(self.player.center_x - point.x,
+                      self.player.center_y - point.y) > EVAC_INTERACT_RANGE:
+            return
+        # 消费按键：单次动作，避免按住 E 每帧重复上报
+        self._chest_key_pressed = False
+        gs.net_client.send((MsgType.EVAC_POINT_ACTION, {
+            "player_id": getattr(gs, "net_player_id", 0),
+            "action": action,
+            "x": self.player.center_x,
+            "y": self.player.center_y,
+        }))
+        print(f"[Client] 请求撤离点 {action}")
+
+    def _clear_evac_defense(self) -> None:
+        """本局失败/结束清理：撤离点失活 + 所有怪物解除对撤离点的锁定
+
+        provider 语义会在下帧自动清空 aggro_point（撤离点不再是 defending），
+        这里再显式清一遍，防止本局残留怪物继续锁定已失效的撤离点。
+        """
+        for monster in self.monsters:
+            if getattr(monster, "aggro_point", None) is not None:
+                monster.aggro_point = None
+        # 撤离点失活：本局结束后不再推进/渲染
+        self.evac_point = None
+        self._evac_last_state = None
+        self._evac_last_hp = None
+
+    def _pay_resource_cost(self, gs, cost: dict) -> bool:
+        """按 {item_id: qty} 校验并扣减本局携带资源（口径对齐 game/build_system.py 的 place）
+
+        返回 True 表示扣减成功；任一资源不足则整体失败且不做任何修改（禁止先扣后退）。
+        """
+        carried = getattr(gs, "run_carried", None)
+        if not isinstance(carried, dict):
+            return False
+        resource = carried.get("resource")
+        if not isinstance(resource, dict):
+            resource = {}
+        # 先整体校验
+        for item_id, need in cost.items():
+            if int(resource.get(item_id, 0) or 0) < int(need):
+                return False
+        # 校验通过后统一扣减，扣到 0 的键删除
+        for item_id, need in cost.items():
+            left = int(resource.get(item_id, 0) or 0) - int(need)
+            if left > 0:
+                resource[item_id] = left
+            else:
+                resource.pop(item_id, None)
+        carried["resource"] = resource
+        return True
+
+    def _evac_prompt(self, text: str, color=arcade.color.WHITE) -> None:
+        """撤离点提示：HUD 消息 + 撤离点上方漂浮文字（带节流防刷屏）"""
+        if self._evac_prompt_cd > 0:
+            return
+        self._message = text
+        self._message_timer = 2.0
+        self._evac_prompt_cd = 1.5
+        if self.evac_point is not None:
+            floating_texts.add(self.evac_point.x, self.evac_point.y + 40, text, color)
+
+    @staticmethod
+    def _evac_cost_text(cost: dict) -> str:
+        """把 {item_id: qty} 消耗表转中文提示（如「木材x8 石材x8 矿石x4」）"""
+        parts = []
+        for item_id, need in cost.items():
+            name = RESOURCES.get(item_id, {}).get("name", item_id)
+            parts.append(f"{name}x{need}")
+        return " ".join(parts)
+
+    # ── 阶段2 联机：撤离点状态同步（EVAC_POINT_STATE / EVAC_POINT_ACTION）──
+
+    def _serialize_evac_point(self) -> dict | None:
+        """序列化主撤离点状态（EVAC_POINT_STATE 载荷 / FULL_STATE 内嵌）
+
+        返回 None 表示尚未建立撤离点（森林/沙漠未建点前、航天图 BOSS 未死）。
+        """
+        point = self.evac_point
+        if point is None:
+            return None
+        return {
+            "x": point.x, "y": point.y,
+            "state": point.state,
+            "hp": point.hp, "max_hp": point.max_hp,
+            "defend_left": point.defend_left,
+            "wave_no": point.wave_no,
+        }
+
+    def _apply_evac_point_state(self, payload: dict) -> None:
+        """客户端按主机权威状态镜像主撤离点（不本地跑 update 与波次）
+
+        客户端只还原字段供渲染与倒计时显示；撤离点尚不存在时按坐标补建一个
+        镜像实例（主机已建点但本端 setup 时未建立的情形，如航天图 BOSS 死后加入）。
+        """
+        if not isinstance(payload, dict):
+            return
+        state = payload.get("state")
+        if state not in ("dormant", "defending", "secured", "destroyed"):
+            # 状态非法：显式记录而非静默忽略（net 层铁律）
+            print(f"[Client] EVAC_POINT_STATE 非法 state={state!r}，忽略")
+            return
+        point = self.evac_point
+        if point is None:
+            theme = self.map_data.get("theme", "forest")
+            point = EvacPoint(float(payload.get("x", 0.0)), float(payload.get("y", 0.0)), theme)
+            self.evac_point = point
+        # 阶段5 祝福：客户端在镜像 dormant→defending 转换时本地发 1 次待选（保底）。
+        # 判定用「镜像前的旧状态」，只认一次转换；周期广播重复同一状态不会重复发。
+        # 属每玩家自身的镜像表现，不涉及主机仲裁，故主机不需为客户端代发。
+        was_dormant = point.state == "dormant"
+        point.x = float(payload.get("x", point.x))
+        point.y = float(payload.get("y", point.y))
+        point.state = state
+        point.hp = float(payload.get("hp", point.hp))
+        point.max_hp = float(payload.get("max_hp", point.max_hp))
+        point.defend_left = float(payload.get("defend_left", point.defend_left))
+        point.wave_no = int(payload.get("wave_no", point.wave_no))
+        # 客户端不产生波次事件：清掉待生成标记，防止任何本地路径误刷怪
+        point._wave_pending = False
+        if was_dormant and state == "defending":
+            self.grant_blessing_choice("evac_activate")
+
+    def _broadcast_evac_point_state(self, *, force: bool = False) -> None:
+        """主机广播主撤离点权威状态：状态/血量变化时立即发，否则按周期发
+
+        客户端不本地推演倒计时与波次，全靠本广播与 EVAC_POINT_STATE 保持一致。
+        """
+        gs = self.window.game_state
+        if gs.net_mode != "host" or gs.net_server is None:
+            return
+        data = self._serialize_evac_point()
+        if data is None:
+            return
+        # 状态或血量变化 → 立即广播；否则仅按周期发（倒计时需要持续刷新）
+        sig = (data["state"], round(data["hp"], 1))
+        if not force and sig == self._evac_last_bcast and self._evac_bcast_timer < EVAC_STATE_BCAST_SEC:
+            return
+        self._evac_bcast_timer = 0.0
+        self._evac_last_bcast = sig
+        gs.net_server.broadcast(MsgType.EVAC_POINT_STATE, data)
+
+    def _handle_evac_point_action(self, sender_id: int, payload: dict) -> None:
+        """主机处理客户端的撤离点激活/修复请求（主机权威仲裁）
+
+        校验链：动作合法 → 撤离点存在且距离 ≤ EVAC_INTERACT_RANGE → 状态匹配 →
+        该玩家携带资源足够 → 扣资源并执行 → 广播 EVAC_POINT_STATE（拒绝时也回广播，
+        客户端据此自然回滚提示）。资源口径 = _players_run_carried[sender_id]
+        （与拾取仲裁同源，主机权威记录）。
+        """
+        action = payload.get("action")
+        if action not in ("activate", "repair"):
+            print(f"[Host] EVAC_POINT_ACTION 非法 action={action!r}（player={sender_id}），忽略")
+            return
+        point = self.evac_point
+        if point is None:
+            print(f"[Host] 撤离点尚未建立，忽略 {action} 请求（player={sender_id}）")
+            return
+        req_x, req_y = payload.get("x"), payload.get("y")
+        if req_x is None or req_y is None:
+            print(f"[Host] EVAC_POINT_ACTION 缺坐标，忽略（player={sender_id}）")
+            return
+        if math.hypot(float(req_x) - point.x, float(req_y) - point.y) > EVAC_INTERACT_RANGE:
+            print(f"[Host] 撤离点超距（>{EVAC_INTERACT_RANGE}px），拒绝 {action}（player={sender_id}）")
+            self._broadcast_evac_point_state(force=True)
+            return
+        expected_state = "dormant" if action == "activate" else "destroyed"
+        if point.state != expected_state:
+            print(f"[Host] 撤离点状态 {point.state} 不匹配 {action}（需 {expected_state}），拒绝"
+                  f"（player={sender_id}）")
+            self._broadcast_evac_point_state(force=True)
+            return
+        # 主机裁决：激活与修复同价（config.evac_activate_cost 按地图主题取值）
+        cost = evac_activate_cost(self.map_data.get("theme", "forest"))
+        carried = self._players_run_carried.get(sender_id) or {}
+        resource = carried.get("resource")
+        if not isinstance(resource, dict):
+            resource = {}
+        for item_id, need in cost.items():
+            if int(resource.get(item_id, 0) or 0) < int(need):
+                print(f"[Host] 玩家 {sender_id} 资源不足（缺 {item_id}x{need}），拒绝 {action}")
+                self._broadcast_evac_point_state(force=True)
+                return
+        for item_id, need in cost.items():
+            left = int(resource.get(item_id, 0) or 0) - int(need)
+            if left > 0:
+                resource[item_id] = left
+            else:
+                resource.pop(item_id, None)
+        carried["resource"] = resource
+        self._players_run_carried[sender_id] = carried
+        if action == "activate":
+            point.activate()
+        else:
+            point.repair()
+        self._evac_prompt_cd = 0.0
+        self._evac_prompt("队友已激活撤离点，防守开始！"
+                          if action == "activate" else "队友已修复撤离点，继续防守！",
+                          color=arcade.color.GREEN)
+        self._broadcast_evac_point_state(force=True)
 
     def _send_client_interaction_request(self, gs) -> None:
         """委托 → pickup_loot._send_client_interaction_request"""
@@ -1344,12 +1848,30 @@ class GameView(arcade.View):
                 elif msg_type == MsgType.MAP_CHANGE:
                     # 主机运行期改动广播：掉落物生成同步（drop_spawn）→ 本地建视觉掉落物
                     self._apply_map_change(payload)
+                elif msg_type == MsgType.EVENT_START:
+                    # 阶段4 主机广播本局随机事件：客户端只镜像 event_id/参数 + 显示横幅，
+                    # 禁本地抽选（主机权威）
+                    self._apply_event_start(payload)
+                elif msg_type == MsgType.EVAC_POINT_STATE:
+                    # 主机广播主撤离点权威状态（阶段2）：客户端只镜像，不本地跑
+                    # EvacPoint.update 与波次（禁本地仲裁），仅用于渲染/显示倒计时
+                    self._apply_evac_point_state(payload)
                 elif msg_type == MsgType.PICKUP_RESULT:
                     # 主机拾取仲裁结果：成功保持乐观状态 / 被拒回滚 run_carried + 移除视觉
                     self._apply_pickup_result(payload)
                 elif msg_type == MsgType.EVAC_RESULT:
                     # 主机撤离结算清单（B12）：本人→按权威清单本地入库+断开+结算页；他人→忽略
                     self._apply_evac_result(payload)
+                elif msg_type == MsgType.MISSION_PROGRESS:
+                    # 阶段6.2 主机裁决的任务/成就进度：归属本人时写本地库
+                    # （防双计铁律：局内事件客户端永不自计，只认这条主机广播）
+                    from game.mission_tracker import apply_remote_progress
+                    apply_remote_progress(
+                        self,
+                        payload.get("player_id"),
+                        str(payload.get("event") or ""),
+                        int(payload.get("amount", 1) or 1),
+                    )
                 elif msg_type == MsgType.HEARTBEAT:
                     # 主机心跳回显：计算 RTT（往返延迟），供联机状态条 E3 显示
                     if self._hb_sent_at > 0:
@@ -1359,12 +1881,43 @@ class GameView(arcade.View):
                     # 房间结束（主机撤离/死亡/超时）：断开连接回大厅展示原因
                     self._apply_room_ended(payload)
                     return
+                else:
+                    # 11.1 接线核查：未知消息必须显式记录（net 层铁律：禁静默忽略）。
+                    # 正常不应走到这里——decode 已拦未知类型名，此处兜底防枚举扩展后漏接线。
+                    print(f"[GameView] 客户端收到未接线消息 {msg_type.name}，已忽略")
             # 客户端本地攻速节流计时器递减（判定已移交主机，不经 combat 冷却）
             self._net_fire_cd = max(0.0, self._net_fire_cd - dt)
             # 远端怪物受击闪白计时衰减（远端怪物不进本地 AI/update，不自行递减）
+            # 插值/冷却用同一份墙钟，避免逐个幽灵各取一次 time.time()
+            _ghost_now = time.time()
             for rm in self.remote_monsters.values():
                 if getattr(rm, "_hit_flash", 0) > 0:
                     rm._hit_flash = max(0.0, rm._hit_flash - dt)
+                # 位置插值推进（阶段B3）：alpha = 本快照到达后已过时间 / 快照间隔
+                # （间隔取 1/NET_SNAPSHOT_HZ，与主机广播同节拍，禁硬编码 0.05）。
+                # 下一帧 MONSTER_SNAPSHOT 到达时由 _apply_monster_snapshot 重置
+                # net_interp_t0/alpha 与两端坐标；rendering.py 据此 lerp 绘制坐标。
+                interp_t0 = getattr(rm, "net_interp_t0", None)
+                if interp_t0 is not None:
+                    alpha = (_ghost_now - interp_t0) / (1.0 / NET_SNAPSHOT_HZ)
+                    rm.net_interp_alpha = max(0.0, min(1.0, alpha))
+                # 攻击冷却条归一化衰减：主机下发剩余比例 net_attack_cd（0~1），
+                # 客户端不跑 AI 只能自己按 dt/attack_delay 线性走完这段冷却，
+                # 与主机 _attack_timer 递减同源，避免用本地默认值反推出的脏进度条。
+                # 旧主机未下发该字段（None）时跳过，退回 net_attack_anim 快照值。
+                cd = getattr(rm, "net_attack_cd", None)
+                if cd is not None and cd > 0.0:
+                    delay = getattr(rm, "net_attack_delay", None) or getattr(rm, "_attack_delay", 1.0)
+                    if delay > 0:
+                        rm.net_attack_cd = max(0.0, cd - dt / delay)
+            # 阶段4 客户端：仅推进事件横幅计时（表现层）。
+            # 空投落地/商队交易一律由主机裁决并广播，update_event 内部已按
+            # net_mode 守卫禁掉客户端本地落地，避免两端各自生成一批空投箱。
+            from game.map_events import update_event
+            update_event(self, dt)
+            # 11.1 接线核查：客户端推进火墙区域的**表现层** life 递减（区域本体由主机
+            # fire_zone 广播建/删）；函数内已按 net_mode 守卫，客户端不结算扣血/灼烧
+            update_fire_zones(self, dt)
             # 客户端 20Hz：上报本人实体快照（位置/朝向/HP），主机据此更新本端幽灵（Todo 23）
             self._client_snap_timer += dt
             if self._client_snap_timer >= 1.0 / NET_SNAPSHOT_HZ:
@@ -1429,6 +1982,9 @@ class GameView(arcade.View):
                 elif inbound.get("msg_type") == MsgType.INTERACTION_REQUEST.name:
                     # 客户端交互请求：主机验证距离 → 执行交互 → 通过 MAP_CHANGE 广播结果
                     self._handle_interaction_request(sender_id, inbound.get("payload") or {})
+                elif inbound.get("msg_type") == MsgType.EVAC_POINT_ACTION.name:
+                    # 阶段2 撤离点激活/修复请求：主机权威校验距离与资源 → 执行 → 广播 STATE
+                    self._handle_evac_point_action(sender_id, inbound.get("payload") or {})
                 elif inbound.get("msg_type") == MsgType.PLAYER_ABANDON.name:
                     # 客户端放弃行动通知：更新 _player_status → 触发全员结束判定
                     self._handle_player_abandon(sender_id, inbound.get("payload") or {})
@@ -1441,9 +1997,19 @@ class GameView(arcade.View):
                 elif inbound.get("msg_type") == MsgType.PLAYER_SNAPSHOT.name:
                     # 客户端 20Hz 上报本人实体：主机据此更新对应幽灵的位置/朝向/存活（Todo 23）
                     self._apply_client_snapshot(sender_id, inbound.get("payload") or {})
+                elif inbound.get("msg_type") == MsgType.MISSION_PROGRESS.name:
+                    # 阶段6.2 防御分支：MISSION_PROGRESS 语义为「主机→客户端」单向单播，
+                    # 客户端上报同名消息一律显式忽略并记日志（禁静默忽略 + 防伪造他人进度）
+                    print(f"[GameView] 忽略客户端 {sender_id} 上报的 MISSION_PROGRESS"
+                          "（该消息仅主机→客户端单向）")
                 elif inbound.get("msg_type") == MsgType.HEARTBEAT.name:
                     # 心跳回显：原样回给该客户端，客户端据此计算 RTT（保活同理）
                     gs.net_server.send_to(sender_id, MsgType.HEARTBEAT, inbound.get("payload") or {})
+                else:
+                    # 11.1 接线核查：未识别的客户端消息显式记录（net 层铁律：禁静默忽略）。
+                    # 仍继续走 _ensure_ghost：无论消息类型，该玩家的幽灵实体都必须建好。
+                    print(f"[GameView] 主机收到未接线消息 "
+                          f"{inbound.get('msg_type')!r}（玩家 {sender_id}），仅保证幽灵存在")
                 # 其他客户端消息：确保该玩家幽灵已创建（多目标 AI 与 PLAYER_SNAPSHOT 需要）
                 self._ensure_ghost(sender_id)
 
@@ -1574,6 +2140,11 @@ class GameView(arcade.View):
         # 记录受击前 HP
         hp_before = self.player.hp
 
+        # 局内建造系统（阶段1）：建筑逻辑持续更新（塔攻击/陷阱触发），与是否处于建造模式无关。
+        # 仅 host/solo 执行（客户端只渲染，建筑状态由主机快照同步，阶段10）
+        if gs.net_mode != "client":
+            self.build_system.update(dt)
+
         # 药水效果计时器
         if hasattr(self.player, 'speed_effect_timer') and self.player.speed_effect_timer > 0:
             self.player.speed_effect_timer -= dt
@@ -1677,6 +2248,16 @@ class GameView(arcade.View):
 
             # 野外怪物刷新（被击杀后补刷，保持地图有怪物）
             self._respawn_monsters(dt)
+
+            # 阶段3 精英词缀怪：定时刷新 + 火墙词缀燃烧区结算（核心逻辑在 respawn/monster_affixes）
+            update_elite_spawner(self, dt)
+            update_fire_zones(self, dt)
+
+            # 阶段4 随机事件推进：横幅计时 + 空投落地计时 + 商队弹层自动关闭
+            # + 靠近按 E 打开商队换购弹层（核心逻辑在 game/map_events.py）
+            from game.map_events import handle_caravan_interaction, update_event
+            update_event(self, dt)
+            handle_caravan_interaction(self)
 
             # 怪物 AI
             # 近战怪 try_attack 返回 bool（是否命中，伤害已直接结算）；远程怪返回弹丸对象
@@ -1896,10 +2477,17 @@ class GameView(arcade.View):
                 self._handle_well_interaction()
                 # 火箭发射台交互（靠近按E）
                 self._handle_rocket_pad_interaction()
+                # 阶段2 防守撤离点交互（dormant 激活 / destroyed 修复，均消耗资源）
+                self._handle_evac_point_interaction()
 
             # 火箭发射台状态机更新
             for pad in self.rocket_pads:
                 pad.update(dt)
+                # 阶段2 航天图统一防守：BOSS 击败后（BOSS_DEFEATED）在台心建主撤离点并
+                # 免费进入 defending——激活成本已由"击败 BOSS"支付，不再扣资源
+                # （activate(free=True) 跳过扣减；波次由 _update_evac_point 同一驱动推进）
+                if pad.state == "boss_defeated" and self.evac_point is None:
+                    self._sync_evac_point_from_rocket_pad(pad)
                 # 撤离倒计时归零 → 检查玩家是否在范围内
                 # 观战模式：主机玩家已撤离/死亡，不裁决主机撤离（撤离仅限存活玩家）
                 if pad.state == "evac_success" and not self._spectating:
@@ -1914,6 +2502,18 @@ class GameView(arcade.View):
                         # 修复：删除局部导入（顶部已导入），否则会让 commit_run_to_warehouse/clear_run
                         # 成为 on_update 的局部变量，未走此分支时第 814 行报 UnboundLocalError
                         commit_run_to_warehouse(gs.player_id, gs.run_carried)
+                        # 阶段6.2 任务/成就进度：火箭台撤离成功（solo/host 唯一 evac 计数口径之一，
+                        # 本块整体在 net_mode != "client" 守卫内，客户端天然不进）
+                        from game.mission_tracker import on_event as mission_on_event
+                        mission_on_event(self, "evac", 1)
+                        # 阶段8 星级：评星 + 落库（紧跟 commit_run_to_warehouse，clear_run 之前，
+                        # 此时 run_carried["gold"] 仍可读；升星提示载荷供结算页/浮字使用）
+                        star_info = self._settle_run_stars(gs)
+                        # 阶段5 祝福：本局结束 → 清空持有的祝福并还原属性（与失败路径 _fail_run 对称）
+                        self.clear_blessings()
+                        # 局内建造系统（阶段1）：撤离成功清场——反注册怪物碰撞网格
+                        self.build_system.clear()
+                        gs.build_mode = False
                         # 保存携带物品用于显示收益
                         carried_copy = dict(gs.run_carried) if hasattr(gs, 'run_carried') else {}
                         clear_run(gs.run_carried)
@@ -1923,6 +2523,14 @@ class GameView(arcade.View):
                         floating_texts.add(self.player.center_x, self.player.center_y + 80,
                                            "撤离成功！战利品已存入仓库",
                                            arcade.color.GREEN, life=3.0, font_size=22)
+                        # 阶段8 星级：升星金色浮字（联机主机走观战分支不跳结算页，
+                        # 浮字是主机唯一的星级反馈，故此处对两种模式都提示）
+                        if star_info["upgraded"]:
+                            floating_texts.add(self.player.center_x, self.player.center_y + 130,
+                                               f"★×{star_info['new_stars']} 解锁！",
+                                               (255, 215, 0), life=3.0, font_size=24)
+                            particle_system.emit(self.player.center_x, self.player.center_y, 20,
+                                                (255, 215, 0), speed=70, life=1.2, size=4)
                         particle_system.emit(self.player.center_x, self.player.center_y, 30,
                                             (255, 215, 0), speed=100, life=1.0, size=5)
                         sound_manager.play_level_up()
@@ -1932,7 +2540,9 @@ class GameView(arcade.View):
                             # 重构：联机主机火箭台撤离成功 = 本局单人结束，不关房 → 观战模式
                             self._enter_spectate("evac")
                             return
-                        self.window.show_view(EvacResultView(self.window_ref, success=True, run_carried=carried_copy))
+                        self.window.show_view(EvacResultView(self.window_ref, success=True,
+                                                            run_carried=carried_copy,
+                                                            star_info=star_info))
                         return
                     else:  # 玩家不在范围内，撤离失败
                         pad.state = "destroyed"  # 标记发射台已失效
@@ -1958,10 +2568,18 @@ class GameView(arcade.View):
         if gs.net_mode == "client" and gs.net_client is not None:
             if getattr(self, '_chest_key_pressed', False) and not self._spectating:
                 self._send_client_interaction_request(gs)
+                # 阶段2 撤离点：客户端只发请求（本地不扣资源、不改状态）
+                self._client_request_evac_point()
 
         # 掉落物生命周期（主机权威：掉落生成/过期由主机管理并随快照同步，客户端不本地推进）
         # TODO(联机): 主机权威逻辑，客户端跳过
         if gs.net_mode != "client":
+            # 阶段4 尸潮事件：按 reward_mult 放大本帧新出现的掉落（金币/资源数量）。
+            # 必须早于下面的 net_id 分配与 drop_spawn 广播，这样广播给客户端的
+            # quantity 已是放大后的值，两端口径一致（entity_callbacks 本阶段只读）。
+            from game.map_events import scale_event_drops
+            scale_event_drops(self)
+
             # 掉落物更新
             for d in self.drops[:]:
                 d.update(dt)
@@ -2137,9 +2755,24 @@ class GameView(arcade.View):
         if self._message_timer > 0:
             self._message_timer = max(0, self._message_timer - delta_time)
 
+        # ── 阶段2 防守撤离：主撤离点状态机驱动（主机/solo 权威）──
+        # 客户端不跑 update 与波次（状态由主机 EVAC_POINT_STATE 广播，见 Task 2.5）
+        if gs.net_mode != "client" and self.evac_point is not None:
+            self._update_evac_point(dt)
+        # 联机主机：撤离点状态广播（倒计时需持续刷新 → 周期发；状态/血量变化 → 立即发）
+        if gs.net_mode == "host" and self.evac_point is not None:
+            self._evac_bcast_timer += dt
+            self._broadcast_evac_point_state()
+
         # 撤离读条更新（观战模式：主机已撤离/死亡，不再触发撤离结算）
+        # 阶段2：仅当主撤离点 secured（防守倒计时跑完）才把坐标喂给 EvacState，
+        # 未激活/防守中/被拆的撤离点不能直接读条撤离。
+        if self.evac_point is not None and self.evac_point.state == "secured":
+            evac_targets = [[self.evac_point.x, self.evac_point.y]]
+        else:
+            evac_targets = []
         evac_result = None if self._spectating else self.evac.update(
-            self.player, self.map_data["evac_points"], delta_time)
+            self.player, evac_targets, delta_time)
 
         # 客户端撤离完成：不本地直接入库（数据源在主机 _players_run_carried），
         # 发 EVAC_REQUEST 请求主机下发权威结算清单，按 EVAC_RESULT 清单入库（B12）。
@@ -2162,6 +2795,14 @@ class GameView(arcade.View):
                 self._fold_run_potions(gs)
                 # 撤离成功：提交战利品到仓库
                 commit_run_to_warehouse(gs.player_id, gs.run_carried)
+                # 阶段6.2 任务/成就进度：撤离点撤离成功（solo/host 唯一 evac 计数口径之一；
+                # 客户端撤离走 EVAC_REQUEST → 主机 _handle_evac_request 归属计数）
+                from game.mission_tracker import on_event as mission_on_event
+                mission_on_event(self, "evac", 1)
+                # 阶段8 星级：评星 + 落库（紧跟 commit_run_to_warehouse，clear_run 之前）
+                star_info = self._settle_run_stars(gs)
+                # 阶段5 祝福：本局结束 → 清空持有的祝福并还原属性（与失败路径 _fail_run 对称）
+                self.clear_blessings()
                 # 保存携带物品用于显示收益（先复制再清空）
                 carried_copy = dict(gs.run_carried) if hasattr(gs, 'run_carried') else {}
                 clear_run(gs.run_carried)
@@ -2171,6 +2812,13 @@ class GameView(arcade.View):
                 floating_texts.add(self.player.center_x, self.player.center_y + 80,
                                    "撤离成功！战利品已存入仓库",
                                    arcade.color.GREEN, life=3.0, font_size=22)
+                # 阶段8 星级：升星金色浮字（主机走观战分支不跳结算页，浮字为主机唯一反馈）
+                if star_info["upgraded"]:
+                    floating_texts.add(self.player.center_x, self.player.center_y + 130,
+                                       f"★×{star_info['new_stars']} 解锁！",
+                                       (255, 215, 0), life=3.0, font_size=24)
+                    particle_system.emit(self.player.center_x, self.player.center_y, 20,
+                                        (255, 215, 0), speed=70, life=1.2, size=4)
                 particle_system.emit(self.player.center_x, self.player.center_y, 30,
                                     (255, 215, 0), speed=100, life=1.0, size=5)
                 sound_manager.play_evac()  # 撤离成功专属音效
@@ -2186,12 +2834,61 @@ class GameView(arcade.View):
                     tut.stage = 4
                     tut.page = 0
                 from views.evac_result_view import EvacResultView
-                self.window.show_view(EvacResultView(self.window_ref, success=True, run_carried=carried_copy))
+                self.window.show_view(EvacResultView(self.window_ref, success=True,
+                                                    run_carried=carried_copy,
+                                                    star_info=star_info))
                 return
 
         # 宝箱按键标志重置（在 handle_chest_interaction 中消费后重置）
         if self._chest_key_pressed and not picked:
             pass  # 保持状态直到交互完成
+
+        # ── 阶段5 祝福面板：待选次数 >0 时在本帧末尾统一打开 ──────────────
+        # 放末尾是为了让本帧的触发点（宝箱/精英/撤离点）先跑完，
+        # 多次触发会在面板里逐次消费 blessing_pending，不会漏掉。
+        # 观战/撤离结算中不弹（避免打断过场）。
+        if (self.blessing_pending > 0
+                and not self._spectating
+                and not self._blessing_panel_open):
+            from views.blessing_view import BlessingView
+            self._blessing_panel_open = True
+            self.window.show_view(BlessingView(self.window_ref, game_view=self))
+            return
+
+    def _settle_run_stars(self, gs) -> dict:
+        """阶段8 星级结算（撤离成功唯一入口；**必须在 clear_run 之前调用**）
+
+        流程：定格 carried_gold + evac=True → evaluate_stars 评星 → get_stars 取旧值 →
+        record_stars 落库（内部取 max，重复通关不降星）→ 返回结算界面展示载荷。
+
+        - 调用点：撤离点读条成功 / 火箭发射台撤离成功，两处均在
+          `commit_run_to_warehouse` 之后（入库口径与评星口径同一次结算）；
+        - 防双计铁律：唯一调用端 = 主机（solo 即本地），两处调用点都在
+          `net_mode != "client"` 守卫内，客户端永不自评星；
+        - 撤离失败（`_fail_run`）与超时/阵亡路径不评星（criteria 首条为「成功撤离」，
+          即便误调也只会得 0 星，不污染已落库星数——record_stars 取 max 只升不降）；
+        - 重复通关同一图不降星由 record_stars 保证，本方法只负责「算出 + 落库 + 回报变化」。
+        """
+        stats = self.run_stats
+        # carried_gold 在此定格：commit_run_to_warehouse 未清空 run_carried，
+        # 但紧随其后的 clear_run 会清零金币，故必须现在读（撤离携带金币口径 = run_carried["gold"]）
+        stats["carried_gold"] = int((gs.run_carried or {}).get("gold", 0) or 0)
+        stats["evac"] = True
+        theme = getattr(gs, "map_theme", "forest")
+        criteria = MAP_STAR_CRITERIA.get(theme, [])
+        stars = evaluate_stars(criteria, stats)
+        pid = gs.player_id
+        # 先取旧值再落库：record_stars 返回落库后的值，「本次是否升星」靠旧值比较得出
+        prev_stars = get_stars(pid).get(theme, 0) if pid else 0
+        new_stars = record_stars(pid, theme, stars) if pid else stars
+        return {
+            "theme": theme,
+            "stars": stars,
+            "prev_stars": prev_stars,
+            "new_stars": new_stars,
+            "upgraded": new_stars > prev_stars,
+            "max_stars": len(criteria) or MAP_MAX_STARS,
+        }
 
     def _clear_run_equipment(self, gs) -> None:
         """委托 → evac_manager._clear_run_equipment"""

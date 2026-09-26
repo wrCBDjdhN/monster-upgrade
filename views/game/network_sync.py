@@ -20,18 +20,23 @@ from config import (
     AURA_SLOW_TICK, AURA_SLOW_LEVEL,  # 攻速光环：减速结算周期与效果等级
     # 等级系统：击杀/撤离经验常量（客户端击杀结算用）
     EXP_KILL_BASE, EXP_BOSS_MULT, EXP_EVAC,
+    ELITE_EXP_MULT,  # 阶段3 精英词缀怪经验倍率（客户端击杀结算与主机 on_monster_death 同口径）
     # 倒地/救援系统
     DOWNED_TIMEOUT, RESCUE_DISTANCE, RESCUE_DURATION, REVIVE_HP,
     CACTUS_THORN_DAMAGE,  # 仙人掌反伤：客户端近战攻击环境物命中时作用于攻击者（幽灵）
     ROCKET_PAD_INTERACT_RANGE,  # 火箭发射台交互距离
     CHEST_WELL_INTERACT_RANGE,  # 宝箱/水井交互距离
     HIT_FLASH_DURATION,  # 受击闪白时长（远端怪物受击反馈）
+    EVENT_BANNER_SEC,  # 阶段4 事件横幅时长（客户端镜像横幅计时）
 )
 from net.protocol import MsgType  # 联机消息类型枚举（MONSTER_SNAPSHOT 等）
 from game.player import Player
 from game.loot import DropItem
 from game.harvestable import HarvestableEntity
+from game.chest import AirdropChest  # 阶段4 空投补给箱（客户端按 MAP_CHANGE 追加重建）
 from game.evac import commit_run_to_warehouse, clear_run
+from game.map_events import CaravanPoint  # 阶段4 商队交互点（非 Sprite，仅坐标）
+from game.build_system import Building  # 阶段1 局内建筑实体（客户端按广播只还原视觉对象）
 from game.sound_manager import sound_manager
 from game.effects import particle_system, floating_texts
 from game.entity_callbacks import (
@@ -55,6 +60,10 @@ class NetworkSyncManager:
     def __init__(self, game_view):
         """构造：绑定 GameView 实例（self.gv 为唯一外部状态入口）"""
         self.gv = game_view
+        # 旧主机 MONSTER_SNAPSHOT 缺新字段（shield/attack_cd_ratio 等）时的告警去重标记：
+        # net 层铁律「禁静默丢字段」——缺字段走 .get() 默认值兜底，但必须显式告警一次，
+        # 不能悄悄按本地默认值渲染出与主机不一致的表现。
+        self._warned_old_monster_snapshot = False
 
     def _broadcast_damage(self, monster: "arcade.Sprite", damage: float, hit: bool = True,
                           crit: bool = False, debuffs: list = None) -> None:
@@ -185,7 +194,9 @@ class NetworkSyncManager:
                         # 由 _broadcast_map_changes 与 drop_spawn 广播统一同步到客户端）
                         if not h.alive:
                             # 客户端近战裁决路径：采集经验归属客户端，不发给本端主机
-                            on_harvestable_destroyed(self.gv, h, award_exp=False)
+                            # 阶段6.2 任务 harvest 同样按攻击者归属，主机单播给该客户端
+                            on_harvestable_destroyed(self.gv, h, award_exp=False,
+                                                     credit_net_id=attacker_id)
         elif wdef.get("special") == "laser":
             # 陨星炮：主机生成激光（起点=幽灵位置），命中由 check_laser_hits 统一广播；
             # 客户端装备附加 debuff 挂到激光上，命中即施加
@@ -277,7 +288,18 @@ class NetworkSyncManager:
                     and getattr(self.gv.window.game_state, "net_mode", "solo") == "client"):
                 rm._exp_awarded = True  # 防重复：同一怪物只发一次击杀经验
                 amount = EXP_KILL_BASE * (EXP_BOSS_MULT if getattr(rm, "is_boss", False) else 1)
+                # 阶段3 精英词缀怪：客户端补上主机侧的精英经验倍率（快照字段 net_is_elite），
+                # 否则「客户端补刀精英」只发单倍经验，与主机/solo 口径不一致
+                if getattr(rm, "is_elite", False) or getattr(rm, "net_is_elite", False):
+                    amount = int(amount * ELITE_EXP_MULT)
                 _award_exp(self.gv, amount)
+                # 阶段4 尸潮事件：客户端补上 reward_mult 的额外经验（与主机
+                # _on_monster_death → award_event_kill_exp 同口径；客户端不跑
+                # 怪物死亡回调，故必须在此补，否则两端经验不一致）
+                from game.map_events import event_exp_bonus
+                extra = event_exp_bonus(self.gv, amount)
+                if extra > 0:
+                    _award_exp(self.gv, extra)
         # 附加 debuff 列表（表现层记录，快照会校准覆盖）：逐条施加，含效果等级
         # （修复客户端特殊效果不全生效：旧版只广播单个无等级 debuff，多效果丢失）
         debuffs = payload.get("debuffs") or []
@@ -381,6 +403,8 @@ class NetworkSyncManager:
             "facing": getattr(self.gv.player, "facing", 0.0),
             # 倒地/观战/死亡：alive=False（客户端侧幽灵消失）
             "alive": self.gv.player.alive and not self.gv._spectating and not self.gv.player.downed,
+            # 阶段5 祝福：把含祝福的有效属性一并广播，客户端可据此校准幽灵承伤显示
+            "stats": self.gv.player.blessing_stats(),
         }]
         for pid, ghost in self.gv.remote_players.items():
             # 倒地玩家：alive=False（客户端侧幽灵消失）
@@ -391,6 +415,8 @@ class NetworkSyncManager:
                 "hp": getattr(ghost, "hp", 0), "max_hp": getattr(ghost, "max_hp", 0),
                 "weapon": None, "facing": 0.0,
                 "alive": getattr(ghost, "alive", True) and not is_downed,
+                # 幽灵属性（主机此前从该客户端上报的 stats 套用），转发供其他端渲染参考
+                "stats": ghost.blessing_stats(),
             })
         return players
 
@@ -485,6 +511,9 @@ class NetworkSyncManager:
                 # 观战时已撤离/阵亡：上报 alive=False → 主机侧幽灵 HP 归零、渲染消失，
                 # 不会被主机观战跟随（修复：撤离幽灵停在撤离点不再移动，跟随即视角卡死）
                 "alive": self.gv.player.alive and not getattr(self.gv, "_spectating", False),
+                # 阶段5 祝福：上报本人「含祝福」的有效属性，主机据此套用到该玩家幽灵，
+                # 使主机裁决该玩家承伤（ghost.take_damage 走 defense）时与本人一致
+                "stats": self.gv.player.blessing_stats(),
             }],
         }))
 
@@ -510,6 +539,25 @@ class NetworkSyncManager:
             # 避免快照校准覆盖装备效果（详见函数 docstring）
             ghost.max_hp = max(1, int(entry.get("max_hp") or ghost.max_hp))
             ghost.hp = min(ghost.max_hp, round(entry.get("hp", ghost.hp), 2))
+            # 阶段5 祝福：套用客户端上报的「含祝福有效属性」——主机裁决该玩家承伤时
+            # 走 ghost.take_damage（读 defense/shield），不同步会让主机按无祝福数值扣血。
+            # 全部按绝对值覆盖（不是倍率叠乘），与客户端本地重算结果一致、不会双倍加成。
+            stats = entry.get("stats")
+            if isinstance(stats, dict):
+                if "defense" in stats:
+                    ghost.defense = float(stats["defense"])
+                if "regen_per_sec" in stats:
+                    ghost.regen_per_sec = float(stats["regen_per_sec"])
+                if "char_speed_mult" in stats:
+                    ghost.char_speed_mult = float(stats["char_speed_mult"])
+                if "crit_chance" in stats:
+                    ghost.crit_chance = float(stats["crit_chance"])
+                if "lifesteal" in stats:
+                    ghost.equip_lifesteal = float(stats["lifesteal"])
+                if "thorns" in stats:
+                    ghost.equip_thorns = float(stats["thorns"])
+                if "damage_mult" in stats:
+                    ghost.equip_damage_mult = float(stats["damage_mult"])
             if not entry.get("alive", True):
                 ghost.hp = 0  # 客户端阵亡：HP 归零（主机随后 PLAYER_DEATH 单播通知）
 
@@ -778,6 +826,17 @@ class NetworkSyncManager:
         gs = self.gv.window.game_state
         if gs.net_server is None:
             return  # 非主机：理论不可达（inbound 仅主机消费），防御性返回
+        # 阶段6.2 防双计闸门：同一玩家本局只结算一次撤离。客户端侧有 _evac_request_sent
+        # 单次标志，但重复帧/异常重发仍可能二次到达主机——若不在此拦一道，evac 进度会
+        # 被重复计数（EVAC_RESULT 清单也会重复广播）。口径对齐 _handle_player_abandon
+        # 的 _player_status 判定：已是 evac/left 视为已结算，显式忽略并记日志（禁静默）。
+        if self.gv._player_status.get(sender_id) in ("evac", "left"):
+            print(f"[GameView] 忽略玩家 {sender_id} 重复的撤离请求（已结算，不再计数）")
+            return
+        # 阶段6.2 任务/成就进度：撤离成功按「结算玩家」归属（唯一 evac 计数口径），
+        # 客户端经 MISSION_PROGRESS 写自己的本地库（防双计铁律：客户端永不自计）
+        from game.mission_tracker import on_event as mission_on_event
+        mission_on_event(self.gv, "evac", 1, sender_id)
         carried = self.gv._players_run_carried.get(sender_id, {})
         gs.net_server.broadcast(MsgType.EVAC_RESULT, {
             "player_id": sender_id,
@@ -802,8 +861,20 @@ class NetworkSyncManager:
           重建的地图对象顺序与主机一致），直接把本地对象与主机权威状态对齐——
           宝箱标记已开（渲染/碰撞跳过）、环境物标记已摧毁、水井首次开启、
           火箭台镜像状态机与撤离倒计时（客户端不本地推进，纯表现层）。
+        - 11.1 接线核查补齐三个新 change_type：build_place / build_destroy（阶段1 局内建造，
+          obj_id = 建筑 bid）/ fire_zone（阶段3 火墙词缀燃烧区，obj_id = 区域 zid，state.action
+          区分 add/remove）；未知 change_type 一律显式记日志（禁静默忽略——net 层铁律）。
         """
         change_type = payload.get("change_type")
+        _KNOWN_CHANGE_TYPES = (
+            "drop_spawn", "chest_opened", "env_destroyed", "env_damage", "env_spawn",
+            "well_used", "rocket_pad", "chest_spawn", "caravan_point",
+            "build_place", "build_destroy", "fire_zone",
+        )
+        if change_type not in _KNOWN_CHANGE_TYPES:
+            # 未知改动类型：显式记录而非静默忽略（net 层铁律）
+            print(f"[Client] MAP_CHANGE 未知 change_type={change_type!r}，忽略")
+            return
         if change_type == "drop_spawn":
             for entry in payload.get("extra", {}).get("drops", []):
                 net_id = entry.get("net_id")
@@ -867,6 +938,166 @@ class NetworkSyncManager:
                     pad.state = state["pad_state"]
                 if "countdown" in state:
                     pad._countdown_timer = float(state["countdown"])
+        elif change_type == "chest_spawn":
+            # 阶段4 空投补给箱：主机运行期追加到 chests 末尾（obj_id = 追加位置），
+            # 客户端同样**追加**保持两端列表长度/序号同步，因此后续 chest_opened
+            # 的 obj_id 与主机对得上。已存在同序号则跳过（重复广播幂等）。
+            if isinstance(obj_id, int) and obj_id > len(self.gv.chests):
+                return
+            if isinstance(obj_id, int) and obj_id == len(self.gv.chests):
+                st = payload.get("state", {})
+                chest = AirdropChest(st.get("x", 0.0), st.get("y", 0.0),
+                                     theme=st.get("theme", "forest"),
+                                     artifact_bonus=st.get("artifact_bonus", 0.0))
+                self.gv.chests.append(chest)
+                self.gv.obstacle_list.append(chest)
+        elif change_type == "caravan_point":
+            # 阶段4 商队交互点：镜像主机权威坐标（客户端只渲染招牌/弹层，不本地生成）
+            st = payload.get("state", {})
+            if self.gv.caravan_point is None:
+                self.gv.caravan_point = CaravanPoint(st.get("x", 0.0), st.get("y", 0.0))
+        elif change_type == "build_place":
+            # 阶段1 局内建筑落成：obj_id = 建筑 bid（主机 BuildSystem._next_bid 单调分配）。
+            # 客户端只建视觉对象（渲染血条/方块），**不注册 monster_grid 碰撞**——
+            # 客户端无怪物 AI，怪物位置由 MONSTER_SNAPSHOT 权威下发。
+            self._client_add_building(
+                payload.get("obj_id"), payload.get("state") or {})
+        elif change_type == "build_destroy":
+            # 阶段1 建筑被摧毁/拆除：按 bid 从本地列表移除（幂等：不存在则跳过）
+            bid = payload.get("obj_id")
+            buildings = self._building_list()
+            for index, building in enumerate(buildings):
+                if building.bid == bid:
+                    del buildings[index]
+                    break
+        elif change_type == "fire_zone":
+            # 阶段3 火墙词缀燃烧区：state.action = add/remove，obj_id = 区域 zid。
+            # 区域本体完全由主机建/删广播驱动，客户端不本地生成（禁本地仲裁）。
+            st = payload.get("state", {})
+            action = st.get("action", "add")
+            zid = st.get("zid", payload.get("obj_id"))
+            if action == "remove":
+                self.gv.fire_zones[:] = [z for z in self.gv.fire_zones
+                                         if z.get("zid") != zid]
+            else:
+                if any(z.get("zid") == zid for z in self.gv.fire_zones):
+                    return  # 已存在（重复广播）：幂等跳过
+                self.gv.fire_zones.append({
+                    "zid": zid,
+                    "x": float(st.get("x", 0.0)), "y": float(st.get("y", 0.0)),
+                    # 半径口径兼容 r / radius 两种键名（协议 fixture 与主机广播口径）
+                    "r": float(st.get("r", st.get("radius", 0.0)) or 0.0),
+                    "life": float(st.get("life", 0.0)),
+                    "dps": float(st.get("dps", 0.0)),
+                    "burn_duration": float(st.get("burn_duration", 0.0)),
+                    "tick": float(st.get("tick", 0.0)),
+                })
+
+    def _building_list(self) -> list:
+        """取本局建筑共享列表（主机广播与客户端还原、渲染读同一份 list 对象）
+
+        GameState.buildings 与 BuildSystem.buildings 是同一个 list 对象，
+        这里统一经 build_system 取，避免渲染与联机还原各读一份。
+        """
+        build_system = getattr(self.gv, "build_system", None)
+        if build_system is not None:
+            return build_system.buildings
+        return self.gv.window.game_state.buildings
+
+    def _client_add_building(self, bid, state: dict) -> None:
+        """客户端按主机广播还原一个建筑视觉对象（幂等：同 bid 已存在则只校准血量）
+
+        不注册 monster_grid：客户端无怪物 AI（怪物位置由快照权威下发），
+        注册碰撞网格只会在客户端造出永不参与计算的碰撞体。
+        """
+        from entities.build_defs import BUILDS
+        buildings = self._building_list()
+        # bid 口径：主机用 BuildSystem._next_bid 分配的 int；协议 fixture 用字符串 id。
+        # 两种都按不透明标识处理（增删两侧同口径即可），但必须存在。
+        if not isinstance(bid, (int, str)) or isinstance(bid, bool):
+            print(f"[Client] build_place 非法 obj_id={bid!r}，忽略")
+            return
+        kind = state.get("kind", "")
+        if kind not in BUILDS:
+            # 未知建筑类型：显式记录而非静默忽略（跨版本建筑定义不同步的防御）
+            print(f"[Client] build_place 未知 kind={kind!r}（bid={bid}），忽略")
+            return
+        for building in buildings:
+            if building.bid == bid:
+                building.hp = float(state.get("hp", building.hp))
+                return
+        building = Building(bid, kind,
+                            float(state.get("x", 0.0)), float(state.get("y", 0.0)))
+        building.hp = float(state.get("hp", building.max_hp))
+        buildings.append(building)
+
+    def _apply_event_start(self, payload: dict) -> None:
+        """客户端应用主机 EVENT_START：镜像本局事件 id/参数 + 显示横幅（纯表现层）
+
+        - 客户端禁本地抽选（主机权威），因此 event_id 与 event_flags 完全以广播值为准；
+        - 横幅计时 3 秒由本端递减（表现层），因此客户端同样调用 map_events.update_event；
+        - 事件实体（空投箱/商队点）不在本消息内，由 MAP_CHANGE 增量广播（见 _apply_map_change）。
+        """
+        from game.map_events import apply_event
+        event_id = payload.get("event_id") or ""
+        flags = payload.get("flags") or {}
+        self.gv.event_id = event_id
+        # 客户端同样反算 _monster_cap：保证客户端野外刷新上限表现与主机一致
+        # （客户端不跑 respawn，此处仅为参数镜像，无副作用）
+        apply_event(self.gv, event_id)
+        if flags:
+            self.gv.event_flags.update(flags)
+        self.gv._event_banner_timer = EVENT_BANNER_SEC
+
+    def _broadcast_event_start(self) -> None:
+        """联机主机：开局广播 EVENT_START（抽中事件后立即调用一次）
+
+        - 只有 host 广播（solo 无网；客户端由 _apply_event_start 消费）；
+        - flags 走 view.event_flags 副本，客户端 apply_event 会再按 MAP_EVENTS 覆盖，
+          广播值用于显式对齐（禁把 view 直接塞进载荷）。
+        """
+        gs = self.gv.window.game_state
+        if gs.net_mode != "host" or gs.net_server is None:
+            return
+        event_id = getattr(self.gv, "event_id", "")
+        if not event_id:
+            return
+        gs.net_server.broadcast(MsgType.EVENT_START, {
+            "event_id": event_id,
+            "flags": dict(getattr(self.gv, "event_flags", {}) or {}),
+        })
+
+    def _broadcast_event_entities(self) -> None:
+        """联机主机：广播阶段4 事件实体（空投补给箱追加 / 商队交互点），各只广播一次
+
+        - obj_id 与 env_spawn 同口径（= 追加位置），客户端据此保持两端列表序号同步；
+        - 用 gv._event_spawned 集合去重，避免每帧 _broadcast_map_changes 重复广播。
+        """
+        gs = self.gv.window.game_state
+        if gs.net_mode != "host" or gs.net_server is None:
+            return
+        spawned = self.gv._event_spawned
+        # 空投补给箱：运行时追加到 chests 末尾，按追加序号广播
+        for i, chest in enumerate(self.gv.chests):
+            if not getattr(chest, "is_airdrop", False) or i in spawned:
+                continue
+            spawned.add(i)
+            gs.net_server.broadcast(MsgType.MAP_CHANGE, {
+                "obj_id": i, "change_type": "chest_spawn",
+                "state": {"x": chest.center_x, "y": chest.center_y,
+                          "theme": getattr(chest, "theme", "forest"),
+                          "artifact_bonus": getattr(chest, "artifact_bonus", 0.0)},
+                "extra": {},
+            })
+        # 商队交互点：单点，只广播一次
+        point = getattr(self.gv, "caravan_point", None)
+        if point is not None and "caravan" not in spawned:
+            spawned.add("caravan")
+            gs.net_server.broadcast(MsgType.MAP_CHANGE, {
+                "obj_id": 0, "change_type": "caravan_point",
+                "state": {"x": point.center_x, "y": point.center_y},
+                "extra": {},
+            })
 
     def _broadcast_map_changes(self) -> None:
         """联机主机：检测并广播运行期地图改动（宝箱开启/环境物摧毁/水井/火箭台状态）
@@ -920,6 +1151,90 @@ class NetworkSyncManager:
                               "countdown": pad.get_countdown()},
                     "extra": {},
                 })
+        # 阶段4 事件实体：空投补给箱（运行期追加到 chests 末尾）/ 商队交互点，
+        # 内部用 gv._event_spawned 去重，各只广播一次
+        self._broadcast_event_entities()
+        # 11.1 接线核查：阶段1 局内建筑 + 阶段3 火墙词缀燃烧区的建/删增量广播
+        self._broadcast_buildings()
+        self._broadcast_fire_zones()
+
+    def _broadcast_buildings(self) -> None:
+        """联机主机：增量广播局内建筑的落成与摧毁（11.1 接线核查，change_type=build_place/build_destroy）
+
+        - obj_id = 建筑 bid（BuildSystem._next_bid 单调分配，两端同口径，客户端据此还原/移除）；
+        - 去重跟踪 gv._broadcasted_buildings（已广播的 bid 集合）：新建筑只广播一次；
+        - 摧毁判定走「已广播但本地已不在列表」——BuildSystem.remove 是唯一移除入口
+          （怪物拆塔 take_damage 与局末 clear 共用），因此该差集即等于被摧毁的建筑；
+        - 客户端收到后只建/删视觉对象，不注册怪物碰撞（客户端无 AI）。
+        """
+        gs = self.gv.window.game_state
+        if gs.net_mode != "host" or gs.net_server is None:
+            return
+        buildings = self._building_list()
+        alive_bids = {b.bid for b in buildings}
+        # 新落成的建筑 → 广播 build_place（含当前 hp，客户端据此画血条）
+        for building in buildings:
+            if building.bid in self.gv._broadcasted_buildings:
+                continue
+            self.gv._broadcasted_buildings.add(building.bid)
+            gs.net_server.broadcast(MsgType.MAP_CHANGE, {
+                "obj_id": building.bid, "change_type": "build_place",
+                "state": {"kind": building.kind, "x": building.x, "y": building.y,
+                          "hp": building.hp},
+                "extra": {},
+            })
+        # 已广播但本地已消失 → 广播 build_destroy（差集按 bid 逐条发，幂等）
+        for bid in list(self.gv._broadcasted_buildings - alive_bids):
+            self.gv._broadcasted_buildings.discard(bid)
+            gs.net_server.broadcast(MsgType.MAP_CHANGE, {
+                "obj_id": bid, "change_type": "build_destroy",
+                "state": {}, "extra": {},
+            })
+
+    def _broadcast_fire_zones(self) -> None:
+        """联机主机：增量广播火墙词缀燃烧区的生成与消失（11.1 接线核查，change_type=fire_zone）
+
+        - obj_id = 区域 zid（主机在首次见到该区域时分配，客户端按 zid 还原/移除）；
+        - 区域本体由 game/monster_affixes.py 的 on_affix_death 生成、update_fire_zones 按
+          life 到期移除，本方法只做「主机列表 → 客户端列表」的差量同步（禁客户端本地生成）；
+        - 去重跟踪 gv._fire_zone_broadcasted（已广播的 zid 集合）+ 消失差集发 remove。
+        """
+        gs = self.gv.window.game_state
+        if gs.net_mode != "host" or gs.net_server is None:
+            return
+        zones = getattr(self.gv, "fire_zones", None) or []
+        alive_zids = set()
+        for zone in zones:
+            zid = zone.get("zid")
+            if zid is None:
+                # 首次见到：主机分配单调 zid 后再广播（保证两端同口径）
+                zid = f"z{self.gv._next_fire_zone_zid}"
+                self.gv._next_fire_zone_zid += 1
+                zone["zid"] = zid
+            alive_zids.add(zid)
+            if zid in self.gv._fire_zone_broadcasted:
+                continue
+            self.gv._fire_zone_broadcasted.add(zid)
+            gs.net_server.broadcast(MsgType.MAP_CHANGE, {
+                "obj_id": zid, "change_type": "fire_zone",
+                "state": {
+                    "action": "add", "zid": zid,
+                    "x": zone.get("x", 0.0), "y": zone.get("y", 0.0),
+                    "r": zone.get("r", 0.0), "life": zone.get("life", 0.0),
+                    "dps": zone.get("dps", 0.0),
+                    "burn_duration": zone.get("burn_duration", 0.0),
+                    "tick": zone.get("tick", 0.0),
+                },
+                "extra": {},
+            })
+        # 已广播但本地已消失（life 耗尽被 update_fire_zones 移除）→ 广播 remove
+        for zid in list(self.gv._fire_zone_broadcasted - alive_zids):
+            self.gv._fire_zone_broadcasted.discard(zid)
+            gs.net_server.broadcast(MsgType.MAP_CHANGE, {
+                "obj_id": zid, "change_type": "fire_zone",
+                "state": {"action": "remove", "zid": zid},
+                "extra": {},
+            })
 
     def _broadcast_env_damage(self, obj_id: int, damage: float) -> None:
         """联机主机：广播环境物单次受击（Bug2 修复：主机对资源的伤害同步到客户端）
@@ -1256,6 +1571,9 @@ class NetworkSyncManager:
                     loot = chest.open_chest()
                     spawn_chest_loot(self.gv, chest, loot)
                     _award_exp(self.gv, EXP_CHEST)
+                    # 阶段6.2 任务 chest 按开箱发起者归属（主机裁决，单播给该客户端）
+                    from game.mission_tracker import on_event as mission_on_event
+                    mission_on_event(self.gv, "chest", 1, player_id)
                     print(f"[GameView] 客户端 {player_id} 开启宝箱 {i}")
                     break
 
@@ -1339,7 +1657,9 @@ class NetworkSyncManager:
         - 运行期补刷的新怪物在此惰性分配 net_id（存储在 m.net_id 上，存活期不变），
           与 setup() 中初始怪物的分配共用同一个单调计数器，保证全房唯一；
         - 载荷键名严格遵循 net/protocol.py MESSAGE_SCHEMAS["MONSTER_SNAPSHOT"]：
-          net_id / monster_type / x / y / hp / max_hp / weapon / debuff / attack_anim。
+          net_id / monster_type / x / y / hp / max_hp / weapon / debuff / attack_anim，
+          以及 shield / max_shield / damage / aggro_range / attack_delay / attack_cd_ratio
+          （客户端护盾条、冷却条、表现层战斗数值均读这批字段）。
         """
         snapshot = []
         for m in self.gv.monsters:
@@ -1361,6 +1681,12 @@ class NetworkSyncManager:
             weapon = m.weapon if isinstance(getattr(m, "weapon", None), dict) else {}
             armor = m.armor if isinstance(getattr(m, "armor", None), dict) else {}
             helmet = m.helmet if isinstance(getattr(m, "helmet", None), dict) else {}
+            # 攻击冷却：主机发「剩余比例 + 总时长」而非裸计时器——客户端不跑 AI，
+            # 无从知道本怪真实 _attack_delay（词缀/等级可能改过），按比例线性衰减
+            # 即可还原同一条冷却曲线，避免用本地默认值算出的脏进度条。
+            atk_timer = float(getattr(m, "_attack_timer", 0.0))
+            atk_delay = max(float(getattr(m, "_attack_delay", 1.0)), 1e-6)
+            atk_cd_ratio = max(0.0, min(1.0, atk_timer / atk_delay))
             snapshot.append({
                 "net_id": net_id,
                 "monster_type": type(m).__name__,  # 类名即 game.monsters 模块属性名，客户端据此实例化
@@ -1376,7 +1702,22 @@ class NetworkSyncManager:
                 "helmet": helmet.get("name"),
                 "helmet_color": list(helmet.get("color", (200, 200, 200))[:3]) if helmet else None,
                 "debuff": debuff_id,
-                "attack_anim": getattr(m, "_attack_timer", 0.0),
+                "attack_anim": atk_timer,
+                # 阶段3 精英词缀：affix=词缀 id（None=普通怪），is_elite=是否精英
+                # （客户端据此显示头顶词缀名前缀、小地图紫点）
+                "affix": getattr(m, "affix", None),
+                "is_elite": bool(getattr(m, "is_elite", False)),
+                # 精英护盾词缀的实际值（monster_affixes 写入 shield/max_shield）：
+                # 客户端幽灵只有 MONSTER_CONFIGS 默认值（shield=0），不广播则
+                # 护盾条在客户端永远不显示（修复客户端精英护盾条缺失）
+                "shield": float(getattr(m, "shield", 0.0)),
+                "max_shield": float(getattr(m, "max_shield", 0.0)),
+                # 主机权威战斗数值（词缀/等级修正后的生效值），供客户端幽灵
+                # 表现层与后续消费方读取（不参与客户端本地仲裁）
+                "damage": float(getattr(m, "damage", 0.0)),
+                "aggro_range": float(getattr(m, "_aggro_range", 0.0)),
+                "attack_delay": atk_delay,
+                "attack_cd_ratio": atk_cd_ratio,
             })
         return snapshot
 
@@ -1459,11 +1800,18 @@ class NetworkSyncManager:
     def _apply_monster_snapshot(self, payload: dict) -> None:
         """应用主机下发的 MONSTER_SNAPSHOT：按 net_id 增/改/删维护 self.remote_monsters
 
-        - 已有 net_id → 原位更新（位置/HP/武器名/debuff/攻击动画）；
+        - 已有 net_id → 原位更新（位置/HP/武器名/debuff/攻击冷却）；
         - 新 net_id → 新建远端怪物对象：复用真实怪物类实例（仅作渲染数据容器，
           永不调用 update/try_attack，AI/碰撞由主机权威执行），不加入 self.monsters；
+          实例化后立即打 net_ghost=True 防呆标记（消费侧 monster_base 的提前 return
+          判据，语义同 Building/RocketPad 的非 Sprite 防呆）；
         - 本端存在但快照缺失的 net_id → 主机已击杀/移除，删除。
-        插值渲染留待后续任务（B3），当前直接应用快照值。
+        位置插值（阶段B3）：只对**绘制坐标**插值——应用时把「上一快照位置 → 本快照
+        位置 + 到达时间戳」记到 net_prev_*/net_next_*/net_interp_t0，由 game_view
+        客户端块每帧推进 net_interp_alpha（alpha=(now-t0)/快照间隔），rendering.py
+        据此 lerp 出 render 坐标再绘制。**center_x/center_y 恒等于最新快照**（逻辑
+        坐标，客户端弹丸命中判定 arcade.check_for_collision 读 rm.center_x，改它会
+        直接改变手感），绘制完必须还原。
         """
         monster_list = payload.get("monsters", []) if isinstance(payload, dict) else []
         snapshot_ids = set()
@@ -1478,10 +1826,18 @@ class NetworkSyncManager:
                 cls = getattr(monsters, entry.get("monster_type", ""), Zombie)
                 rm = cls(center_x=entry.get("x", 0.0), center_y=entry.get("y", 0.0))
                 rm.net_id = net_id
+                # 防呆：远端幽灵标记（客户端不跑 AI/碰撞，消费侧据此提前 return）
+                rm.net_ghost = True
                 self.gv.remote_monsters[net_id] = rm
-            # 原位更新核心表现数据（直接应用，不插值）
+            # 位置插值：先留旧坐标作插值起点，再落最新快照（逻辑坐标）
+            prev_x, prev_y = rm.center_x, rm.center_y
             rm.center_x = entry.get("x", rm.center_x)
             rm.center_y = entry.get("y", rm.center_y)
+            # 插值两端 + 本快照到达时间戳（首帧 prev==next，天然原地起步不跳变）
+            rm.net_prev_x, rm.net_prev_y = prev_x, prev_y
+            rm.net_next_x, rm.net_next_y = rm.center_x, rm.center_y
+            rm.net_interp_t0 = time.time()
+            rm.net_interp_alpha = 0.0
             rm.hp = entry.get("hp", rm.hp)
             rm.max_hp = entry.get("max_hp", rm.max_hp)
             # 武器名/debuff/攻击动画：以 net_* 前缀保存快照值供渲染任务使用，
@@ -1497,6 +1853,31 @@ class NetworkSyncManager:
             rm.net_armor_color = entry.get("armor_color")
             rm.net_helmet = entry.get("helmet")
             rm.net_helmet_color = entry.get("helmet_color")
+            # 阶段3 精英词缀快照：客户端不跑 apply_affix（词缀逻辑主机权威），
+            # 改为以 net_* 前缀保存 affix / is_elite 供渲染消费：
+            # 头顶词缀名前缀（rendering_hud._draw_monster）与小地图紫点读这两个字段
+            rm.net_affix = entry.get("affix")
+            rm.net_is_elite = bool(entry.get("is_elite", False))
+            # ── 精英护盾 + 主机权威战斗数值（全部 .get() 默认 None 向后兼容）──
+            # 默认 None（而非 0）是有意为之：消费侧（rendering_hud 护盾条）据此
+            # 区分「主机没下发」与「主机下发 0」，前者回退本地 MONSTER_CONFIGS
+            # 默认值而非误画/误隐藏；旧主机缺字段时不会崩、也不会显示脏值。
+            rm.net_shield = entry.get("shield")
+            rm.net_max_shield = entry.get("max_shield")
+            # damage / aggro_range / attack_delay：主机权威生效值，客户端幽灵不跑 AI
+            # 用不到，留给表现层与后续消费方（禁在此处改写本地 damage/_aggro_range）
+            rm.net_damage = entry.get("damage")
+            rm.net_aggro_range = entry.get("aggro_range")
+            rm.net_attack_delay = entry.get("attack_delay")
+            # 攻击冷却剩余比例（0~1）：客户端按此线性衰减（game_view 客户端块），
+            # 免去用本地 _attack_delay 反推主机冷却长度导致的脏进度条
+            rm.net_attack_cd = entry.get("attack_cd_ratio")
+        if monster_list and not self._warned_old_monster_snapshot:
+            # net 层铁律：禁静默丢字段——主机快照缺新字段时显式告警一次（非每帧刷屏）
+            if "attack_cd_ratio" not in monster_list[0] or "shield" not in monster_list[0]:
+                print("[NetSync] 主机 MONSTER_SNAPSHOT 缺 shield/attack_cd_ratio 等新字段"
+                      "（旧主机？），已按本地默认值兜底渲染")
+                self._warned_old_monster_snapshot = True
         # 删除本端存在但快照缺失的怪物（主机已击杀/移除）
         for net_id in list(self.gv.remote_monsters):
             if net_id not in snapshot_ids:
@@ -1581,6 +1962,9 @@ class NetworkSyncManager:
 
         - monsters 复用 _serialize_monsters 格式（存活怪物 id/位置/hp/装备/debuff）；
         - drops/chests/env_objects 序列化当前地面掉落、宝箱开启状态与环境物存活状态；
+        - 11.1 接线核查：buildings（阶段1 局内建筑 bid/kind/x/y/hp）与 event_flags
+          （阶段4 事件参数）一并进全量，解析端 _apply_full_state 对称还原；
+          blessings 不进全量——只同步活跃玩家 stats（见 PLAYER_SNAPSHOT）；
         - action_time_left 同步剩余行动时间，客户端据此初始化后只收增量快照（B13）。
         """
         gs = self.gv.window.game_state
@@ -1600,21 +1984,40 @@ class NetworkSyncManager:
                 "level": getattr(d, "level", 1),
             })
         # 宝箱：按列表序号作为稳定 id（运行期改动同步是 todo 20）
+        # 阶段4 空投箱额外带 is_airdrop/theme/artifact_bonus：晚期加入客户端据此
+        # 重建同类型箱体（否则晚期加入者看不到空投箱、序号也对不上后续 chest_opened）
         chests = [{"id": i, "opened": c.opened,
-                   "x": c.center_x, "y": c.center_y}
+                   "x": c.center_x, "y": c.center_y,
+                   "is_airdrop": bool(getattr(c, "is_airdrop", False)),
+                   "theme": getattr(c, "theme", "forest"),
+                   "artifact_bonus": float(getattr(c, "artifact_bonus", 0.0) or 0.0)}
                   for i, c in enumerate(self.gv.chests)]
         # 环境物（可采集物/水井等）：存活状态 + 资源类型
         env_objects = [{"id": i, "resource_type": getattr(h, "resource_type", ""),
                         "alive": getattr(h, "alive", True),
                         "x": h.center_x, "y": h.center_y}
                        for i, h in enumerate(self.gv.harvestables)]
+        # 11.1 接线核查：局内建筑（阶段1）进全量，bid 与 build_place/build_destroy 同口径，
+        # 晚期加入客户端据此补建视觉对象（否则看不到他人已建的路障/箭塔）
+        buildings = [{"bid": b.bid, "kind": b.kind, "x": b.x, "y": b.y, "hp": b.hp}
+                     for b in self._building_list()]
         return {
             "monsters": self._serialize_monsters(),
             "drops": drops,
             "chests": chests,
             "env_objects": env_objects,
+            "buildings": buildings,
             # 水井首次开启状态（仅沙漠主题）：晚期加入客户端据此镜像 _well_opened
             "well_opened": self.gv._well_opened,
+            # 阶段2 主撤离点权威状态（格式同 EVAC_POINT_STATE；None=尚未建立，
+            # 航天图为击败 BOSS 后才建点）——晚期加入客户端据此还原防守进度
+            "evac_point": self.gv._serialize_evac_point(),
+            # 阶段4 本局随机事件 id（''=无事件；教程局恒为空）——晚期加入客户端
+            # 镜像事件横幅与参数，避免错过开局 3 秒横幅看不到事件名
+            "event_id": getattr(self.gv, "event_id", ""),
+            # 阶段4 事件参数（与 _apply_event_start 的 flags 同口径；apply_event 会按
+            # MAP_EVENTS 重算，此处为显式对齐，让两端 event_flags 完全同值）
+            "event_flags": dict(getattr(self.gv, "event_flags", {}) or {}),
             "action_time_left": self.gv._action_time_remaining or 0.0,
         }
 
@@ -1629,6 +2032,8 @@ class NetworkSyncManager:
           把已开宝箱 / 已摧毁环境物状态应用到本地坐标对象，渲染与碰撞据此跳过；
         - well_opened（todo 20 收口）：晚期加入客户端镜像主机水井首次开启状态，
           与主机交互/提示口径一致（此前只有运行期 well_used 增量广播，晚期加入者会漏）。
+        - 11.1 接线核查：buildings 逐条走 _client_add_building 还原（与 build_place 同入口）；
+          event_flags 与 event_id 一并镜像（否则 flags 只能靠 apply_event 本地重算）。
         """
         if not isinstance(payload, dict):
             return
@@ -1640,6 +2045,17 @@ class NetworkSyncManager:
         # 水井状态：主机已首次开启 → 本地镜像（渲染/提示与主机一致）
         if payload.get("well_opened"):
             self.gv._well_opened = True
+        # 阶段2 主撤离点：按主机权威状态镜像（None/缺字段=尚未建立，保持 None）
+        # 客户端不跑 EvacPoint.update 与波次，只还原字段供渲染与倒计时显示
+        evac_data = payload.get("evac_point")
+        if isinstance(evac_data, dict):
+            self.gv._apply_evac_point_state(evac_data)
+        # 阶段4 随机事件：镜像本局 event_id/参数（晚期加入者补看横幅；
+        # 事件实体本身由 chests 列表序号 + caravan_point 增量广播还原）
+        event_id = payload.get("event_id")
+        if event_id:
+            self._apply_event_start({"event_id": event_id,
+                                     "flags": payload.get("event_flags") or {}})
         # FULL_STATE 掉落物转为视觉 DropItem（带主机权威 net_id；已存在则跳过）
         for entry in payload.get("drops", []) or []:
             net_id = entry.get("net_id")
@@ -1651,10 +2067,20 @@ class NetworkSyncManager:
                 quantity=entry.get("quantity", 1),
                 level=entry.get("level", 1), net_id=net_id,
             ))
-        # 宝箱状态：已开宝箱标记 opened（渲染不绘制、不可再开）
+        # 宝箱状态：已开宝箱标记 opened（渲染不绘制、不可再开）；
+        # 阶段4 空投补给箱（运行期追加、序号超出本地列表）在此重建，
+        # 保证晚期加入客户端的 chests 序号与主机一致（后续 chest_opened 可正确对齐）
         for entry in payload.get("chests", []) or []:
             cid = entry.get("id")
-            if isinstance(cid, int) and 0 <= cid < len(self.gv.chests) and entry.get("opened"):
+            if not isinstance(cid, int):
+                continue
+            if entry.get("is_airdrop") and cid == len(self.gv.chests):
+                chest = AirdropChest(entry.get("x", 0.0), entry.get("y", 0.0),
+                                     theme=entry.get("theme", "forest"),
+                                     artifact_bonus=entry.get("artifact_bonus", 0.0))
+                self.gv.chests.append(chest)
+                self.gv.obstacle_list.append(chest)
+            if 0 <= cid < len(self.gv.chests) and entry.get("opened"):
                 self.gv.chests[cid].opened = True
         # 环境物状态：已摧毁环境物置 hp=0（alive 是只读 property）+ 移出障碍物（渲染跳过、无碰撞）
         for entry in payload.get("env_objects", []) or []:
@@ -1665,6 +2091,10 @@ class NetworkSyncManager:
                 h.hp = 0
                 if h in self.gv.obstacle_list:
                     self.gv.obstacle_list.remove(h)
+        # 11.1 接线核查：局内建筑对称还原（与 build_place 同一入口 _client_add_building，
+        # bid 同口径；客户端只渲染、不注册 monster_grid 碰撞）
+        for entry in payload.get("buildings", []) or []:
+            self._client_add_building(entry.get("bid"), entry)
         # 保留原始列表供调试/扩展使用（后续渲染直接读本地坐标对象状态）
         self.gv._late_chests = payload.get("chests", [])
         self.gv._late_env = payload.get("env_objects", [])

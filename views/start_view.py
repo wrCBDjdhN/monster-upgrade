@@ -6,6 +6,30 @@ from views.text_cache import TextCache  # 持久 Text 对象缓存，替代 draw
 from game.sound_manager import sound_manager
 
 
+def _enter_facility(view, facility_id, target_factory):
+    """设施入口守卫（阶段10：市场/锻造坊的**唯一口径**，全部调用方共用）
+
+    判定顺序：
+    1. 教程激活（gs.tutorial.active）→ 直接放行进业务 View
+       （新档教程期必然未建设施，守卫不能把引导卡死）
+    2. get_facility_level(pid, fid) >= 1（已建造）→ 进业务 View
+       （target_factory 由调用方延迟 import 后传入，如 MarketView / ForgeView）
+    3. 未建造 → 进 FacilityView 建造页（消耗仓库材料+金币）
+
+    调用方需先完成 init_db + get_or_create_player（守卫要读 player_id）。
+    """
+    from db.database import get_facility_level
+    gs = getattr(view.window, "game_state", None)
+    tut = getattr(gs, "tutorial", None)
+    pid = getattr(gs, "player_id", None)
+    # 未建造且非教程期 → 拦到设施页建造
+    if (tut is None or not tut.active) and pid and get_facility_level(pid, facility_id) < 1:
+        from views.facility_view import FacilityView
+        view.window.show_view(FacilityView(view.window_ref, facility_id))
+        return
+    view.window.show_view(target_factory(view.window_ref))
+
+
 class StartView(arcade.View):
     def __init__(self, window):
         super().__init__()
@@ -17,7 +41,9 @@ class StartView(arcade.View):
         self.wh_rect = arcade.XYWH(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - 110, 220, 50)
         self.market_rect = arcade.XYWH(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - 165, 220, 50)
         self.forge_rect = arcade.XYWH(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - 220, 220, 50)  # 锻造坊入口
-        self.codex_rect = arcade.XYWH(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - 275, 220, 50)  # 图鉴入口
+        # 图鉴与任务板同行左右并排（两枚按钮整体仍以屏幕中线居中）
+        self.codex_rect = arcade.XYWH(WINDOW_WIDTH // 2 - 110, WINDOW_HEIGHT // 2 - 275, 200, 50)  # 图鉴入口
+        self.mission_rect = arcade.XYWH(WINDOW_WIDTH // 2 + 110, WINDOW_HEIGHT // 2 - 275, 200, 50)  # 任务板入口
         self.net_rect = arcade.XYWH(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - 330, 220, 46)  # 局域网联机入口
         self.settings_gear_rect = arcade.XYWH(35, WINDOW_HEIGHT - 35, 40, 40)  # 左上角齿轮图标
         self.btn_hover = False
@@ -25,6 +51,7 @@ class StartView(arcade.View):
         self.market_hover = False
         self.forge_hover = False
         self.codex_hover = False  # 图鉴按钮悬停态
+        self.mission_hover = False  # 任务板按钮悬停态
         self.net_hover = False
         self.settings_hover = False
         # 新手教程（阶段 1）：向导弹窗状态
@@ -32,9 +59,38 @@ class StartView(arcade.View):
         self.tut_next_rect = None
         self.tut_skip_rect = None
         self.tut_next_hover = False
+        # 设施等级（阶段10：市场/锻造坊按钮的🔒置灰与 Lv.N 显示；避免 on_draw 每帧查库）
+        self._fac_levels = {}
+        self._refresh_facilities()
+
+    def _refresh_facilities(self):
+        """刷新设施等级缓存 {facility_id: level}（0 = 未建造）
+
+        读库失败（如首次启动 init_db 尚未建表）时退化为「全部未建造」，
+        保证开始界面（启动链上的第一个界面）不会因缺表崩掉。
+        """
+        gs = getattr(self.window_ref, "game_state", None)
+        pid = getattr(gs, "player_id", None) if gs is not None else None
+        if not pid:
+            self._fac_levels = {}
+            return
+        try:
+            from db.database import get_facilities
+            self._fac_levels = get_facilities(pid)
+        except Exception:
+            self._fac_levels = {}
+
+    def _fac_built(self, facility_id):
+        """该设施是否已建造（等级 >= 1）"""
+        return int(self._fac_levels.get(facility_id, 0)) >= 1
 
     def _build_tutorial_pages(self):
-        """新手教程阶段 1：开始界面向导页（介绍各入口 + 引导进入游戏）"""
+        """新手教程阶段 0：开始界面向导页（介绍各入口 + 引导进入游戏）
+
+        修改原因：阶段0扩充（2026-09-26）——在收尾的「准备出发」页之前追加
+        图鉴奖励与配方 / 任务板 / 设施建造与升级 三页（共 11 页）。页数不硬编码，
+        推进逻辑只用 len(self.tut_pages) 做上界判定，追加即生效。
+        """
         from views.tutorial import TutorialPage
         return [
             TutorialPage("欢迎来到《打怪升级》！", [
@@ -54,10 +110,12 @@ class StartView(arcade.View):
             TutorialPage("市场", [
                 "【市场】买卖物品：",
                 "购买更强力的武器装备、出售不需要的物品换取金币。",
+                "开局需先用仓库材料建造（教程期间可直接进入）。",
             ], highlight=self.market_rect),
             TutorialPage("锻造坊", [
                 "【锻造坊】升级装备：",
                 "用材料升级武器/装备，还可合成强力神器。",
+                "开局需先用仓库材料建造（教程期间可直接进入）。",
             ], highlight=self.forge_rect),
             TutorialPage("图鉴", [
                 "【图鉴】记录你遭遇过的怪物与获得过的物品：",
@@ -68,6 +126,28 @@ class StartView(arcade.View):
                 "【局域网联机】最多 4 人联机：",
                 "建房或加入好友房间，一起打怪一起撤离。",
             ], highlight=self.net_rect),
+            # ── 阶段0 扩充（2026-09-26）：图鉴档位领奖 + 配方解锁锻造 ──
+            TutorialPage("图鉴奖励与配方", [
+                "【图鉴】集齐条目还能拿奖励：",
+                "每类图鉴集齐 40% / 70% / 100% 三个档位，",
+                "各领一次金币 + 材料奖励。",
+                "条目集齐后会解锁对应的【锻造配方】，",
+                "去锻造坊就能合成那件装备。",
+            ], highlight=self.codex_rect),
+            # ── 阶段0 扩充（2026-09-26）：任务 / 成就入口 ──
+            TutorialPage("任务板", [
+                "【任务板】有两个 Tab：",
+                "每日任务每天刷新，做完点领奖拿金币与经验；",
+                "成就是累计型的，永久不清零。",
+                "打怪、采集、开宝箱、撤离、锻造都会累计进度。",
+            ], highlight=self.mission_rect),
+            # ── 阶段0 扩充（2026-09-26）：设施建造与升级 ──
+            TutorialPage("设施建造与升级", [
+                "【市场】和【锻造坊】要先花仓库材料 + 金币建造，",
+                "建造后开放，还能继续升级（最高 3 级）：",
+                "升级可拿折扣、回收加成、神器概率等增益。",
+                "（教程期间不建也能先进去看看。）",
+            ], highlight=self.forge_rect),
             TutorialPage("准备出发", [
                 "点击【下一步】开始你的第一场冒险！",
                 "（教程的每一步都会有提示指引）",
@@ -76,6 +156,8 @@ class StartView(arcade.View):
 
     def on_show_view(self):
         self.window.background_color = arcade.color.DARK_SLATE_GRAY
+        # 设施等级刷新（阶段10：从设施页建造/升级后返回，按钮🔒与 Lv.N 立即生效）
+        self._refresh_facilities()
         # 新手教程：回大厅时若未完成（撤离失败/中途返回/关游戏重开），从头开始
         tut = getattr(self.window.game_state, "tutorial", None)
         if tut is not None and tut.active:
@@ -144,29 +226,49 @@ class StartView(arcade.View):
             arcade.color.WHITE, size=22, anchor_x="center", anchor_y="center",
         )
 
-        # 市场按钮
-        market_color = arcade.color.PURPLE if self.market_hover else (80, 40, 100)
+        # 市场按钮（阶段10：未建造置灰🔒，点击先进设施页建造；已建造右侧显示 Lv.N）
+        mkt_built = self._fac_built("market")
+        if mkt_built:
+            market_color = arcade.color.PURPLE if self.market_hover else (80, 40, 100)
+        else:
+            market_color = (105, 105, 115) if self.market_hover else arcade.color.GRAY
         arcade.draw_rect_filled(self.market_rect, market_color)
         arcade.draw_rect_outline(self.market_rect, arcade.color.WHITE, border_width=2)
         # 持久 Text 对象，避免 draw_text 每帧重建纹理
         self._tc.text(
             "btn_market",
-            "市 场",
+            "市 场" if mkt_built else "🔒 市 场（未建造）",
             self.market_rect.center_x, self.market_rect.center_y,
-            arcade.color.WHITE, size=22, anchor_x="center", anchor_y="center",
+            arcade.color.WHITE, size=22 if mkt_built else 16, anchor_x="center", anchor_y="center",
         )
+        if mkt_built:
+            self._tc.text(
+                "btn_market_lv", f"Lv.{int(self._fac_levels.get('market', 0))}",
+                self.market_rect.right - 14, self.market_rect.center_y,
+                arcade.color.GOLD, size=13, anchor_x="right", anchor_y="center",
+            )
 
-        # 锻造坊按钮（消耗Lv.5+材料合成高级装备/神器）
-        forge_color = (160, 60, 40) if self.forge_hover else (110, 40, 30)
+        # 锻造坊按钮（阶段10：同市场；内含 Lv.5+ 材料合成高级装备/神器）
+        forge_built = self._fac_built("forge")
+        if forge_built:
+            forge_color = (160, 60, 40) if self.forge_hover else (110, 40, 30)
+        else:
+            forge_color = (105, 105, 115) if self.forge_hover else arcade.color.GRAY
         arcade.draw_rect_filled(self.forge_rect, forge_color)
         arcade.draw_rect_outline(self.forge_rect, arcade.color.WHITE, border_width=2)
         # 持久 Text 对象，避免 draw_text 每帧重建纹理
         self._tc.text(
             "btn_forge",
-            "锻 造 坊",
+            "锻 造 坊" if forge_built else "🔒 锻 造 坊（未建造）",
             self.forge_rect.center_x, self.forge_rect.center_y,
-            arcade.color.WHITE, size=22, anchor_x="center", anchor_y="center",
+            arcade.color.WHITE, size=22 if forge_built else 16, anchor_x="center", anchor_y="center",
         )
+        if forge_built:
+            self._tc.text(
+                "btn_forge_lv", f"Lv.{int(self._fac_levels.get('forge', 0))}",
+                self.forge_rect.right - 14, self.forge_rect.center_y,
+                arcade.color.GOLD, size=13, anchor_x="right", anchor_y="center",
+            )
 
         # 图鉴按钮（查看怪物/装备/资源图鉴）
         codex_color = (60, 90, 160) if self.codex_hover else (45, 65, 115)
@@ -177,6 +279,25 @@ class StartView(arcade.View):
             "btn_codex",
             "图 鉴",
             self.codex_rect.center_x, self.codex_rect.center_y,
+            arcade.color.WHITE, size=22, anchor_x="center", anchor_y="center",
+        )
+
+        # 任务板按钮（每日任务 + 成就领奖，位置样式仿图鉴按钮）
+        mission_color = (150, 110, 40) if self.mission_hover else (110, 80, 30)
+        # 渲染铁律：禁线框描边，用「白色实心底 + 内缩 2px 实心色块」等效出 2px 白边
+        arcade.draw_rect_filled(self.mission_rect, arcade.color.WHITE)
+        arcade.draw_rect_filled(
+            arcade.XYWH(
+                self.mission_rect.center_x, self.mission_rect.center_y,
+                self.mission_rect.width - 4, self.mission_rect.height - 4,
+            ),
+            mission_color,
+        )
+        # 持久 Text 对象，避免 draw_text 每帧重建纹理
+        self._tc.text(
+            "btn_mission",
+            "任 务",
+            self.mission_rect.center_x, self.mission_rect.center_y,
             arcade.color.WHITE, size=22, anchor_x="center", anchor_y="center",
         )
 
@@ -203,12 +324,19 @@ class StartView(arcade.View):
         )
 
         # 底部提示（联机按钮占用了底部空间，提示上移）
+        # 阶段10：悬停未建造的市场/锻造坊按钮时改为「点击建造：XX」引导
+        hint_text = "WASD移动 | 鼠标瞄准攻击 | 击杀怪物获取资源"
+        hint_color = arcade.color.GRAY
+        if self.market_hover and not mkt_built:
+            hint_text, hint_color = "点击建造：市场（需仓库材料 + 金币）", arcade.color.GOLD
+        elif self.forge_hover and not forge_built:
+            hint_text, hint_color = "点击建造：锻造坊（需仓库材料 + 金币）", arcade.color.GOLD
         # 持久 Text 对象，避免 draw_text 每帧重建纹理
         self._tc.text(
             "hint",
-            "WASD移动 | 鼠标瞄准攻击 | 击杀怪物获取资源",
+            hint_text,
             WINDOW_WIDTH // 2, WINDOW_HEIGHT - 30,
-            arcade.color.GRAY, size=12, anchor_x="center",
+            hint_color, size=12, anchor_x="center",
         )
 
         # 新手教程（阶段 1）：向导弹窗覆盖层（画在最上层）
@@ -232,6 +360,7 @@ class StartView(arcade.View):
         self.market_hover = self.market_rect.point_in_rect((x, y))
         self.forge_hover = self.forge_rect.point_in_rect((x, y))
         self.codex_hover = self.codex_rect.point_in_rect((x, y))  # 图鉴按钮悬停
+        self.mission_hover = self.mission_rect.point_in_rect((x, y))  # 任务板按钮悬停
         self.net_hover = self.net_rect.point_in_rect((x, y))
         self.settings_hover = self.settings_gear_rect.point_in_rect((x, y))
 
@@ -284,13 +413,13 @@ class StartView(arcade.View):
             self.window.show_view(LobbyView(self.window_ref))
             return
 
-        # 锻造坊按钮
+        # 锻造坊按钮（阶段10：过 _enter_facility 守卫——未建造先进设施页）
         if self.forge_rect.point_in_rect((x, y)):
             init_db()
             gs = self.window.game_state
             gs.player_id = get_or_create_player(gs.player_name)
             from views.forge_view import ForgeView
-            self.window.show_view(ForgeView(self.window_ref))
+            _enter_facility(self, "forge", ForgeView)
             return
 
         # 图鉴按钮
@@ -302,6 +431,15 @@ class StartView(arcade.View):
             self.window.show_view(CodexView(self.window_ref))
             return
 
+        # 任务板按钮（每日任务 + 成就领奖）
+        if self.mission_rect.point_in_rect((x, y)):
+            init_db()
+            gs = self.window.game_state
+            gs.player_id = get_or_create_player(gs.player_name)
+            from views.mission_view import MissionView
+            self.window.show_view(MissionView(self.window_ref))
+            return
+
         # 仓库按钮
         if self.wh_rect.point_in_rect((x, y)):
             init_db()
@@ -311,13 +449,13 @@ class StartView(arcade.View):
             self.window.show_view(WarehouseView(self.window_ref))
             return
 
-        # 市场按钮
+        # 市场按钮（阶段10：过 _enter_facility 守卫——未建造先进设施页）
         if self.market_rect.point_in_rect((x, y)):
             init_db()
             gs = self.window.game_state
             gs.player_id = get_or_create_player(gs.player_name)
             from views.market_view import MarketView
-            self.window.show_view(MarketView(self.window_ref))
+            _enter_facility(self, "market", MarketView)
             return
 
         # 开始游戏按钮

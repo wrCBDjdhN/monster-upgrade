@@ -3,20 +3,31 @@
 - 4 个分类 Tab（怪物/武器/装备/药水），顶部切换
 - 未解锁条目显示「？？？」并隐藏全部数值；解锁条目展示完整详情
 - 右侧详情面板展示选中条目的完整信息
+- 档位奖励区（阶段7）：3 个固定档位行，阈值按「该类条目总数」比例动态取
+  （config.codex_tiers_for），进度分母 = entities.forge_recipes.get_codex_category_total
 - 条目较多时支持滚轮滚动
 - 返回：按钮 + ESC → back_view（无则 StartView，延迟导入）
 """
 
+import math
+
 import arcade
 from config import WINDOW_WIDTH, WINDOW_HEIGHT
+from config import codex_tiers_for, codex_tier_reward, CODEX_CLAIM_COOLDOWN
+from entities.forge_recipes import get_codex_category_total, get_codex_countable_ids
 from entities.monster_defs import (
     MONSTER_CONFIGS, BOSS_SKILLS, SKILL_PROMPT_CONFIG,
-    get_all_monster_class_names, is_melee_monster, is_ranged_monster,
+    is_melee_monster, is_ranged_monster,
 )
 from entities.weapon_defs import ALL_WEAPONS
 from entities.equipment_defs import HELMETS, ARMORS, BACKPACKS, POTIONS
+from entities.resource_defs import RESOURCES
 from views.text_cache import TextCache
 from game.sound_manager import sound_manager
+
+
+# Tab 名 → 图鉴类别键（与 db.codex_unlocks.category 一致）
+TAB_CAT_KEYS = {"怪物": "monster", "武器": "weapon", "装备": "equipment", "药水": "potion"}
 
 
 # 怪物类名 → 中文名映射（游戏内无统一名称表，图鉴本地维护一份）
@@ -37,6 +48,14 @@ _MONSTER_NAMES = {
 }
 
 
+def _find_equipment_def(item_id: str) -> dict:
+    """在 头盔/护甲/背包 三张表里找装备定义（条目集合已由 forge_recipes 保证存在）"""
+    for table in (HELMETS, ARMORS, BACKPACKS):
+        if item_id in table:
+            return table[item_id]
+    return {}  # 理论不可达：get_codex_countable_ids 已过滤掉 recipe_only
+
+
 class CodexView(arcade.View):
     """图鉴页面：4 个分类 Tab，锁定条目显示？？？，解锁条目展示完整详情"""
 
@@ -50,6 +69,13 @@ class CodexView(arcade.View):
     ROW_W = 620                          # 列表宽度
     PANEL_X = 690                        # 详情面板左边界
     PANEL_W = 550                        # 详情面板宽度
+    # ── 档位奖励区（阶段7：列表区顶部下移，腾出固定高度显示 3 个档位行）──
+    TIER_ROW_H = 26                      # 档位行高
+    TIER_ROWS_H = 3 * TIER_ROW_H + 12     # 档位区总高
+    LIST_TOP = CONTENT_TOP - TIER_ROWS_H  # 列表区顶部（档位区下方）
+    # 飘字（领取奖励提示）
+    TOAST_LIFE = 1.6                     # 飘字存活秒数
+    TOAST_RISE = 40                      # 飘字每秒上浮像素
 
     def __init__(self, window, back_view=None):
         super().__init__()
@@ -80,42 +106,100 @@ class CodexView(arcade.View):
         self._selected = 0      # 选中条目下标
         self.row_hover = -1     # 悬停条目下标（-1=无）
         self.row_rects = []     # [(rect, 条目下标)]（on_draw 时按滚动位置重建）
+        # 档位奖励（阶段7）：行数据 + 命中区 + 悬停下标
+        self._tier_rows = []    # [{tier, gold, res, count, total, claimed}]
+        self._tier_rects = []   # [(rect, tier)]
+        self._tier_hover = -1
+        self._claim_cd = 0.0    # 领取冷却（秒，防连点重复提交）
+        self._toasts = []       # 奖励飘字 [{text, color, age}]
+        self._pulse = 0.0       # 可领档位行呼吸相位
         self._rebuild()
 
     # ── 数据构建 ──────────────────────────────────────────────
 
     def _rebuild(self):
-        """按当前 Tab 重建条目列表（内容结构变化时调用）"""
+        """按当前 Tab 重建条目列表（内容结构变化时调用）
+
+        条目集合取自 entities.forge_recipes.get_codex_countable_ids（进度口径唯一来源）：
+        与 db.codex.get_codex_count 的计数分母、锻造坊「集齐」目标完全同源，
+        recipe_only 配方专属产物既不进列表也不计数/分母
+        （否则「已解锁 N/总数」会溢出、进度显示对不上）。
+        """
         self._tc.clear()
         self._entries = []
-        if self._tab == "怪物":
-            for cls in get_all_monster_class_names():
-                self._entries.append(("monster", cls, _MONSTER_NAMES.get(cls, cls), MONSTER_CONFIGS[cls]))
-        elif self._tab == "武器":
-            for item_id, wdef in ALL_WEAPONS.items():
-                self._entries.append(("weapon", item_id, wdef.get("name", item_id), wdef))
-        elif self._tab == "装备":
-            for table in (HELMETS, ARMORS, BACKPACKS):
-                for item_id, edef in table.items():
-                    self._entries.append(("equipment", item_id, edef.get("name", item_id), edef))
-        else:  # 药水
-            for item_id, pdef in POTIONS.items():
-                self._entries.append(("potion", item_id, pdef.get("name", item_id), pdef))
+        cat_key = TAB_CAT_KEYS.get(self._tab, "")
+        for item_id in get_codex_countable_ids(cat_key):
+            if cat_key == "monster":
+                self._entries.append((cat_key, item_id, _MONSTER_NAMES.get(item_id, item_id),
+                                      MONSTER_CONFIGS[item_id]))
+            elif cat_key == "weapon":
+                wdef = ALL_WEAPONS[item_id]
+                self._entries.append((cat_key, item_id, wdef.get("name", item_id), wdef))
+            elif cat_key == "equipment":
+                edef = _find_equipment_def(item_id)
+                self._entries.append((cat_key, item_id, edef.get("name", item_id), edef))
+            else:  # 药水
+                pdef = POTIONS[item_id]
+                self._entries.append((cat_key, item_id, pdef.get("name", item_id), pdef))
         # 读取当前玩家解锁集合（无玩家时为空集）
         self._unlocked = self._get_unlocked()
         # 切换分类：滚动归零、选中第一条
         self.scroll_offset = 0.0
         self._selected = 0
         self.row_rects = []
+        # 档位奖励随分类刷新（进度/已领状态都按当前类别查库）
+        self._refresh_tiers()
 
-    def _get_unlocked(self) -> set:
-        """读取当前玩家的图鉴解锁集合；无玩家时返回空集
+    def _player_id(self):
+        """读取当前玩家 id；无玩家时返回 None
 
         用 window_ref（__init__ 已赋值）而非 self.window：后者在 show_view 前
-        可能未就绪，会导致解锁集合读取失败、已解锁条目显示为空白。
+        可能未就绪。
         """
         gs = getattr(self.window_ref, "game_state", None)
-        pid = getattr(gs, "player_id", None) if gs is not None else None
+        return getattr(gs, "player_id", None) if gs is not None else None
+
+    def _refresh_tiers(self):
+        """按当前 Tab 刷新档位奖励行数据（进度 X/Y + 已领标记）
+
+        档位阈值与奖励数值全部取自 config：阈值按「该类条目总数」比例动态取
+        （config.codex_tiers_for → 怪物 6/10/13、武器 10/18/25、装备 8/14/19、药水 4/6/8），
+        奖励按档位序号映射（config.codex_tier_reward），
+        分母统一取 entities.forge_recipes.get_codex_category_total
+        （= get_codex_countable_ids 长度，与 db 计数/锻造集齐目标同一数字）。
+        本视图不硬编码任何数值。
+        """
+        self._tier_rows = []
+        pid = self._player_id()
+        if not pid:
+            return
+        from db.database import get_codex_count, get_claimed_rewards
+        cat_key = TAB_CAT_KEYS.get(self._tab, "")
+        count = get_codex_count(pid, cat_key)
+        claimed = get_claimed_rewards(pid)
+        total = get_codex_category_total(cat_key)
+        for tier in codex_tiers_for(total):
+            reward = codex_tier_reward(tier, total) or {"gold": 0, "res": {}}
+            self._tier_rows.append({
+                "tier": tier,
+                "gold": reward["gold"],
+                "res": reward["res"],
+                "count": count,
+                "total": total,
+                "claimed": (cat_key, tier) in claimed,
+            })
+
+    def _tier_state(self, row: dict) -> str:
+        """档位行状态：claimed=已领 / can=可领 / locked=未达"""
+        if row["claimed"]:
+            return "claimed"
+        if row["count"] >= row["tier"]:
+            return "can"
+        return "locked"
+
+    def _get_unlocked(self) -> set:
+        """读取当前玩家的图鉴解锁集合；无玩家时返回空集"""
+        pid = self._player_id()
         if not pid:
             return set()
         from db.database import get_codex_unlocks
@@ -129,17 +213,22 @@ class CodexView(arcade.View):
 
     def on_show_view(self):
         self.window.background_color = (30, 25, 40)
+        # 每次进入刷新档位奖励（解锁进度/已领状态可能在上次浏览期间变化）
+        self._refresh_tiers()
 
     def on_draw(self):
         self.clear()
         # ── 固定头部：标题 + 进度 + 提示 ──
         self._tc.text("header_title", "图 鉴", WINDOW_WIDTH // 2, WINDOW_HEIGHT - 50,
                       arcade.color.GOLD, 30, anchor_x="center")
+        # 进度分子：按口径条目列表（get_codex_countable_ids，排除 recipe_only 产物）
+        #   过滤已解锁；分母取 get_codex_category_total（与分子、db 计数、锻造集齐目标同一数字）
         unlocked_count = sum(1 for e in self._entries if self._is_unlocked(e[0], e[1]))
-        self._tc.text("header_progress", f"已解锁 {unlocked_count}/{len(self._entries)}",
+        total_count = get_codex_category_total(TAB_CAT_KEYS.get(self._tab, ""))
+        self._tc.text("header_progress", f"已解锁 {unlocked_count}/{total_count}",
                       WINDOW_WIDTH // 2, WINDOW_HEIGHT - 85,
                       arcade.color.YELLOW, 16, anchor_x="center")
-        self._tc.text("header_hint", "点击条目查看详情 | 滚轮滚动 | ESC 返回",
+        self._tc.text("header_hint", "点击条目查看详情 | 档位奖励行可点击领取 | 滚轮滚动 | ESC 返回",
                       WINDOW_WIDTH // 2, WINDOW_HEIGHT - 105,
                       arcade.color.GRAY, 11, anchor_x="center")
 
@@ -158,10 +247,11 @@ class CodexView(arcade.View):
                           15, anchor_x="center", anchor_y="center")
 
         # ── 条目列表（带滚动偏移，仅绘制可见行）──
+        # 列表区顶部 = LIST_TOP（原 CONTENT_TOP 下方已让出档位奖励区）
         self.row_rects = []
-        y = self.CONTENT_TOP + self.scroll_offset
+        y = self.LIST_TOP + self.scroll_offset
         for i, (cat_key, item_id, name, _def) in enumerate(self._entries):
-            if self.CONTENT_BOTTOM <= y <= self.CONTENT_TOP:
+            if self.CONTENT_BOTTOM <= y <= self.LIST_TOP:
                 # ROW_X 是列表左边界；XYWH 首参是中心 x，需加半宽换算，
                 # 否则矩形中心落在 40、名称画到屏幕外 → 解锁后整行空白
                 rect = arcade.XYWH(self.ROW_X + self.ROW_W / 2, y, self.ROW_W, self.ROW_H)
@@ -169,8 +259,14 @@ class CodexView(arcade.View):
                 self._draw_row(rect, i, cat_key, item_id, name, _def)
             y -= self.ROW_STEP
 
+        # ── 档位奖励区（阶段7，固定不随列表滚动）──
+        self._draw_tiers()
+
         # ── 右侧详情面板 ──
         self._draw_detail()
+
+        # ── 奖励飘字 ──
+        self._draw_toasts()
 
         # ── 返回按钮（固定）──
         back_color = arcade.color.DARK_RED if self.back_hover else (110, 30, 30)
@@ -202,6 +298,109 @@ class CodexView(arcade.View):
         if not unlocked:
             self._tc.text(f"row_lock_{i}", "未解锁", rect.right - 10, rect.center_y,
                           arcade.color.DARK_GRAY, 11, anchor_x="right", anchor_y="center")
+
+    # ── 档位奖励区（阶段7：db.codex.claim_codex_reward 领奖）──────────
+
+    def _draw_tiers(self):
+        """绘制当前分类的档位奖励行：可领（亮）/已领（灰）/未达（锁）
+
+        固定区（不随列表滚动），绘制同时重建命中区供 on_mouse_press 判定。
+        渲染遵守铁律：一律不透明实心填充（禁空心/线框）。
+        """
+        self._tier_rects = []
+        for i, row in enumerate(self._tier_rows):
+            cy = self.CONTENT_TOP - 8 - i * self.TIER_ROW_H
+            rect = arcade.XYWH(self.ROW_X + self.ROW_W / 2, cy, self.ROW_W, self.TIER_ROW_H - 4)
+            state = self._tier_state(row)
+            if state == "claimed":
+                bg, fg, status = (58, 58, 64), arcade.color.DARK_GRAY, "已领取"
+            elif state == "can":
+                # 可领行做轻微呼吸提示（亮度在 74~96 间摆动，悬停再提一档）
+                glow = int(74 + 22 * (0.5 + 0.5 * math.sin(self._pulse * 4)))
+                if self._tier_hover == row["tier"]:
+                    glow = min(120, glow + 24)
+                bg, fg, status = (glow, int(glow * 0.86), 28), arcade.color.GOLD, "领 取"
+                if self._claim_cd > 0.0:
+                    # 领取后短暂禁用（config.CODEX_CLAIM_COOLDOWN），并给出冷却提示
+                    status = "冷却中"
+            else:
+                bg, fg, status = (44, 46, 52), arcade.color.GRAY, f"需 {row['tier']} 条"
+            arcade.draw_rect_filled(rect, bg)
+            # 奖励文案：金币 + 仓库资源（资源中文名取 RESOURCES，禁硬编码，同 forge_view 费用行）
+            res_txt = " ".join(
+                f"{RESOURCES.get(rid, {}).get('name', rid)}×{qty}"
+                for rid, qty in row["res"].items()
+            )
+            self._tc.text(f"tier_{i}",
+                          f"{row['tier']} 条   金币 +{row['gold']}   {res_txt}",
+                          rect.left + 12, rect.center_y, fg, 13, anchor_y="center")
+            self._tc.text(f"tier_prog_{i}", f"已解锁 {row['count']}/{row['total']}",
+                          rect.left + 330, rect.center_y, fg, 12, anchor_y="center")
+            self._tc.text(f"tier_state_{i}", status, rect.right - 12, rect.center_y,
+                          fg, 13, anchor_x="right", anchor_y="center")
+            self._tier_rects.append((rect, row["tier"]))
+
+    def _draw_toasts(self):
+        """奖励飘字：向上浮动并渐隐（色值向背景色插值，保持不透明实心渲染）"""
+        bg = (30, 25, 40)  # 与 on_show_view 的背景色一致
+        for i, t in enumerate(self._toasts):
+            fade = max(0.0, 1.0 - max(0.0, t["age"] - (self.TOAST_LIFE - 0.6)) / 0.6)
+            color = tuple(
+                int(bg[c] + (t["color"][c] - bg[c]) * fade) for c in range(3)
+            )
+            self._tc.text(f"toast_{i}", t["text"], WINDOW_WIDTH // 2,
+                          self.CONTENT_TOP - 10 - t["age"] * self.TOAST_RISE,
+                          color, 20, anchor_x="center", anchor_y="center", bold=True)
+
+    def _claim_tier(self, tier: int):
+        """领取某档位奖励：claim_codex_reward → add_gold + 资源入库 → 置灰重绘
+
+        冷却期（config.CODEX_CLAIM_COOLDOWN）内的点击直接忽略，防连点重复提交；
+        db 层 claim_codex_reward 自身幂等（PK 冲突返回 None），双保险。
+        """
+        if self._claim_cd > 0.0:
+            return
+        pid = self._player_id()
+        if not pid:
+            return
+        from db.database import claim_codex_reward, add_gold, add_warehouse_item
+        res = claim_codex_reward(pid, TAB_CAT_KEYS.get(self._tab, ""), tier)
+        self._claim_cd = CODEX_CLAIM_COOLDOWN
+        if not res:
+            # 未达档位 / 已领取过（db 层判定）
+            self._toast("该档位不可领取", (255, 160, 120))
+            sound_manager.play_ui()
+            return
+        gold = int(res.get("gold", 0))
+        res_map = res.get("res", {}) or {}
+        if gold > 0:
+            add_gold(pid, gold)
+        # 资源入仓库：口径同 game/evac.commit_run_to_warehouse（item_type="resource"）
+        for rid, qty in res_map.items():
+            add_warehouse_item(pid, "resource", rid, int(qty))
+        res_txt = " ".join(
+            f"{RESOURCES.get(rid, {}).get('name', rid)}×{int(qty)}"
+            for rid, qty in res_map.items()
+        )
+        self._toast(f"领取成功  金币 +{gold}  {res_txt}", arcade.color.GOLD)
+        sound_manager.play_gold_pickup()
+        # 重新查库刷新档位行（claimed=True → 置灰）
+        self._refresh_tiers()
+
+    def _toast(self, text: str, color):
+        """新增一条飘字（最多同时 4 条，超出丢弃最旧的）"""
+        self._toasts.append({"text": text, "color": color, "age": 0.0})
+        if len(self._toasts) > 4:
+            self._toasts.pop(0)
+
+    def on_update(self, delta_time: float = 1 / 60):
+        """推进领取冷却、呼吸相位与飘字计时"""
+        self._pulse += delta_time
+        if self._claim_cd > 0.0:
+            self._claim_cd = max(0.0, self._claim_cd - delta_time)
+        for t in self._toasts:
+            t["age"] += delta_time
+        self._toasts = [t for t in self._toasts if t["age"] < self.TOAST_LIFE]
 
     # ── 详情面板 ──────────────────────────────────────────────
 
@@ -289,7 +488,7 @@ class CodexView(arcade.View):
         if cls in BOSS_SKILLS:
             return [(s.get("name", ""), s.get("description", "")) for s in BOSS_SKILLS[cls]]
         prompt = SKILL_PROMPT_CONFIG.get(cls, {})
-        return [(s.get("name", ""), "") for s in prompt.get("skills", [])]
+        return [(s.get("name", ""), s.get("description", "")) for s in prompt.get("skills", [])]
 
     def _draw_weapon_detail(self, wdef, x, y):
         """武器详情：类型/伤害/攻速/射程/特效"""
@@ -390,10 +589,15 @@ class CodexView(arcade.View):
     # ── 交互 ──────────────────────────────────────────────────
 
     def on_mouse_motion(self, x, y, dx, dy):
-        """更新悬停状态：返回按钮 / Tab / 条目行"""
+        """更新悬停状态：返回按钮 / Tab / 档位奖励行 / 条目行"""
         self.back_hover = self.back_rect.point_in_rect((x, y))
         for name, rect in self.tab_rects.items():
             self.tab_hover[name] = rect.point_in_rect((x, y))
+        self._tier_hover = -1
+        for rect, tier in self._tier_rects:
+            if rect.point_in_rect((x, y)):
+                self._tier_hover = tier
+                break
         self.row_hover = -1
         for rect, idx in self.row_rects:
             if rect.point_in_rect((x, y)):
@@ -403,7 +607,7 @@ class CodexView(arcade.View):
     def on_mouse_scroll(self, x, y, scroll_x, scroll_y):
         """滚轮滚动条目列表（条目较多超出屏幕时）"""
         self.scroll_offset -= scroll_y * 30
-        max_scroll = max(0, len(self._entries) * self.ROW_STEP - (self.CONTENT_TOP - self.CONTENT_BOTTOM))
+        max_scroll = max(0, len(self._entries) * self.ROW_STEP - (self.LIST_TOP - self.CONTENT_BOTTOM))
         self.scroll_offset = max(0, min(max_scroll, self.scroll_offset))
 
     def on_mouse_press(self, x, y, button, modifiers):
@@ -414,6 +618,11 @@ class CodexView(arcade.View):
                 if name != self._tab:
                     self._tab = name
                     self._rebuild()
+                return
+        # 档位奖励行领取（固定区，先于列表判定）
+        for rect, tier in self._tier_rects:
+            if rect.point_in_rect((x, y)):
+                self._claim_tier(tier)
                 return
         # 条目选中（仅可见行）
         for rect, idx in self.row_rects:

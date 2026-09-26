@@ -14,6 +14,7 @@ draw_arc_outline / draw_line 等空心或线框绘制——透明矢量层会导
 import math
 import arcade
 
+from config import EVENT_AIRDROP_CHEST_COLOR, EVENT_AIRDROP_CHEST_TRIM, EVENT_CARAVAN_COLOR, EVENT_CARAVAN_SIGN_SIZE
 from game.batch_shapes import ShapeBatch
 
 
@@ -314,9 +315,30 @@ def draw_drop_icon(drop, batch=None):
 # ===================== 宝箱 =====================
 
 def draw_chest(chest, batch=None):
-    """用不透明实心形状绘制宝箱。"""
+    """用不透明实心形状绘制宝箱。
+
+    阶段4 空投补给箱（AirdropChest，is_airdrop=True）走橙色系 + 高亮饰条配色，
+    与普通金黄宝箱一眼可辨；仍然全部为实心矩形（禁线框/空心）。
+    """
     cx, cy = chest.center_x, chest.center_y
     opened = getattr(chest, "opened", False)
+    if getattr(chest, "is_airdrop", False):
+        # 空投箱：橙色箱体 + 亮黄饰条 + 亮色锁扣
+        if batch is not None:
+            batch.rect(cx, cy, 24, 20, EVENT_AIRDROP_CHEST_COLOR)
+            if opened:
+                batch.rect(cx, cy - 12, 24, 8, (120, 66, 26))
+            else:
+                batch.rect(cx, cy - 6, 24, 8, EVENT_AIRDROP_CHEST_TRIM)
+                batch.rect(cx, cy, 6, 6, (255, 250, 220))
+        else:
+            arcade.draw_rect_filled(arcade.XYWH(cx, cy, 24, 20), EVENT_AIRDROP_CHEST_COLOR)
+            if opened:
+                arcade.draw_rect_filled(arcade.XYWH(cx, cy - 12, 24, 8), (120, 66, 26))
+            else:
+                arcade.draw_rect_filled(arcade.XYWH(cx, cy - 6, 24, 8), EVENT_AIRDROP_CHEST_TRIM)
+                arcade.draw_rect_filled(arcade.XYWH(cx, cy, 6, 6), (255, 250, 220))
+        return
     if batch is not None:
         batch.rect(cx, cy, 22, 18, (150, 95, 45))
         if opened:
@@ -331,3 +353,23 @@ def draw_chest(chest, batch=None):
         else:
             arcade.draw_rect_filled(arcade.XYWH(cx, cy - 6, 22, 8), (120, 75, 38))
             arcade.draw_rect_filled(arcade.XYWH(cx, cy, 6, 6), (220, 180, 60))
+
+
+def draw_caravan_sign(point, batch=None):
+    """商队交互点招牌：青色实心立柱 + 顶板（阶段4 caravan 事件）
+
+    point 为 game/map_events.CaravanPoint（非 Sprite，只有中心坐标）。
+    招牌只画实心块，文字交由渲染层的世界标签绘制（同宝箱「按E打开」口径）。
+    """
+    cx, cy = point.center_x, point.center_y
+    half = EVENT_CARAVAN_SIGN_SIZE / 2
+    if batch is not None:
+        batch.rect(cx, cy, EVENT_CARAVAN_SIGN_SIZE, EVENT_CARAVAN_SIGN_SIZE, EVENT_CARAVAN_COLOR)
+        # 顶板压深色底，文字压在上面仍清晰
+        batch.rect(cx, cy + half, EVENT_CARAVAN_SIGN_SIZE + 6, 8, (30, 120, 140))
+        batch.rect(cx, cy - half, 6, EVENT_CARAVAN_SIGN_SIZE, (60, 170, 190))
+    else:
+        arcade.draw_rect_filled(arcade.XYWH(cx, cy, EVENT_CARAVAN_SIGN_SIZE, EVENT_CARAVAN_SIGN_SIZE),
+                                EVENT_CARAVAN_COLOR)
+        arcade.draw_rect_filled(arcade.XYWH(cx, cy + half, EVENT_CARAVAN_SIGN_SIZE + 6, 8), (30, 120, 140))
+        arcade.draw_rect_filled(arcade.XYWH(cx, cy - half, 6, EVENT_CARAVAN_SIGN_SIZE), (60, 170, 190))

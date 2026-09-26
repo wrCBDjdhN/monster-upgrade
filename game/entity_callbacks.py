@@ -9,14 +9,45 @@ from config import (
     ROCKET_PAD_DESTROY_NORMAL_LV_MIN, ROCKET_PAD_DESTROY_NORMAL_LV_MAX,
     ROCKET_PAD_DESTROY_ARTIFACT_LV_MIN, ROCKET_PAD_DESTROY_ARTIFACT_LV_MAX,
     EXP_KILL_BASE, EXP_BOSS_MULT, EXP_HARVEST, EXP_CHEST,
+    ELITE_EXP_MULT, ELITE_GOLD_BONUS, ELITE_MIN_WEAPON_LEVEL, ELITE_LABEL_COLOR,
+    BLESSING_CHEST_CHANCE, BLESSING_ELITE_GUARANTEE,
+    MONSTER_THEME_EQUIP,
     WINDOW_WIDTH, WINDOW_HEIGHT,
 )
 # 怪物元数据（武器颜色/掉落表键名/死亡粒子颜色）统一从 monster_defs.py 读取
 from entities.monster_defs import MONSTER_METADATA
+from entities.equipment_defs import ARMORS, HELMETS
 from game.loot import DropItem, roll_loot
 from game.sound_manager import sound_manager
 from game.effects import particle_system, floating_texts
 from game.render_helpers import draw_drop_icon
+
+
+# 阶段8 星级：单局统计可累加的计数键（carried_gold/evac 不在击杀路径累加，
+# 分别于撤离结算处定格，见 views/game_view.py 的 _settle_run_stars）
+RUN_STAT_COUNTERS = ("kills", "elite_kills", "boss_kills")
+
+
+def record_run_stat(view, key: str, amount: int = 1) -> None:
+    """累加本局统计（阶段8 星级判定的入参来源，唯一实现点）
+
+    与 game/mission_tracker.on_event 的防双计铁律同源：**唯一计数端 = 主机**
+    （solo 时「主机」即本地）。客户端一律不写——客户端的 on_monster_death 不运行，
+    此处再兜一层 net_mode 守卫，确保即便将来新增调用点也不会出现双端各计一次。
+    未知键显式告警后忽略（禁静默写脏键）。
+    """
+    if key not in RUN_STAT_COUNTERS:
+        print(f"[星级] record_run_stat 收到未知统计键 {key!r}，已忽略（合法键：{RUN_STAT_COUNTERS}）")
+        return
+    gs = getattr(getattr(view, "window", None), "game_state", None)
+    if gs is None or getattr(gs, "net_mode", "solo") == "client":
+        return
+    stats = getattr(view, "run_stats", None)  # run_stats 挂在 GameView 上（计划 Task 8.1 接口）
+    if stats is None:
+        stats = getattr(gs, "run_stats", None)
+    if not isinstance(stats, dict):
+        return
+    stats[key] = int(stats.get(key, 0)) + int(amount)
 
 
 def _award_exp(view, amount: int):
@@ -33,6 +64,18 @@ def _award_exp(view, amount: int):
     view._level_data = add_exp(gs.player_id, cid, amount)
 
 
+def grant_blessing_trigger(view, source: str, chance: float = 1.0) -> bool:
+    """阶段5 祝福触发闸门：按概率判定后登记一次待选祝福，返回是否登记成功
+
+    唯一职责是「判概率 + 调 GameView.grant_blessing_choice」，
+    面板打开与属性重算都在 views 层，这里不碰 arcade 对象。
+    chance>=1 视为保底（精英击杀口径，见 config.BLESSING_ELITE_GUARANTEE）。
+    """
+    if chance < 1.0 and random.random() >= chance:
+        return False
+    return bool(view.grant_blessing_choice(source))
+
+
 def _award_kill_exp(view, monster):
     """击杀怪物经验（各端本地结算，主机按 last_attacker_id 归属判定）
 
@@ -41,13 +84,42 @@ def _award_kill_exp(view, monster):
       时发放；客户端击杀由客户端经 DAMAGE_RESULT 目标血量归零感知发放（见 game_view）；
     - client：on_monster_death 不在客户端运行（怪物由快照驱动），不在此发放。
     - 经验值 = EXP_KILL_BASE ×（BOSS 则 ×EXP_BOSS_MULT）。
+
+    阶段6.2 任务进度（kill / elite_kill）也在此**经验守卫之前**发：
+    口径（用户拍板 2026-09-26）= 死亡一律发 kill，精英在此之外**另发** elite_kill
+    （两事件并行，各按各自 target 封顶）；BOSS 不另发事件，其死亡已由 kill 覆盖。
+    归属取 monster.last_attacker_id（主机权威攻击者），主机把客户端击杀的进度
+    单播给归属客户端（防双计铁律见 game/mission_tracker.py）；
+    放在守卫前是为了让「客户端击杀」也计入任务——经验是各端本地补发，任务必须统一由主机裁决。
+
+    阶段8 星级：run_stats 在**同一计数点**累加（kills / elite_kills / boss_kills），
+    与任务事件同点同源（同样取 last_attacker_id、同样只由主机写），口径见
+    game/level_progress.evaluate_stars；撤离成功后才在 GameView._settle_run_stars 里评星落库。
     """
+    attacker = int(getattr(monster, "last_attacker_id", 0) or 0)
+    # 阶段6.2 任务/成就进度（用户口径 2026-09-26：精英与 BOSS 均计入普通 kill——
+    # 死亡一律发 kill，精英另发 elite_kill（两事件并行，各按各自 target 封顶））
+    from game.mission_tracker import on_event as mission_on_event
+    is_elite = bool(getattr(monster, "is_elite", False))
+    mission_on_event(view, "kill", 1, attacker)
+    if is_elite:
+        mission_on_event(view, "elite_kill", 1, attacker)
+    # 阶段8 星级：与上面任务事件同点累加。kills 为**总击杀**（精英/BOSS 也计入总击杀，
+    # 另在 elite_kills / boss_kills 里各记一次），这样「击杀 ≥N」条件按总击杀口径判定。
+    record_run_stat(view, "kills", 1)
+    if is_elite:
+        record_run_stat(view, "elite_kills", 1)
+    if getattr(monster, "is_boss", False):
+        record_run_stat(view, "boss_kills", 1)
     gs = view.window.game_state
     if getattr(gs, "net_mode", "solo") == "host":
         # 主机：仅本端玩家击杀发放（客户端攻击者 id 为 1~3，非 0 时跳过）
-        if getattr(monster, "last_attacker_id", 0) != 0:
+        if attacker != 0:
             return
     amount = EXP_KILL_BASE * (EXP_BOSS_MULT if getattr(monster, "is_boss", False) else 1)
+    # 阶段3 精英词缀怪：经验再 ×ELITE_EXP_MULT（与 BOSS 倍率叠加，BOSS 不会被刷成精英）
+    if getattr(monster, "is_elite", False):
+        amount = int(amount * ELITE_EXP_MULT)
     _award_exp(view, amount)
 
 
@@ -101,9 +173,70 @@ def _on_rocket_boss_defeated(view, boss, pad):
                        arcade.color.GREEN, life=3.0)
 
 
+def _grant_elite_bonus(view, monster, loot):
+    """阶段3 精英词缀怪加奖：金币 ×ELITE_GOLD_BONUS + 必掉 1 件高等级装备
+
+    在既有掉落口径（roll_loot + 怪物自身装备掉落）之上做加奖，不改原有概率：
+    - 金币：把本次 loot 里的金币数量乘 ELITE_GOLD_BONUS；本次没掉金币则补一份，
+      保证「精英必掉加奖金币」这一承诺不会因随机空手而落空；
+    - 装备：从当前主题的护甲/头盔池各按权重择一，构造 Lv≥ELITE_MIN_WEAPON_LEVEL 的
+      掉落物（等级在 [ELITE_MIN_WEAPON_LEVEL, 主题上限] 间随机），补足精英的高价值回报。
+    """
+    theme = view.map_data.get("theme", "forest")
+    eq_cfg = MONSTER_THEME_EQUIP.get(theme, MONSTER_THEME_EQUIP["forest"])
+
+    # 金币加奖：乘算已有金币掉落，无金币则补一份（ELITE_GOLD_BONUS × 基础量）
+    gold_drops = [d for d in loot if d.item_type == "gold"]
+    if gold_drops:
+        for g in gold_drops:
+            g.quantity *= ELITE_GOLD_BONUS
+    else:
+        loot.append(DropItem(monster.center_x, monster.center_y + 20, "gold", "gold",
+                             10 * ELITE_GOLD_BONUS))
+
+    # 装备加奖：护甲池 / 头盔池各择一，凑够一件必掉（两池都空时退化为仅金币加奖）
+    from game.monster_utils import _weighted_choice
+    bonus_drops = []
+    # 等级上限取主题 gear_level（护甲/头盔同池同档），下界抬到 ELITE_MIN_WEAPON_LEVEL
+    level_cap = max(ELITE_MIN_WEAPON_LEVEL, eq_cfg["gear_level"][-1])
+    if eq_cfg.get("armor_pool"):
+        aid = _weighted_choice(eq_cfg["armor_pool"])
+        lvl = random.randint(ELITE_MIN_WEAPON_LEVEL, level_cap)
+        d = DropItem(monster.center_x, monster.center_y, "armor", aid, 1, level=lvl)
+        d.color = ARMORS[aid].get("color", (150, 150, 150))
+        bonus_drops.append(d)
+    if eq_cfg.get("helmet_pool"):
+        hid = _weighted_choice(eq_cfg["helmet_pool"])
+        lvl = random.randint(ELITE_MIN_WEAPON_LEVEL, level_cap)
+        d = DropItem(monster.center_x, monster.center_y, "helmet", hid, 1, level=lvl)
+        d.color = HELMETS[hid].get("color", (139, 90, 43))
+        bonus_drops.append(d)
+    loot.extend(bonus_drops)
+
+    # 精英击杀提示（紫色词缀色 + 紫色粒子，突出「精英」而非普通怪）
+    floating_texts.add(monster.center_x, monster.center_y + 40, "精英击杀!",
+                       ELITE_LABEL_COLOR, life=2.0, font_size=16, vy=60)
+    particle_system.emit(monster.center_x, monster.center_y, 26, ELITE_LABEL_COLOR,
+                         speed=190, life=0.8, size=5, gravity=60)
+    # 阶段5 祝福：精英击杀按 BLESSING_ELITE_GUARANTEE 保底触发一次待选
+    # （精英是本局的高价值目标，回报不打折；面板由 GameView 下一帧统一弹出）
+    grant_blessing_trigger(view, "elite", 1.0 if BLESSING_ELITE_GUARANTEE else 0.0)
+    # 阶段6 任务系统接入点已落地：elite_kill 事件统一在 _award_kill_exp 内发
+    # （击杀经验处 = 击杀计数唯一口径，归属取 last_attacker_id，与经验同源不再重复计数）
+
+
 def on_monster_death(view, monster):
     """怪物死亡回调"""
     # 新手教程：记录击杀数（游戏内引导推进用）
+    #
+    # 口径说明（2026-09-26 教程全覆盖核查结论，勿改成落库）：
+    # tut.kill_count 是 **TutorialState 的纯内存计数**，只被
+    # views/tutorial.draw_in_game_tutorial 读来决定横幅走到第几步，
+    # **不写任何 db**。正式任务/成就进度走的是另一条完全独立的路径
+    # （_award_kill_exp → game/mission_tracker.on_event，见该函数注释），
+    # 两条计数互不相干、也不互相回写——这正是「教程计数不得污染正式任务/
+    # 成就，且禁绕过 mission_tracker 直接落库」这条铁律的落地方式。
+    # 因此这里**不要**加任何 db 调用，也不要把 kill_count 转成 mission 事件。
     tut = getattr(view.window.game_state, "tutorial", None)
     if tut is not None and tut.active and tut.stage == 3:
         tut.kill_count += 1
@@ -159,6 +292,12 @@ def on_monster_death(view, monster):
         drop = DropItem(monster.center_x, monster.center_y, "helmet", helmet_item_id, 1, level=helmet_level)
         drop.color = helmet_color
         loot.append(drop)
+
+    # 阶段3 精英词缀怪加奖：金币加奖 + 必掉高等级装备（在 scatter 之前并入 loot）
+    # 两个标记任一命中即加奖：is_elite（精英本体，spawn_elite 置位）/
+    # elite_drop（计划约定的「必掉」标记），避免只判其一导致奖励漏发
+    if getattr(monster, "is_elite", False) or getattr(monster, "elite_drop", False):
+        _grant_elite_bonus(view, monster, loot)
 
     # 分散掉落物位置，避免重叠
     scatter_drops(loot, monster.center_x, monster.center_y, obstacles=view.obstacle_list)
@@ -239,7 +378,8 @@ def handle_harvestable_combat(view, dt):
                 proj.remove_from_sprite_lists()
                 if not h.alive:
                     # 采集经验按攻击者归属：客户端弹丸（owner_net_id!=0）不发给本端主机
-                    on_harvestable_destroyed(view, h, award_exp=(proj.owner_net_id == 0))
+                    on_harvestable_destroyed(view, h, award_exp=(proj.owner_net_id == 0),
+                                             credit_net_id=proj.owner_net_id)
                 break
 
     # 激光命中环境物（陨星炮：路径上的矿石/树木/石头持续受到完整伤害）
@@ -258,20 +398,27 @@ def handle_harvestable_combat(view, dt):
                 floating_texts.add_damage(view.player.center_x, view.player.center_y + 30, actual)
             if not h.alive:
                 # 采集经验按攻击者归属：客户端激光（owner_net_id!=0）不发给本端主机
-                on_harvestable_destroyed(view, h, award_exp=(beam.owner_net_id == 0))
+                on_harvestable_destroyed(view, h, award_exp=(beam.owner_net_id == 0),
+                                         credit_net_id=beam.owner_net_id)
 
 
-def on_harvestable_destroyed(view, harvestable, award_exp: bool = True):
+def on_harvestable_destroyed(view, harvestable, award_exp: bool = True,
+                             credit_net_id: int | None = None):
     """环境物被摧毁，掉落资源
 
     award_exp：本端玩家自己的采集才发经验。联机主机裁决客户端攻击
     （_resolve_attack_event / 客户端弹丸激光）时须传 False，避免主机误发。
+    credit_net_id：阶段6.2 任务 harvest 的归属玩家（联机传输 id）；缺省 = 本端玩家。
+    主机裁决客户端采集时传攻击者 id，主机据此把进度单播给归属客户端。
     """
     sound_manager.play_pickup()
     # 等级经验：采集资源经验（各端本地结算：仅本端玩家采集发放；
     # 客户端不裁决环境物伤害，on_monster_death 类回调不在客户端运行）
     if award_exp and getattr(view.window.game_state, "net_mode", "solo") != "client":
         _award_exp(view, EXP_HARVEST)
+    # 阶段6.2 任务/成就进度：采集成功（与经验同一采集口径，客户端不自计由主机裁决）
+    from game.mission_tracker import on_event as mission_on_event
+    mission_on_event(view, "harvest", 1, credit_net_id)
     # 仙人掌：掉落果实药水（potion 类型，拾取后进入药水栏）
     if harvestable.resource_type == "cactus":
         drop = DropItem(harvestable.center_x, harvestable.center_y, "potion", "fruit_potion", 1)
@@ -304,6 +451,13 @@ def handle_chest_interaction(view):
             spawn_chest_loot(view, chest, loot)
             # 等级经验：开宝箱经验（本回调仅在 solo/host 运行——客户端开箱由主机裁决广播）
             _award_exp(view, EXP_CHEST)
+            # 阶段5 祝福：开箱按 BLESSING_CHEST_CHANCE 概率触发一次待选（面板由 GameView 下帧弹出）
+            grant_blessing_trigger(view, "chest", BLESSING_CHEST_CHANCE)
+            # 阶段6.2 任务/成就进度：开箱成功（本回调仅 solo/host 运行——客户端开箱由
+            # 主机在 _handle_interaction_request 内裁决并归属到请求者，见 views/game/network_sync.py；
+            # 空投宝箱 AirdropChest 同在 view.chests 内，一并计入 chest 事件）
+            from game.mission_tracker import on_event as mission_on_event
+            mission_on_event(view, "chest", 1)
             view._chest_key_pressed = False
             break
 
@@ -400,12 +554,20 @@ def handle_rocket_pad_choice(view, choice: int):
             floating_texts.add(pad.center_x, pad.center_y + 50,
                                f"炸毁! +{reward['gold']}金币 +{reward['resources']}资源",
                                arcade.color.YELLOW, life=2.0)
-    elif choice == 2:  # 启用撤离
-        pad.start_evacuation()
-        sound_manager.play_rocket_launch()
-        floating_texts.add(pad.center_x, pad.center_y + 50,
-                           "发射台已启用! 30秒内撤离",
-                           arcade.color.GREEN, life=3.0)
+    elif choice == 2:  # 撤离
+        # 阶段2 航天图统一防守：撤离不再走"发射台自带 30 秒倒计时"，
+        # 台心已建主撤离点并进入防守（见 game_view._sync_evac_point_from_rocket_pad），
+        # 玩家须守住撤离点至 secured，再原地读条 3 秒撤离。
+        # 本分支仅做引导提示，不启动旧倒计时（保留 start_evacuation 兜底不动）。
+        point = getattr(view, "evac_point", None)
+        if point is not None and point.state == "secured":
+            floating_texts.add(pad.center_x, pad.center_y + 50,
+                               "撤离点已守住！原地读条 3 秒撤离", arcade.color.GREEN, life=3.0)
+        else:
+            left = point.defend_left if point is not None else 0.0
+            floating_texts.add(pad.center_x, pad.center_y + 50,
+                               f"守住台心撤离点（剩余 {left:.0f} 秒）即可撤离",
+                               arcade.color.YELLOW, life=3.0)
 
 
 def _generate_pad_resource_drops(cx: float, cy: float, total: int) -> list:

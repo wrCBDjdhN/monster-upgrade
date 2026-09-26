@@ -1,9 +1,32 @@
-"""选择地图页面"""
+"""选择地图页面
+
+阶段8 难度星级（Task 8.2）：
+- 卡片显示各图已达星数 `★N/M`（M = 该图 config.MAP_STAR_CRITERIA 条件条数）与
+  金/暗双色**实心**★星标（禁空心/线框，未达成用暗色实心★表示）；
+- 地图解锁从「只看战备」改为「**累计星数**达 config.MAP_UNLOCK_STARS 门槛」：
+  forest 0 星（初始解锁，保证新手教程期森林可进不受影响）→ desert 需 ≥1 → space 需 ≥2；
+  星数不足点击 → 飘中文提示拦截；
+- **行为变更**：战备不足由「硬拦截」降级为「卡片黄色警告条 + 仍可进入」
+  （check_battle_readiness 调用保留，结果只用于警告渲染）。
+"""
 
 import arcade
-from config import WINDOW_WIDTH, WINDOW_HEIGHT
+from config import (
+    WINDOW_WIDTH, WINDOW_HEIGHT,
+    MAP_STAR_CRITERIA, MAP_UNLOCK_STARS, MAP_MAX_STARS,
+)
 from views.text_cache import TextCache  # 持久 Text 对象缓存，替代 draw_text
 from game.sound_manager import sound_manager
+
+# 阶段8 星级：未达成星标的暗色（实心★用暗色画，禁 ☆ 空心字形/线框）
+STAR_DARK = (78, 66, 38)
+# 阶段8 星级：已达星标的金色
+STAR_GOLD = (255, 215, 0)
+# 阶段8 星级：星数不足时未解锁卡片的置灰色（卡片背景压暗用）
+CARD_LOCKED_TINT = (58, 58, 64)
+# 战备不足警告条配色（实心填充 + 深色文字，保证可读）
+WARN_BAR_COLOR = (198, 150, 20)
+WARN_TEXT_COLOR = (40, 30, 4)
 
 
 # ── 战备检查函数 ──────────────────────────────────────────────────────────────
@@ -127,6 +150,8 @@ MAPS = [
         "difficulty": "普通",
         "color": (40, 80, 40),
         "theme": "forest",  # 地图主题：决定生成逻辑与配色
+        # 阶段8：进入该图所需的**累计星数**（解锁链唯一来源 = config.MAP_UNLOCK_STARS）
+        "unlock_stars": MAP_UNLOCK_STARS["forest"],
     },
     {
         "id": 2,
@@ -136,6 +161,7 @@ MAPS = [
         "difficulty": "困难",
         "color": (150, 120, 50),
         "theme": "desert",  # 地图主题：决定生成逻辑与配色
+        "unlock_stars": MAP_UNLOCK_STARS["desert"],
     },
     {
         "id": 3,
@@ -145,6 +171,7 @@ MAPS = [
         "difficulty": "极难",
         "color": (50, 60, 100),
         "theme": "space",  # 地图主题：决定生成逻辑与配色
+        "unlock_stars": MAP_UNLOCK_STARS["space"],
     },
 ]
 
@@ -169,30 +196,78 @@ class MapSelectView(arcade.View):
             rect = arcade.XYWH(start_x + i * (card_w + spacing), start_y, card_w, card_h)
             self.cards.append(rect)
 
-        # 新手教程（阶段 3）：地图选择向导（须在 cards 定义后构建，高亮需卡片矩形）
+        # 新手教程（阶段 2）：地图选择向导（须在 cards 定义后构建，高亮需卡片矩形）
+        # 阶段编号口径见 main.TutorialState：0 开始界面 / 1 角色选择 / 2 地图选择 /
+        # 3 游戏内 / 4 撤离结算 / 5 市场 / 6 完成
         self.tut_pages = self._build_tutorial_pages()
         self.tut_next_rect = None
         self.tut_skip_rect = None
         self.tut_next_hover = False
         # 战备检查错误提示（on_mouse_press 设置，on_draw 绘制）
         self._error = ""
+        # 阶段8 星级：各图已达星数 {theme: stars}（未打过的图不出现在 dict，取值用 .get(theme, 0)）
+        # 与累计星数（解锁判定口径：sum(所有图星数) >= MAP_UNLOCK_STARS[theme]）
+        self._stars: dict = {}
+        self._total_stars: int = 0
+        self._reload_stars()
+
+    def _reload_stars(self) -> None:
+        """从 db 读取玩家各图星数并算累计星数（on_show_view 每帧进入时刷新，返回大厅后可见新星）"""
+        from db.database import get_stars
+        gs = self.window.game_state
+        pid = getattr(gs, "player_id", None)
+        self._stars = get_stars(pid) if pid else {}
+        self._total_stars = sum(self._stars.values())
+
+    def _theme_stars(self, theme: str) -> int:
+        """某图已达星数（未打过该图 = 0 星）"""
+        return int(self._stars.get(theme, 0))
+
+    def _theme_max_stars(self, theme: str) -> int:
+        """某图星数上限（= 该图 MAP_STAR_CRITERIA 条件条数，缺配置回落 MAP_MAX_STARS）"""
+        return len(MAP_STAR_CRITERIA.get(theme, [])) or MAP_MAX_STARS
 
     def _build_tutorial_pages(self):
-        """新手教程阶段 3：地图选择向导（介绍地图与战备要求）"""
-        from views.tutorial import TutorialPage
+        """新手教程阶段 2：地图选择向导（介绍地图与星级解锁）
+
+        修改原因：教程事实错误修正（2026-09-26）——第 2 页原教 v1 的「战备要求」
+        （装备价值 100/500 金币门槛），但现行唯一硬拦截口径已改为**累计星数**
+        （config.MAP_UNLOCK_STARS，forest=0 / desert=1 / space=2，消费点见
+        本文件 on_mouse_press 阶段8 校验①），战备不足**不再拦截**只渲染黄色
+        警告条，故本页改教「星级解锁」，避免与实际规则冲突误导新手。
+
+        数值去硬编码（2026-09-26）：原页把「每图最多 3 星」「★1 / ★2」写死在
+        文案里，改平衡（config.MAP_MAX_STARS / MAP_UNLOCK_STARS / MAP_STAR_CRITERIA）
+        后教程即过期。现全部实查 config + 本文件 MAPS 数据表。
+        """
+        from views.tutorial import (
+            TutorialPage,
+            map_max_stars,
+            star_criteria_labels,
+            unlock_star_label,
+        )
+        # 第 1 页：地图清单——名称/难度实查 MAPS（禁手抄，免得加图漏改）
+        map_line = " · ".join(f"【{m['name']}】{m['difficulty']}" for m in MAPS)
+        # 第 2 页：星级解锁——上限/门槛/达成条件逐项实查 config
+        star_lines = [
+            "地图按【累计星数】解锁，不再卡装备价值：",
+            f"每次撤离成功都会结算星级，每图最多 {map_max_stars()} 星：",
+        ]
+        for m in MAPS:
+            theme = str(m.get("theme", "forest"))
+            crit = star_criteria_labels(theme)
+            tail = f"（{crit}）" if crit else ""
+            star_lines.append(f"  ·【{m['name']}】{unlock_star_label(theme)}{tail}")
+        star_lines.append("战备不足只是黄色警告，照样能进图。")
+        star_lines.append("想多拿星：多撤离、多击杀、再打精英怪。")
         return [
             TutorialPage("选择地图", [
-                "3 张地图，难度递增：",
-                "【幽暗森林】普通 · 【沙漠荒地】困难 · 【航天基地】极难",
-                "新手先挑战【幽暗森林】，点击卡片右下角的【进入】按钮。",
+                f"共 {len(MAPS)} 张地图，难度递增：",
+                map_line,
+                "新手先挑战最简单的那张，点击卡片下方的【进入】按钮。",
             ], highlight=self.cards[0]),
-            TutorialPage("战备要求", [
-                "困难和极难地图有装备价值要求：",
-                "【沙漠荒地】需要装备价值达到 100 金币 + 至少一件 Lv.5+ 物品",
-                "【航天基地】需要装备价值达到 500 金币 + 至少一件神器装备",
-                "装备价值 = 身上穿着的头盔/护甲/背包 + 携带武器的金币价值",
-                "可去市场购买更强装备，或去仓库取出已有装备后再挑战。",
-            ]),
+            # 教程事实错误修正（2026-09-26）：原「战备要求」页改为「星级解锁」页
+            TutorialPage("星级解锁", star_lines),
         ]
 
     def _tut_showing(self):
@@ -203,6 +278,8 @@ class MapSelectView(arcade.View):
 
     def on_show_view(self):
         self.window.background_color = arcade.color.BLACK
+        # 阶段8 星级：每次进入本界面重新读库（打星回来后星数/解锁状态即时刷新）
+        self._reload_stars()
 
     def on_draw(self):
         self.clear()
@@ -218,16 +295,46 @@ class MapSelectView(arcade.View):
         for i, m in enumerate(MAPS):
             rect = self.cards[i]
             is_hover = (self.hovered_map == i)
-            # 卡片背景
+            theme = m.get("theme", "forest")
+            # 阶段8 星级：解锁判定（累计星数 vs 该图门槛）——星数不足则卡片置灰
+            need_stars = int(m.get("unlock_stars", 0))
+            locked = self._total_stars < need_stars
+            # 卡片背景（未解锁置灰：压暗成冷灰，保留原色相不做渐变）
             bg_color = (m["color"][0]+30, m["color"][1]+30, m["color"][2]+30) if is_hover else m["color"]
+            if locked:
+                bg_color = CARD_LOCKED_TINT
             arcade.draw_rect_filled(rect, bg_color)
             border_color = arcade.color.GOLD if is_hover else arcade.color.WHITE
             arcade.draw_rect_outline(rect, border_color, border_width=2)
-            # 地图名
+            # 地图名（未解锁压暗为浅灰，置灰卡片上仍可读）
             # 持久 Text 对象，避免 draw_text 每帧重建纹理
             self._tc.text(
                 f"card_name_{i}", m["name"], rect.center_x, rect.top - 30,
-                arcade.color.WHITE, size=22, anchor_x="center", bold=True,
+                arcade.color.LIGHT_GRAY if locked else arcade.color.WHITE,
+                size=22, anchor_x="center", bold=True,
+            )
+            # 阶段8 星级星标：已达=金色实心★，未达=暗色实心★（禁空心/线框）
+            # 两个 Text 以同一点为锚左右拼接（已达右对齐 + 未达左对齐），无需测量字宽
+            earned = self._theme_stars(theme)
+            max_stars = self._theme_max_stars(theme)
+            star_split_x = rect.center_x + 4
+            if earned > 0:
+                self._tc.text(f"card_star_on_{i}", "★" * earned, star_split_x,
+                              rect.top - 56, STAR_GOLD, size=18, anchor_x="right")
+            if earned < max_stars:
+                self._tc.text(f"card_star_off_{i}", "★" * (max_stars - earned), star_split_x,
+                              rect.top - 56, STAR_DARK, size=18, anchor_x="left")
+            # 星级数字 + 解锁门槛（★N/M；M = 该图条件条数）
+            # 纵向布局（卡片内，自上而下）：地图名 top-30 → 星标 top-56 → 怪物 center+10
+            #   → 描述 center-15 → 门槛文案 bottom+50 → 战备警告条 bottom+18（均在卡片实心背景内）
+            if need_stars > 0:
+                gate_text = f"★{earned}/{max_stars} · 累计 ★{self._total_stars}/{need_stars} 解锁"
+            else:
+                gate_text = f"★{earned}/{max_stars} · 初始解锁"
+            self._tc.text(
+                f"card_stars_{i}", gate_text, rect.center_x, rect.bottom + 50,
+                arcade.color.DARK_GRAY if locked else arcade.color.LIGHT_GRAY,
+                size=11, anchor_x="center",
             )
             # 怪物信息
             # 持久 Text 对象，避免 draw_text 每帧重建纹理
@@ -248,7 +355,6 @@ class MapSelectView(arcade.View):
                 arcade.color.YELLOW, size=14, anchor_x="center",
             )
             # 战备要求显示（非森林地图）
-            theme = m.get("theme", "forest")
             req = BATTLE_READY_REQS.get(theme)
             if req:
                 req_lines = []
@@ -259,7 +365,7 @@ class MapSelectView(arcade.View):
                 if req["need_artifact"]:
                     req_lines.append("至少一件神器")
                 req_text = " | ".join(req_lines)
-                # 检查当前战备状态
+                # 检查当前战备状态（阶段8：结果只用于警告渲染，不再拦截进入）
                 gs = self.window.game_state
                 pid = gs.player_id if gs else 0
                 ewid = gs.equipped_weapon_id if gs else None
@@ -276,13 +382,26 @@ class MapSelectView(arcade.View):
                         f"card_val_{i}", val_text, rect.center_x, rect.bottom - 60,
                         arcade.color.LIGHT_GRAY, size=10, anchor_x="center",
                     )
+                # 阶段8 行为变更：战备不足不再硬拦截，改为卡片内**实心**黄色警告条（仍可进入）
+                if not passed:
+                    warn_rect = arcade.XYWH(rect.center_x, rect.bottom + 18, rect.width - 30, 20)
+                    arcade.draw_rect_filled(warn_rect, WARN_BAR_COLOR)
+                    self._tc.text(
+                        f"card_warn_{i}", "⚠ 战备不足（仍可进入）", warn_rect.center_x,
+                        warn_rect.center_y, WARN_TEXT_COLOR, size=10,
+                        anchor_x="center", anchor_y="center",
+                    )
             # 进入按钮（放在卡片下方，与卡片保持间距）
             btn = arcade.XYWH(rect.center_x, rect.bottom - 30, 100, 30)
-            btn_color = arcade.color.DARK_GREEN if is_hover else (60, 120, 60)
+            # 阶段8：未解锁地图按钮置灰且文案改为「未解锁」（点击仍响应 → 飘中文拦截提示）
+            if locked:
+                btn_color = (70, 70, 76)
+            else:
+                btn_color = arcade.color.DARK_GREEN if is_hover else (60, 120, 60)
             arcade.draw_rect_filled(btn, btn_color)
             # 持久 Text 对象，避免 draw_text 每帧重建纹理
             self._tc.text(
-                f"card_btn_{i}", "进入", btn.center_x, btn.center_y,
+                f"card_btn_{i}", "未解锁" if locked else "进入", btn.center_x, btn.center_y,
                 arcade.color.WHITE, size=14, anchor_x="center", anchor_y="center",
             )
 
@@ -296,7 +415,7 @@ class MapSelectView(arcade.View):
             arcade.color.WHITE, size=14, anchor_x="center", anchor_y="center",
         )
 
-        # 战备不足错误提示（红色醒目）
+        # 阶段8：星数不足的解锁拦截提示（红色醒目；战备不足已降级为卡片黄条，不再走此处）
         if self._error:
             self._tc.text(
                 "battle_err", self._error,
@@ -304,7 +423,7 @@ class MapSelectView(arcade.View):
                 arcade.color.RED, size=16, anchor_x="center",
             )
 
-        # 新手教程（阶段 3）：向导弹窗覆盖层（画在最上层）
+        # 新手教程（阶段 2）：向导弹窗覆盖层（画在最上层）
         if self._tut_showing():
             from views.tutorial import draw_tutorial_page
             tut = getattr(self.window.game_state, "tutorial", None)
@@ -344,7 +463,7 @@ class MapSelectView(arcade.View):
                 finish_tutorial(self.window)
                 return
             if self.tut_next_rect and self.tut_next_rect.point_in_rect((x, y)):
-                # 翻完向导：隐藏，让玩家自行点击幽暗森林卡片进入
+                # 翻完向导：隐藏，让玩家自行点击目标地图卡片进入
                 tut = getattr(self.window.game_state, "tutorial", None)
                 if tut is not None:
                     tut.page = len(self.tut_pages)
@@ -364,23 +483,22 @@ class MapSelectView(arcade.View):
             # 检测点击区域：进入按钮（卡片底部 -30，尺寸 100×30）
             btn = arcade.XYWH(rect.center_x, rect.bottom - 30, 100, 30)
             if btn.point_in_rect((x, y)):
-                # 战备检查（非森林地图）
-                theme = MAPS[i].get("theme", "forest")
-                gs = self.window.game_state
-                pid = gs.player_id if gs else 0
-                ewid = gs.equipped_weapon_id if gs else None
-                passed, error_msg, _ = check_battle_readiness(pid, theme, ewid)
-                if not passed:
-                    # 战备不足：显示错误提示（用 self._error 持久化，on_draw 可绘制）
-                    self._error = error_msg
+                # 阶段8 校验①：累计星数解锁（唯一硬拦截口径）
+                #   门槛 = config.MAP_UNLOCK_STARS（forest=0，故新手教程期森林恒可进）
+                need_stars = int(MAPS[i].get("unlock_stars", 0))
+                if self._total_stars < need_stars:
+                    self._error = (f"需累计 ★{need_stars} 解锁【{MAPS[i]['name']}】"
+                                   f"（当前累计 ★{self._total_stars}）")
                     return
+                # 阶段8 校验②：战备不足**不再拦截**（行为变更：旧版此处硬拦截），
+                #   check_battle_readiness 的结果已在 on_draw 渲染为卡片黄色警告条，仍可进入。
                 self._error = ""
                 # 每次进入随机生成种子，确保房间/资源/怪物/宝箱位置不固定
                 import random
                 self.window.game_state.current_map_seed = random.randint(1, 999999)
                 # 记录地图主题，供 GameView 生成对应主题地图
                 self.window.game_state.map_theme = MAPS[i].get("theme", "forest")
-                # 新手教程：地图已选定 → 进入游戏内引导（阶段 4 接管）
+                # 新手教程：地图已选定 → 进入游戏内引导（阶段 3 接管）
                 tut = getattr(self.window.game_state, "tutorial", None)
                 if tut is not None and tut.active and tut.stage == 2:
                     tut.stage = 3

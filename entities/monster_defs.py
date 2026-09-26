@@ -6,6 +6,25 @@
 
 # 骷髅/BOSS骷髅弹丸复用基础弹丸速度与尺寸（与 config.py 保持一致，避免数值漂移）
 from config import PROJECTILE_SPEED, PROJECTILE_SIZE
+# 阶段3 精英词缀怪：数值一律取自 config.py（数值单一来源，禁在此重复硬编码）
+from config import (
+    ELITE_SPAWN_INTERVAL,
+    ELITE_HP_MULT,
+    ELITE_DAMAGE_MULT,
+    ELITE_GOLD_BONUS,
+    ELITE_MIN_WEAPON_LEVEL,
+    ELITE_FRENZY_HP_THRESHOLD,
+    ELITE_FRENZY_SPEED_MULT,
+    ELITE_FRENZY_DAMAGE_MULT,
+    ELITE_FIRE_ZONE_RADIUS,
+    ELITE_FIRE_ZONE_LIFE,
+    ELITE_FIREWALL_CONTACT_RANGE,
+    ELITE_FIREWALL_CONTACT_INTERVAL,
+    ELITE_FIREWALL_BURN_DURATION,
+    ELITE_FIREWALL_BURN_LEVEL,
+    ELITE_SUMMON_INTERVAL,
+    ELITE_SUMMON_MAX_ALIVE,
+)
 
 # ─────────────────────────── 怪物组合刷新配置 ───────────────────────────
 # 定义每种主题下怪物的组合刷新规则
@@ -62,20 +81,30 @@ BOSS_SUMMON_CONFIG = {
 }
 
 # BOSS 技能配置：每个 BOSS 拥有 2 个主动技能
-# id: 唯一标识; name: 中文名; cooldown: 冷却秒数; damage_mult: 伤害倍率;
-# range: 技能范围; type: 技能类型(cone/aoe/projectile/missile)
-# stun: 眩晕时长(秒); aoe_radius: AOE 半径; projectile_count: 弹幕数量
+# 字段约定（数值唯一来源：game/monsters.py 的 BOSS 技能释放只读本表，不硬编码）：
+#   id / name / description        技能标识 / 中文名 / 图鉴描述
+#   cooldown                       冷却秒数（monsters.py 的 _skill_cooldowns 由此派生）
+#   range                          施放距离上限（px），超过则不释放
+#   damage_mult                    伤害倍率（× BOSS 基础攻击；0 = 纯控制技能）
+#   type                           技能类型(cone/aoe/projectile/missile)，仅供展示/扩展
+#   aoe_radius                     AOE 命中半径（px）；缺省 = 单目标
+#   aoe_center                     AOE 圆心："self"=BOSS 自身（缺省）/"target"=当前目标脚下
+#   projectile_count               弹幕数量；只决定视觉弹丸数，伤害按 damage_mult 聚合一次结算
+#   debuff_id / debuff_level       技能附带 debuff 的 id（effects_defs.EFFECTS 键）与效果等级 1-5
+#   stun / stun_level              眩晕秒数与等级；等级取 5（效果表上限），实际时长以 stun 为准
+#   pull                           标记牵引类技能；本项目无位移机制，落地时降级为眩晕+减速
 BOSS_SKILLS = {
     "BossZombie": [
         {
             "id": "flame_charge", "name": "烈焰冲击", "cooldown": 8.0,
             "damage_mult": 1.5, "range": 200, "type": "cone",
+            "debuff_id": "burn", "debuff_level": 2,
             "description": "向前方扇形范围发射火焰弹幕",
         },
         {
             "id": "zombie_roar", "name": "僵尸咆哮", "cooldown": 15.0,
             "damage_mult": 0, "range": 120, "type": "aoe",
-            "stun": 2.0, "aoe_radius": 120,
+            "stun": 2.0, "stun_level": 5, "aoe_radius": 120, "aoe_center": "self",
             "description": "咆哮眩晕周围玩家 2 秒",
         },
     ],
@@ -83,13 +112,15 @@ BOSS_SKILLS = {
         {
             "id": "skeleton_rain", "name": "骷髅箭雨", "cooldown": 10.0,
             "damage_mult": 1.2, "range": 350, "type": "aoe",
-            "aoe_radius": 80, "projectile_count": 8,
+            "aoe_radius": 80, "aoe_center": "target", "projectile_count": 8,
             "description": "在目标位置召唤 8 支箭从天而降",
         },
         {
             "id": "frost_nova", "name": "冰冻新星", "cooldown": 18.0,
             "damage_mult": 1.0, "range": 150, "type": "aoe",
-            "aoe_radius": 150, "debuff_id": "freeze", "stun": 1.5,
+            "aoe_radius": 150, "aoe_center": "self",
+            "debuff_id": "freeze", "debuff_level": 2,
+            "stun": 1.5, "stun_level": 5,
             "description": "以自身为中心释放冰冻波",
         },
     ],
@@ -97,87 +128,102 @@ BOSS_SKILLS = {
         {
             "id": "poison_fog", "name": "毒雾弥漫", "cooldown": 12.0,
             "damage_mult": 0.8, "range": 180, "type": "aoe",
-            "aoe_radius": 180, "debuff_id": "poison",
+            "aoe_radius": 180, "aoe_center": "self",
+            "debuff_id": "poison", "debuff_level": 2,
             "description": "释放大范围毒雾区域，持续中毒",
         },
         {
             "id": "mummy_grab", "name": "木乃伊缠绕", "cooldown": 20.0,
             "damage_mult": 1.3, "range": 100, "type": "aoe",
-            "stun": 2.5, "pull": True,
-            "description": "拉近玩家并眩晕 2.5 秒",
+            "debuff_id": "slow", "debuff_level": 2,
+            "stun": 2.5, "stun_level": 5, "pull": True,
+            "description": "拉近玩家并眩晕 2.5 秒（无位移机制，实为眩晕+减速）",
         },
     ],
     "BossSpace": [
         {
             "id": "laser_sweep", "name": "激光扫射", "cooldown": 10.0,
             "damage_mult": 2.0, "range": 400, "type": "cone",
+            "aoe_center": "self",
             "description": "发射旋转激光（扇形范围持续伤害）",
         },
         {
             "id": "missile_barrage", "name": "导弹齐射", "cooldown": 16.0,
             "damage_mult": 1.5, "range": 350, "type": "missile",
-            "projectile_count": 3,
+            "aoe_center": "target", "projectile_count": 3,
             "description": "向玩家位置发射 3 枚追踪导弹",
         },
     ],
 }
 
 # 技能提示配置：定义每种怪物使用技能时的视觉提示
+# 每个技能含 6 个字段（与 BOSS_SKILLS 的 description 同构）：
+#   name                     技能名（头顶提示文本 + 图鉴展示）
+#   color                    提示颜色 RGB
+#   duration                 提示持续秒数
+#   radius                   提示半径（px）
+#   range_pref               距离分档："near"=近身时用 / "far"=远距时用
+#   description              技能实际效果的中文描述，供图鉴展示
+#     （取值依据 game/monster_utils.py 的 apply_skill_effect，禁写猜测效果）
 SKILL_PROMPT_CONFIG = {
     "Zombie": {
         "skills": [
-            {"name": "腐烂光环", "color": (100, 180, 60), "duration": 0.5, "radius": 50},
-            {"name": "狂暴", "color": (255, 50, 50), "duration": 0.8, "radius": 30},
+            {"name": "腐烂光环", "color": (100, 180, 60), "duration": 0.5, "radius": 50, "range_pref": "near", "description": "近身时喷出毒雾，使目标中毒持续掉血"},
+            {"name": "狂暴", "color": (255, 50, 50), "duration": 0.8, "radius": 30, "range_pref": "far", "description": "远距时激怒自己，攻击力 +50% 持续 3 秒"},
         ],
     },
     "Skeleton": {
         "skills": [
-            {"name": "骨盾", "color": (200, 200, 220), "duration": 0.6, "radius": 25},
-            {"name": "骨矛投掷", "color": (180, 180, 200), "duration": 0.4, "radius": 20},
+            {"name": "骨盾", "color": (200, 200, 220), "duration": 0.6, "radius": 25, "range_pref": "far", "description": "远距时竖起骨盾，防御 +5 持续 3 秒"},
+            {"name": "骨矛投掷", "color": (180, 180, 200), "duration": 0.4, "radius": 20, "range_pref": "near", "description": "近身时投出骨矛，使目标减速"},
         ],
     },
     "MummyMelee": {
         "skills": [
-            {"name": "毒雾释放", "color": (150, 200, 100), "duration": 0.7, "radius": 80},
-            {"name": "木乃伊缠绕", "color": (180, 160, 100), "duration": 0.5, "radius": 40},
+            {"name": "毒雾释放", "color": (150, 200, 100), "duration": 0.7, "radius": 80, "range_pref": "far", "description": "远距时释放毒雾，使目标持续中毒"},
+            {"name": "木乃伊缠绕", "color": (180, 160, 100), "duration": 0.5, "radius": 40, "range_pref": "near", "description": "近身时用绷带缠绕，眩晕目标 1.5 秒"},
         ],
     },
     "MummyRanged": {
         "skills": [
-            {"name": "治愈祷言", "color": (100, 255, 100), "duration": 0.8, "radius": 30},
-            {"name": "诅咒标记", "color": (200, 50, 200), "duration": 0.6, "radius": 35},
+            {"name": "治愈祷言", "color": (100, 255, 100), "duration": 0.8, "radius": 30, "range_pref": "near", "description": "近身时吟唱祷言，回复自身 20% 生命"},
+            {"name": "诅咒标记", "color": (200, 50, 200), "duration": 0.6, "radius": 35, "range_pref": "far", "description": "远距时标记目标，使其受伤 +20% 持续 3 秒"},
         ],
     },
     "Camel": {
         "skills": [
-            {"name": "沙尘暴", "color": (200, 180, 100), "duration": 1.0, "radius": 100},
-            {"name": "储水", "color": (100, 150, 255), "duration": 0.6, "radius": 25},
+            {"name": "沙尘暴", "color": (200, 180, 100), "duration": 1.0, "radius": 100, "range_pref": "near", "description": "近身时扬起沙暴，使周围玩家减速"},
+            {"name": "储水", "color": (100, 150, 255), "duration": 0.6, "radius": 25, "range_pref": "far", "description": "远距时消耗储水，回复自身 15% 生命"},
         ],
     },
     "Sniper": {
         "skills": [
-            {"name": "激光瞄准", "color": (255, 50, 50), "duration": 0.3, "radius": 15},
-            {"name": "战术撤退", "color": (150, 170, 200), "duration": 0.5, "radius": 20},
+            {"name": "激光瞄准", "color": (255, 50, 50), "duration": 0.3, "radius": 15, "range_pref": "far", "description": "远距时激光锁定，使目标破甲 3 秒"},
+            {"name": "战术撤退", "color": (150, 170, 200), "duration": 0.5, "radius": 20, "range_pref": "near", "description": "近身时加速撤退，移速 +50% 持续 2 秒"},
         ],
     },
     "Bandit": {
         "skills": [
-            {"name": "投掷匕首", "color": (180, 140, 110), "duration": 0.4, "radius": 20},
-            {"name": "群体呼叫", "color": (255, 200, 100), "duration": 0.8, "radius": 60},
+            {"name": "投掷匕首", "color": (180, 140, 110), "duration": 0.4, "radius": 20, "range_pref": "near", "description": "近身时掷出匕首，使目标流血"},
+            {"name": "群体呼叫", "color": (255, 200, 100), "duration": 0.8, "radius": 60, "range_pref": "far", "description": "远距时呼叫同伙，使目标受伤 +15% 持续 2 秒"},
         ],
     },
     "RocketTroop": {
         "skills": [
-            {"name": "追踪导弹", "color": (255, 100, 50), "duration": 0.6, "radius": 25},
-            {"name": "弹幕射击", "color": (255, 150, 50), "duration": 0.8, "radius": 80},
+            {"name": "追踪导弹", "color": (255, 100, 50), "duration": 0.6, "radius": 25, "range_pref": "far", "description": "远距时发射追踪导弹，点燃目标"},
+            {"name": "弹幕射击", "color": (255, 150, 50), "duration": 0.8, "radius": 80, "range_pref": "near", "description": "近身时倾泻弹幕，使目标受伤 +25% 持续 2 秒"},
         ],
     },
     "Assault": {
         "skills": [
-            {"name": "冲锋", "color": (120, 130, 150), "duration": 0.5, "radius": 30},
-            {"name": "手雷投掷", "color": (200, 100, 50), "duration": 0.7, "radius": 60},
+            {"name": "冲锋", "color": (120, 130, 150), "duration": 0.5, "radius": 30, "range_pref": "near", "description": "近身时发起冲锋，眩晕目标 1 秒"},
+            {"name": "手雷投掷", "color": (200, 100, 50), "duration": 0.7, "radius": 60, "range_pref": "far", "description": "远距时投出手雷，使周围玩家燃烧"},
         ],
     },
+    # 注意：BOSS 不进本表。monster_base 的通用 50% 普攻挂载会按类名取本表做头顶提示，
+    # BOSS 挂进来会让「普通挥爪」也随机显示技能名（误导，且技能其实没放）。
+    # BOSS 技能名/颜色由各 _emit_* 内既有的 floating_texts 文本 + BOSS_SKILLS.name 显示，
+    # 图鉴也只读 BOSS_SKILLS（见 views/codex_view.py）。
 }
 
 # ─────────────────────────── 近战怪物数值表 ───────────────────────────
@@ -379,6 +425,70 @@ MONSTER_METADATA: dict[str, dict] = {
 }
 
 
+# ─────────────────── 阶段3：精英词缀怪数据定义 ───────────────────
+# 结构仿 BOSS_SKILLS：每项含中文 name / desc + 各自参数字段；
+# 数值全部引用 config.py，此处只做「哪个词缀带哪些参数」的声明。
+# 消费端：game/monster_affixes.py（apply_affix / on_affix_death / on_affix_update）
+# 字段约定：
+#   hp_bonus_mult/speed_bonus_mult  狂暴：额外血量/速度加成（叠加在 ELITE_HP_MULT 之上）
+#   frenzy_threshold/frenzy_speed_mult/frenzy_damage_mult  狂暴半血触发阈值与提伤提速倍率
+#   spawn_kind/spawn_count          分裂：死亡时刷出的小怪类型与数量
+#   burn_dps/burn_duration          火墙：死亡留燃烧区的每跳伤害与灼烧持续时间
+#   summon_kind/summon_count        召唤：周期召出的小怪类型与每次数量
+#   shield_hp                       护盾：吸收伤害的护盾值
+ELITE_AFFIXES = {
+    "frenzy": {
+        "name": "狂暴",
+        "desc": "生命值更高移速更快，生命低于一半时再次提速并提升伤害",
+        "hp_bonus_mult": 1.5,
+        "speed_bonus_mult": 1.2,
+        "frenzy_threshold": ELITE_FRENZY_HP_THRESHOLD,
+        "frenzy_speed_mult": ELITE_FRENZY_SPEED_MULT,
+        "frenzy_damage_mult": ELITE_FRENZY_DAMAGE_MULT,
+    },
+    "split": {
+        "name": "分裂",
+        "desc": "死亡时分裂出若干只小怪继续战斗",
+        "spawn_kind": "zombie",
+        "spawn_count": 3,
+    },
+    "firewall": {
+        "name": "火墙",
+        "desc": "死亡时留下持续燃烧的地面区域，近身时灼烧玩家",
+        "fire_zone_radius": ELITE_FIRE_ZONE_RADIUS,
+        "fire_zone_life": ELITE_FIRE_ZONE_LIFE,
+        "burn_dps": 6.0,
+        "burn_duration": 3.0,
+        "contact_range": ELITE_FIREWALL_CONTACT_RANGE,
+        "contact_interval": ELITE_FIREWALL_CONTACT_INTERVAL,
+        "contact_burn_duration": ELITE_FIREWALL_BURN_DURATION,
+        "contact_burn_level": ELITE_FIREWALL_BURN_LEVEL,
+    },
+    "summon": {
+        "name": "召唤",
+        "desc": "战斗中周期性召唤小怪支援",
+        "summon_kind": "zombie",
+        "summon_count": 2,
+        "summon_interval": ELITE_SUMMON_INTERVAL,
+        "summon_max_alive": ELITE_SUMMON_MAX_ALIVE,
+    },
+    "shield": {
+        "name": "护盾",
+        "desc": "拥有可吸收伤害的护盾，护盾耗尽后才会受到生命伤害",
+        "shield_hp": 120,
+    },
+}
+
+# 精英刷新与奖励总配置（数值引用 config.py，供 game/respawn.spawn_elite 与 game_view 消费）
+ELITE_CONFIG = {
+    "interval": ELITE_SPAWN_INTERVAL,
+    "hp_mult": ELITE_HP_MULT,
+    "damage_mult": ELITE_DAMAGE_MULT,
+    "gold_bonus": ELITE_GOLD_BONUS,
+    "min_level": ELITE_MIN_WEAPON_LEVEL,
+}
+
+
 # ─────────────────────────── 辅助函数 ───────────────────────────
 
 def get_all_monster_class_names() -> list[str]:
@@ -417,3 +527,20 @@ def get_boss_config(base_name: str) -> dict:
         "is_boss": True,
         "required_weapon_level": 5,
     }
+
+
+def get_boss_skill(class_name: str, skill_id: str) -> dict:
+    """按「怪物类名 + 技能 id」取 BOSS 技能配置；找不到返回空字典（调用方需容错）"""
+    for cfg in BOSS_SKILLS.get(class_name, []):
+        if cfg.get("id") == skill_id:
+            return cfg
+    return {}
+
+
+def get_boss_skill_cooldowns(class_name: str) -> dict:
+    """BOSS 技能冷却表 {技能id: 冷却秒数}，由 BOSS_SKILLS 的 cooldown 字段派生
+
+    怪物 __init__ 用它初始化 _skill_cooldowns，保证冷却数值只存在于 BOSS_SKILLS 一处。
+    """
+    return {cfg.get("id"): float(cfg.get("cooldown", 0.0) or 0.0)
+            for cfg in BOSS_SKILLS.get(class_name, [])}

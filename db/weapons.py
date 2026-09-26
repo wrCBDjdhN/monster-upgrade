@@ -100,11 +100,23 @@ def upgrade_weapon(pid: int, wid: int) -> bool:
         return True
 
 
-def sell_weapon(pid: int, wid: int) -> int:
+def weapon_sell_price(damage, sell_bonus: float = 0.0) -> int:
+    """武器售卖价（纯函数，不查库）：int(伤害 × 2 × (1 + 市场回收加成))
+
+    sell_bonus 取 entities.facility_defs.market_sell_bonus(市场设施等级)：
+    Lv0（未建造）/Lv1 = 0.0 → 与旧口径 `int(伤害 × 2)` **完全一致**（零回归）；
+    Lv2 = +5%、Lv3 = +10%。取整向下，保证显示价 == 实际入账金币。
+    """
+    return int(int(damage) * 2 * (1.0 + sell_bonus))
+
+
+def sell_weapon(pid: int, wid: int, sell_bonus: float = 0.0) -> int:
     """售卖武器，返回获得金币数
 
-    修复：售卖价以仓库页显示价为准（显示 = 伤害 × 2），不再按升级成本折算，
+    售卖价以仓库页显示价为准（显示 = 伤害 × 2，见 weapon_sell_price），
     保证玩家在仓库页看到的售价与实际售得金币一致。
+
+    sell_bonus：市场设施的售出回收加成（阶段10，Lv0/Lv1 传 0.0 即旧口径）。
     """
     with _conn() as c:
         w = c.execute(
@@ -113,8 +125,8 @@ def sell_weapon(pid: int, wid: int) -> int:
         ).fetchone()
         if not w:
             return 0
-        # 售卖价 = 伤害 × 2（与仓库页显示价同一口径）
-        gold_earned = int(w[0]) * 2
+        # 售卖价 = 伤害 × 2 × (1 + 回收加成)（与仓库页显示价同一口径）
+        gold_earned = weapon_sell_price(w[0], sell_bonus)
         c.execute("DELETE FROM weapons WHERE id=?", (wid,))
         c.execute("UPDATE players SET gold=gold+? WHERE id=?", (gold_earned, pid))
         return gold_earned
@@ -124,3 +136,18 @@ def delete_weapon(pid: int, wid: int):
     """删除武器"""
     with _conn() as c:
         c.execute("DELETE FROM weapons WHERE id=? AND player_id=?", (wid, pid))
+
+
+def reforge_weapon(weapon_id: int, new_effects: str) -> None:
+    """重铸武器词条：只把 effects 列整体覆盖为 new_effects，**等级/伤害/攻速一律不动**
+
+    new_effects 为 entities.effects_defs.serialize_effects() 产出的 "id:level" 逗号分隔字符串
+    （由调用方按物品等级 roll 生成，武器走 debuff 池）。
+
+    语义说明：重铸是**完全重新随机**，结果可能比原词条更差（词条种类、组合均为随机）；
+    这与「升级只升不降」的 refresh_effect_levels 口径互不冲突——升级只负责抬升已有词条等级，
+    重铸只负责整体替换词条内容，两者永不互相覆盖对方的保证。
+    武器 id 为全局自增主键，无需再按 player_id 过滤（调用方从玩家自己的武器列表取值）。
+    """
+    with _conn() as c:
+        c.execute("UPDATE weapons SET effects=? WHERE id=?", (new_effects or "", weapon_id))

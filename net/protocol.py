@@ -56,6 +56,9 @@ class MsgType(Enum):
     # ── 撤离 ──
     EVAC_REQUEST = "EVAC_REQUEST"      # 客户端→主机：撤离完成请求
     EVAC_RESULT = "EVAC_RESULT"        # 主机→各端：撤离结算清单（各端据此本地入库）
+    # ── 阶段2 防守式撤离点 ──
+    EVAC_POINT_STATE = "EVAC_POINT_STATE"   # 主机→全部：撤离点权威状态（状态变化时 + 1s 周期广播）
+    EVAC_POINT_ACTION = "EVAC_POINT_ACTION"  # 客户端→主机：撤离点激活/修复请求（主机校验距离+资源后执行）
     # ── 交互（宝箱/水井/火箭发射台）──
     INTERACTION_REQUEST = "INTERACTION_REQUEST"  # 客户端→主机：交互请求（宝箱/水井/火箭台）
     # ── 倒地 / 救援 ──
@@ -67,9 +70,13 @@ class MsgType(Enum):
     # ── 放弃行动 ──
     PLAYER_ABANDON = "PLAYER_ABANDON"  # 客户端→主机：放弃行动通知（主机更新状态触发全员结束判定）
     # ── 运行期同步 ──
-    MAP_CHANGE = "MAP_CHANGE"          # 主机→全部：运行期地图改动（宝箱/环境物/水井/火箭台）
+    MAP_CHANGE = "MAP_CHANGE"          # 主机→全部：运行期地图改动（宝箱/环境物/水井/火箭台/建筑/燃烧区）
     ACTION_TIME = "ACTION_TIME"        # 主机→全部：剩余行动时间周期广播（客户端 HUD 显示）
     FULL_STATE = "FULL_STATE"          # 主机→晚期加入客户端：全量状态快照
+    # ── 阶段4 随机地图事件 ──
+    EVENT_START = "EVENT_START"        # 主机→全部：本局随机事件抽中结果（客户端只镜像横幅/参数，不本地抽选）
+    # ── 阶段6.2 任务进度 ──
+    MISSION_PROGRESS = "MISSION_PROGRESS"  # 主机→指定玩家：该玩家的任务/成就进度（局内事件唯一计数端=主机）
     # ── 保活 / 断线 ──
     HEARTBEAT = "HEARTBEAT"            # 双向：心跳保活 + 延迟测量
     DISCONNECT = "DISCONNECT"          # 双向：主动断线通知
@@ -172,11 +179,18 @@ MESSAGE_SCHEMAS: dict[MsgType, str] = {
         "       'hp': float, 'max_hp': float,          玩家当前/最大 HP\n"
         "       'weapon': str|None,                    当前武器名\n"
         "       'facing': float,                       朝向角度（弧度）\n"
-        "       'alive': bool}                         是否存活\n"
-        "}"
+        "       'alive': bool,                         是否存活\n"
+        "       'stats': dict|None,                    含祝福的有效属性（阶段5）\n"
+        "                 {'max_hp','defense','char_speed_mult','regen_per_sec',\n"
+        "                  'crit_chance','lifesteal','thorns','damage_mult'}}\n"
+        "             本人属性快照（客户端上报 / 主机转发幽灵）；主机按绝对值\n"
+        "             套用到幽灵承伤，不做倍率叠乘（避免与 ATTACK_EVENT 重复乘伤害）\n"
+        "}\n"
     ),
     MsgType.MONSTER_SNAPSHOT: (
         "怪物快照（20Hz 全量广播），客户端按 net_id 增删改 + 插值渲染。\n"
+        "载荷新增字段均为向后兼容的可选消费项：客户端一律 .get() 取默认值，\n"
+        "旧主机不下发时退回本地 MONSTER_CONFIGS 默认值，不会崩。\n"
         "payload: {\n"
         "  'monsters': list[dict]，每项：\n"
         "      {'net_id': int,          主机单调分配的怪物网络 id\n"
@@ -191,7 +205,16 @@ MESSAGE_SCHEMAS: dict[MsgType, str] = {
         "       'helmet': str|None,     头盔名（客户端渲染头盔层）\n"
         "       'helmet_color': list|None, 头盔颜色 [r,g,b]\n"
         "       'debuff': str|None,     当前 debuff 名\n"
-        "       'attack_anim': float}   攻击动画计时\n"
+        "       'affix': str|None,      阶段3 精英词缀 id（None=普通怪；客户端渲染词缀名前缀）\n"
+        "       'is_elite': bool,       阶段3 是否精英怪（客户端小地图紫点标记）\n"
+        "       'attack_anim': float,   攻击动画计时（主机内部 _attack_timer 原值，旧客户端兜底用）\n"
+        "       'shield': float,        当前护盾值（阶段3 精英护盾词缀；0=无护盾，客户端据此画护盾条）\n"
+        "       'max_shield': float,    护盾上限（客户端按 shield/max_shield 画护盾条比例）\n"
+        "       'damage': float,        攻击力（词缀/等级修正后的实际伤害，主机权威值）\n"
+        "       'aggro_range': float,   仇恨探测距离（像素，词缀/等级修正后的生效值）\n"
+        "       'attack_delay': float,  攻击冷却总时长（秒）\n"
+        "       'attack_cd_ratio': float}  攻击冷却剩余比例（0~1，1=刚攻击完；客户端按此\n"
+        "                              线性衰减画冷却条，免去客户端硬套本地 _attack_delay）\n"
         "}"
     ),
     MsgType.PROJECTILE_SNAPSHOT: (
@@ -340,6 +363,26 @@ MESSAGE_SCHEMAS: dict[MsgType, str] = {
         "  'run_carried': dict} 本次携带物清单（结构 = commit_run_to_warehouse 入参口径）\n"
         "}"
     ),
+    MsgType.EVAC_POINT_STATE: (
+        "主机广播主撤离点权威状态（阶段2 防守式撤离）。\n"
+        "客户端不跑 EvacPoint.update 与波次，只按本消息镜像并渲染倒计时/血量。\n"
+        "payload: {\n"
+        "  'x': float, 'y': float,   撤离点世界坐标\n"
+        "  'state': str,             'dormant'/'defending'/'secured'/'destroyed'\n"
+        "  'hp': float,              当前血量\n"
+        "  'max_hp': float,          满血值\n"
+        "  'defend_left': float,     防守剩余秒数\n"
+        "  'wave_no': int}           已打波数\n"
+        "}"
+    ),
+    MsgType.EVAC_POINT_ACTION: (
+        "客户端请求激活/修复主撤离点（阶段2）；主机校验距离与资源后执行并广播 EVAC_POINT_STATE。\n"
+        "payload: {\n"
+        "  'player_id': int,         请求玩家 id\n"
+        "  'action': str,            'activate'/'repair'\n"
+        "  'x': float, 'y': float}   请求时玩家世界坐标（主机判距防作弊）\n"
+        "}"
+    ),
     MsgType.INTERACTION_REQUEST: (
         "客户端请求与环境物交互（宝箱/水井/火箭发射台），主机裁决后广播 MAP_CHANGE。\n"
         "payload: {\n"
@@ -356,11 +399,18 @@ MESSAGE_SCHEMAS: dict[MsgType, str] = {
         "}"
     ),
     MsgType.MAP_CHANGE: (
-        "主机广播运行期地图改动（宝箱开启/可破坏环境物/水井/火箭台状态）。\n"
+        "主机广播运行期地图改动（宝箱开启/可破坏环境物/水井/火箭台状态/建筑/燃烧区）。\n"
+        "11.1 接线核查：change_type 全集为\n"
+        "  chest_opened/env_destroyed/well_used/rocket_pad/env_damage/env_spawn/drop_spawn\n"
+        "  + chest_spawn/caravan_point（阶段4 事件实体）\n"
+        "  + build_place/build_destroy（阶段1 局内建造）+ fire_zone（阶段3 火墙词缀区）\n"
+        "（客户端 _apply_map_change 对未列出的 change_type 显式记日志，禁静默忽略）\n"
         "payload: {\n"
-        "  'obj_id': str,        地图对象网络 id\n"
-        "  'change_type': str,   改动类型（chest_opened/env_destroyed/well_used/rocket_pad/env_damage）\n"
-        "  'state': dict,        新状态数据（如宝箱内容/剩余血量/倒计时；env_damage 时含 damage 字段）\n"
+        "  'obj_id': str,        地图对象网络 id（列表序号或建筑 bid/燃烧区 zid）\n"
+        "  'change_type': str,   改动类型（见上全集）\n"
+        "  'state': dict,        新状态数据（如宝箱内容/剩余血量/倒计时；env_damage 时含 damage 字段；\n"
+        "                        build_place 时含 {kind,x,y,hp}；fire_zone 时含 {action,zid,x,y,r,life,\n"
+        "                        dps,burn_duration}，action='add'/'remove'）\n"
         "  'extra': dict}        扩展字段（如掉落物生成列表，可为空 dict）\n"
         "}"
     ),
@@ -369,9 +419,14 @@ MESSAGE_SCHEMAS: dict[MsgType, str] = {
         "payload: {\n"
         "  'monsters': list[dict],     全部存活怪物（格式同 MONSTER_SNAPSHOT 的 monsters）\n"
         "  'drops': list[dict],        当前地面掉落物（id/类型/x/y/内容）\n"
-        "  'chests': list[dict],       宝箱状态（id/是否已开）\n"
+        "  'chests': list[dict],       宝箱状态（id/是否已开/坐标/is_airdrop/theme/artifact_bonus）\n"
         "  'env_objects': list[dict],  环境物状态（水井/火箭台/可破坏物）\n"
+        "  'buildings': list[dict],     局内建筑（阶段1；每项 {bid, kind, x, y, hp}，\n"
+        "                       bid 与 MAP_CHANGE build_place/build_destroy 的 obj_id 同口径）\n"
         "  'well_opened': bool,        水井是否已首次开启（晚加入客户端镜像）\n"
+        "  'evac_point': dict|None,    主撤离点状态（格式同 EVAC_POINT_STATE；None=尚未建立）\n"
+        "  'event_id': str,            阶段4 本局随机事件 id（'' = 无事件；晚加入客户端补看横幅）\n"
+        "  'event_flags': dict,        阶段4 事件参数（格式同 EVENT_START 的 flags）\n"
         "  'action_time_left': float}  剩余行动时间（秒）\n"
     ),
     MsgType.ACTION_TIME: (
@@ -381,12 +436,35 @@ MESSAGE_SCHEMAS: dict[MsgType, str] = {
         "payload: {\n"
         "  'action_time_left': float}  剩余行动时间（秒）\n"
     ),
+    MsgType.EVENT_START: (
+        "主机开局广播本局随机事件抽中结果（阶段4 随机地图事件）。\n"
+        "抽选只在主机/单机执行（地图种子派生，教程局不抽），客户端收到后仅镜像\n"
+        "event_id + 事件参数到 view.event_flags 并显示 3 秒横幅（纯表现层，禁本地抽选）。\n"
+        "事件实体（空投补给箱/商队交互点）不走本消息，由 MAP_CHANGE 的\n"
+        "chest_spawn / caravan_point 增量广播（两端口径与顺序号一致）。\n"
+        "payload: {\n"
+        "  'event_id': str,       本局事件 id（tide/airdrop/caravan/relic；'' = 无事件）\n"
+        "  'flags': dict}         事件参数 {monster_cap_mult, reward_mult, artifact_bonus}\n"
+    ),
+    MsgType.MISSION_PROGRESS: (
+        "主机→指定玩家：该玩家的任务/成就进度增量（阶段6.2 联机双端口径）。\n"
+        "防双计铁律：局内战斗事件（kill/elite_kill/harvest/chest/evac）唯一计数端=主机，\n"
+        "主机按归属裁决（击杀按 last_attacker_id、采集/开箱按发起者、撤离按结算玩家）后\n"
+        "单播给归属客户端，客户端据此写自己的本地库；客户端永不自计局内战斗事件。\n"
+        "本消息为单向（主机→客户端）：客户端上报同名消息一律显式忽略（防伪造他人进度）。\n"
+        "注意：'player_id' 是**联机传输 id**（主机 0、客户端 1~3），不是 DB 主键——\n"
+        "各端独立本地库，主机无从得知客户端的 DB player_id。\n"
+        "进度不纳入 FULL_STATE：各端进度落各自本地库，无需全量同步。\n"
+        "payload: {\n"
+        "  'player_id': int,  归属玩家的联机传输 id\n"
+        "  'event': str,      事件键（kill/elite_kill/harvest/chest/evac/forge/reforge）\n"
+        "  'amount': int}     本次增量次数\n"
+    ),
     MsgType.HEARTBEAT: (
         "双向心跳保活与延迟测量（NET_HEARTBEAT_SEC=1.0 间隔发送）。\n"
         "payload: {\n"
         "  'seq': int,         递增序号（供对端回应确认）\n"
         "  'client_time': float} 发送方时间戳（秒，用于计算 RTT）\n"
-        "}"
     ),
     MsgType.DISCONNECT: (
         "主动断线通知（退出/被踢/死亡离开房间）。\n"

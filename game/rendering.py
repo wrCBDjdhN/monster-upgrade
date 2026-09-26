@@ -4,10 +4,21 @@ import math
 import arcade
 from config import (
     WINDOW_WIDTH, WINDOW_HEIGHT, PLAYER_COLOR, PLAYER_SIZE,
-    EVAC_COLOR, EVAC_RADIUS, DESERT_THEME,
+    EVAC_COLOR, DESERT_THEME,
+    EVAC_BLOCK_HALF, EVAC_BAR_WIDTH, EVAC_BAR_HEIGHT, EVAC_STATE_COLORS,  # 阶段2 撤离点渲染
     SPACE_THEME, ACTION_TIME_SPACE, ACTION_TIME_FOREST, ACTION_TIME_DESERT,
     MINIMAP_SIZE, MINIMAP_PADDING,
     DOWNED_TIMEOUT,
+    ELITE_FIRE_ZONE_COLOR, ELITE_FIRE_ZONE_LIFE,  # 阶段3 火墙词缀燃烧区渲染
+    SKILL_CIRCLE_OUTER_ALPHA, SKILL_CIRCLE_INNER_RATIO,  # 怪物技能范围圈（外圈 alpha / 内圈半径比例）
+    EVENT_CARAVAN_COLOR, EVENT_CARAVAN_SIGN_SIZE, EVENT_CARAVAN_SIGN_TEXT,  # 阶段4 商队招牌渲染
+    # 局内建造选择面板布局/配色（禁在渲染层硬编码面板宽高/行高/间距/颜色）
+    BUILD_PANEL_WIDTH, BUILD_PANEL_SIDE_MARGIN, BUILD_PANEL_MARGIN, BUILD_PANEL_TITLE_H,
+    BUILD_PANEL_ROW_H, BUILD_PANEL_ROW_GAP, BUILD_PANEL_HINT_H,
+    BUILD_PANEL_KEY_W, BUILD_PANEL_KEY_PAD,
+    BUILD_PANEL_TITLE_SIZE, BUILD_PANEL_TEXT_SIZE, BUILD_PANEL_KEY_SIZE, BUILD_PANEL_HINT_SIZE,
+    BUILD_PANEL_BG, BUILD_PANEL_ROW_BG, BUILD_PANEL_ROW_HL, BUILD_PANEL_KEY_BG,
+    BUILD_PANEL_TEXT, BUILD_PANEL_TEXT_HL, BUILD_PANEL_TEXT_DIM, BUILD_PANEL_TEXT_WARN,
 )
 
 # 可破坏环境物中文名映射
@@ -21,9 +32,10 @@ from game.monsters import (
 from game.sound_manager import sound_manager
 from game.effects import particle_system, floating_texts
 from game.render_helpers import (
-    draw_harvestable, draw_chest,
+    draw_harvestable, draw_chest, draw_caravan_sign,
     draw_player_base_equipment, draw_player_weapon, draw_drop_icon,
 )
+from game.map_events import is_near_caravan
 from entities.weapon_defs import get_weapon_visual
 from entities.equipment_defs import POTIONS
 from game.entity_callbacks import get_drop_display_name
@@ -31,8 +43,44 @@ from db.database import get_gold, get_weapons
 # HUD/小地图/BOSS血条/怪物绘制辅助：从 rendering_hud 导入（原同文件函数抽离）
 from game.rendering_hud import (
     draw_action_timer, draw_level_hud, draw_minimap, draw_boss_hp_bar,
-    _draw_monster, _draw_skill_prompt,
+    _draw_monster, _draw_skill_prompt, draw_event_banner, draw_caravan_panel,
 )
+
+
+def draw_skill_vfx(monster):
+    """绘制怪物技能范围圈（双层实心圆，随 _skill_vfx_timer 消退）。
+
+    数据源 = SKILL_PROMPT_CONFIG 每技能的 radius/color/duration 三个字段
+    （此前只被战斗逻辑用于头顶提示文字，范围可视化在此收口）。
+    四个字段由 game/monster_utils.py 写入、monster_base 的 update 逐帧递减计时器，
+    本函数只读不写；全部 getattr 带默认值，字段缺失时静默跳过不报错。
+    渲染铁律：一律实心填充，禁 draw_circle_outline / draw_arc_outline 线框（会闪烁）。
+    """
+    t = getattr(monster, "_skill_vfx_timer", 0)
+    if not t or t <= 0:
+        return
+    # duration 缺失/非正时兜底用当前剩余时间，保证 ratio 恒在 0~1（不会除零）
+    duration = getattr(monster, "_skill_vfx_duration", 0) or 0
+    if duration <= 0:
+        duration = t
+    radius = getattr(monster, "_skill_vfx_radius", 0) or 0
+    if radius <= 0:
+        return
+    color = getattr(monster, "_skill_vfx_color", None)
+    if not color:
+        return
+    # _skill_vfx_color 来自 SKILL_PROMPT_CONFIG 的 RGB 三元组
+    r, g, b = int(color[0]), int(color[1]), int(color[2])
+    # ratio: 0~1，1 = 刚释放
+    ratio = max(0.0, min(1.0, t / duration))
+    # 外圈：alpha 随计时器线性消退（刚释放最亮，末期近乎透明）
+    alpha = max(0, min(255, int(SKILL_CIRCLE_OUTER_ALPHA * ratio)))
+    # 世界坐标（与怪物同处世界层，怪物同帧已做视口裁剪）
+    cx = monster.center_x
+    cy = monster.center_y
+    arcade.draw_circle_filled(cx, cy, radius, (r, g, b, alpha))
+    # 内圈：同色实心，半径按 config 比例收窄（对照火墙燃烧区 :159-160 的双层画法）
+    arcade.draw_circle_filled(cx, cy, radius * SKILL_CIRCLE_INNER_RATIO, (r, g, b, 255))
 
 
 def render_game(view):
@@ -136,6 +184,18 @@ def render_game(view):
                     else:
                         arcade.draw_rect_filled(arcade.XYWH(wx + ww // 2, wy + wh // 2, ww, wh), wall_color)
 
+    # 阶段3 火墙词缀的燃烧地面区域（贴地层，绘于角色/怪物之下）
+    # 纯实心圆填充（禁线框/描边，避免闪烁）；生命随时间收缩体现「燃尽」
+    for zone in getattr(view, "fire_zones", []):
+        if not view._in_view(zone["x"], zone["y"]):
+            continue
+        # life_ratio: 0~1，末期收缩
+        life_ratio = max(0.0, min(1.0, zone["life"] / ELITE_FIRE_ZONE_LIFE))
+        outer_r = zone["r"] * (0.55 + 0.45 * life_ratio)
+        inner_r = outer_r * 0.55
+        arcade.draw_circle_filled(zone["x"], zone["y"], outer_r, ELITE_FIRE_ZONE_COLOR)
+        arcade.draw_circle_filled(zone["x"], zone["y"], inner_r, (255, 200, 120))
+
     # 可破坏环境物（树/矿石/石头）—— 按类型绘制独特造型
     for h in view.harvestables:
         if h.alive and view._in_view(h.center_x, h.center_y):
@@ -183,12 +243,30 @@ def render_game(view):
     for chest in view.chests:
         if not chest.opened and view._in_view(chest.center_x, chest.center_y):
             draw_chest(chest, wb)
-            # 靠近宝箱时显示按E提示
+            # 靠近宝箱时显示按E提示（空投箱额外标注，方便玩家识别事件补给）
             dist = math.hypot(chest.center_x - view.player.center_x,
                               chest.center_y - view.player.center_y)
             if dist < 60:
-                view._world_labels.append((chest.center_x, chest.center_y - 20,
-                                          "按E打开", (255, 220, 80), 10))
+                if getattr(chest, "is_airdrop", False):
+                    view._world_labels.append((chest.center_x, chest.center_y - 20,
+                                              "按E打开空投箱", (255, 190, 90), 10))
+                else:
+                    view._world_labels.append((chest.center_x, chest.center_y - 20,
+                                              "按E打开", (255, 220, 80), 10))
+
+    # 阶段4 商队交互点：青色实心招牌 + 「按E交易」世界标签（弹层由 HUD 层绘制）
+    caravan_point = getattr(view, "caravan_point", None)
+    if caravan_point is not None and view._in_view(caravan_point.center_x, caravan_point.center_y):
+        draw_caravan_sign(caravan_point, wb)
+        sign_y = caravan_point.center_y + EVENT_CARAVAN_SIGN_SIZE / 2 + 22
+        view._world_labels.append((caravan_point.center_x, sign_y,
+                                  EVENT_CARAVAN_SIGN_TEXT, EVENT_CARAVAN_COLOR, 11))
+        # 客户端不执行商队交易（主机权威），故只靠近时才提示，主机/单机才提示按E
+        near = is_near_caravan(view)
+        if near and getattr(view.window.game_state, "net_mode", "solo") != "client":
+            label = "按E交易（↑↓选择 E购买）" if view._caravan_panel_open else "按E交易"
+            view._world_labels.append((caravan_point.center_x, sign_y - 16,
+                                      label, (255, 236, 140), 10))
 
     # 掉落物（资源 + 怪物掉落）—— 图标化 + 文字标签
     for d in view.drops:
@@ -199,24 +277,50 @@ def render_game(view):
                 drop_name = f"{drop_name}x{d.quantity}"
             view._world_labels.append((d.center_x, d.center_y - 16, drop_name, arcade.color.WHITE, 9))
 
-    # 撤离点（不透明实心圆环）
-    for s in view.evac_sprites:
-        cx, cy = s.center_x, s.center_y
-        ring = view._evac_unit_ring
-        if ring is None:
-            outer, inner = EVAC_RADIUS, EVAC_RADIUS - 4
-            seg = 48
-            ring = []
-            for k in range(seg):
-                a = 2 * math.pi * k / seg
-                ring.append((math.cos(a) * outer, math.sin(a) * outer))
-                ring.append((math.cos(a) * inner, math.sin(a) * inner))
-            view._evac_unit_ring = ring
-        shifted = [(px_ + cx, py_ + cy) for px_, py_ in ring]
+    # 阶段2 防守撤离：主撤离点（不透明实心方块 + 血条 + 倒计时标签）
+    # 渲染铁律：一律实心填充，禁线框/空心绘制
+    evac_point = getattr(view, "evac_point", None)
+    if evac_point is not None and view._in_view(evac_point.x, evac_point.y):
+        ex, ey = evac_point.x, evac_point.y
+        side = EVAC_BLOCK_HALF * 2
+        block_color = EVAC_STATE_COLORS.get(evac_point.state, EVAC_COLOR)
         if wb is not None:
-            wb.poly(shifted, EVAC_COLOR)
+            wb.rect(ex, ey, side, side, block_color)
         else:
-            arcade.draw_polygon_filled(shifted, EVAC_COLOR)
+            arcade.draw_rectangle_filled(ex - EVAC_BLOCK_HALF, ey - EVAC_BLOCK_HALF,
+                                         side, side, block_color)
+        # 血条：防守中/被拆/已受损时显示（待激活满血不占视觉）
+        ratio = (evac_point.hp / evac_point.max_hp) if evac_point.max_hp else 0.0
+        if evac_point.state in ("defending", "destroyed") or ratio < 1.0:
+            bar_y = ey + EVAC_BLOCK_HALF + 6
+            fill_w = EVAC_BAR_WIDTH * ratio
+            fill_color = arcade.color.GREEN if ratio > 0.3 else arcade.color.RED
+            if wb is not None:
+                wb.rect(ex, bar_y, EVAC_BAR_WIDTH, EVAC_BAR_HEIGHT, arcade.color.DARK_RED)
+                if fill_w > 0:
+                    # 以中心为基准收缩，保证血条从中向两侧缩（与怪物血条口径一致）
+                    wb.rect(ex - (EVAC_BAR_WIDTH - fill_w) / 2, bar_y, fill_w,
+                            EVAC_BAR_HEIGHT, fill_color)
+            else:
+                arcade.draw_rectangle_filled(ex - EVAC_BAR_WIDTH / 2,
+                                             bar_y - EVAC_BAR_HEIGHT / 2,
+                                             EVAC_BAR_WIDTH, EVAC_BAR_HEIGHT,
+                                             arcade.color.DARK_RED)
+                if fill_w > 0:
+                    arcade.draw_rectangle_filled(
+                        ex - EVAC_BAR_WIDTH / 2 + (EVAC_BAR_WIDTH - fill_w) / 2,
+                        bar_y - EVAC_BAR_HEIGHT / 2, fill_w, EVAC_BAR_HEIGHT, fill_color)
+        # 状态标签（世界坐标，随相机移动）
+        if evac_point.state == "defending":
+            label = f"防守中 {evac_point.defend_left:.0f}s 第{evac_point.wave_no}波"
+        elif evac_point.state == "secured":
+            label = "撤离点已守住 (按E撤离)"
+        elif evac_point.state == "destroyed":
+            label = "撤离点已摧毁 (按E修复)"
+        else:
+            label = "撤离点 (按E激活)"
+        view._world_labels.append((ex, ey - EVAC_BLOCK_HALF - 10, label, block_color, 11))
+    # 〔已删除〕v1 旧撤离绿圈残留：新系统由上方 EvacPoint 方块渲染，旧圈无交互
 
     # 水井（沙漠地图：灰色圆井口 + 井沿矩形）
     well = view.map_data.get("water_well")
@@ -258,10 +362,77 @@ def render_game(view):
     # 修复「客户端看不到怪物」——之前只维护 remote_monsters 字典却从不绘制，
     # 导致主机在模拟 AI 攻击客户端幽灵而客户端视野里没有怪物。
     # 与本地怪物共用同一绘制函数（视口裁剪/血条/攻击冷却条/标签全部一致）。
+    # 位置插值（阶段B3）：20Hz 快照直接绘制会让远端怪「瞬移」。这里按
+    # net_interp_alpha（由 game_view 客户端块每帧推进）在「上一快照位置 →
+    # 本快照位置」之间 lerp 出绘制坐标；绘制完**必须还原** center_x/center_y
+    # ——那是被客户端弹丸命中判定（arcade.check_for_collision 读 rm.center_x）
+    # 与快照逻辑共用的权威坐标，插值只允许发生在绘制这一瞬间。
     for m in view.remote_monsters.values():
-        if hasattr(m, 'alive') and m.alive and view._in_view(m.center_x, m.center_y):
+        if not (hasattr(m, 'alive') and m.alive):
+            continue
+        alpha = getattr(m, 'net_interp_alpha', None)
+        if alpha is None:
+            # 无插值字段（无 net_ghost 的对象/旧数据）：按逻辑坐标原样绘制
+            if not view._in_view(m.center_x, m.center_y):
+                continue
             _draw_monster(view, m, wb)
             _draw_skill_prompt(view, m)
+            continue
+        alpha = max(0.0, min(1.0, alpha))
+        # 插值起点缺失时退回 center_x（最新快照），保证字段缺失也不崩不跳位
+        from_x = getattr(m, 'net_prev_x', m.center_x)
+        from_y = getattr(m, 'net_prev_y', m.center_y)
+        to_x = getattr(m, 'net_next_x', m.center_x)
+        to_y = getattr(m, 'net_next_y', m.center_y)
+        render_x = from_x + (to_x - from_x) * alpha
+        render_y = from_y + (to_y - from_y) * alpha
+        if not view._in_view(render_x, render_y):
+            continue
+        logic_x, logic_y = m.center_x, m.center_y
+        m.center_x, m.center_y = render_x, render_y
+        try:
+            _draw_monster(view, m, wb)
+            _draw_skill_prompt(view, m)
+        finally:
+            # 还原逻辑坐标（命中判定/快照逻辑读它，插值仅限绘制）
+            m.center_x, m.center_y = logic_x, logic_y
+
+    # 怪物技能范围圈（双层实心圆，随 _skill_vfx_timer 消退；数据源 SKILL_PROMPT_CONFIG）
+    # 绘于怪物本体之后：范围圈是「释放中的技能覆盖区」，盖在怪物上方更醒目
+    for m in view.monsters:
+        draw_skill_vfx(m)
+
+    # 局内建造系统（阶段1）：建筑实体（sprite + 顶部血条，实心填充禁线框）
+    if hasattr(view, "build_system"):
+        for b in view.build_system.buildings:
+            if not view._in_view(b.x, b.y):
+                continue
+            b.sprite.draw()
+            # 顶部血条：背景全宽暗红 + 前景按 hp/max_hp 比例绿色（实心）
+            size = b.sprite.width
+            ratio = max(0.0, b.hp / b.max_hp)
+            bw = size * ratio
+            bx = b.x - size / 2
+            by = b.y + size / 2 + 6
+            if wb is not None:
+                wb.rect(bx + size / 2, by, size, 5, arcade.color.DARK_RED)
+                wb.rect(bx + bw / 2, by, bw, 5, arcade.color.GREEN)
+            else:
+                arcade.draw_rect_filled(arcade.XYWH(bx + size / 2, by, size, 5), arcade.color.DARK_RED)
+                arcade.draw_rect_filled(arcade.XYWH(bx + bw / 2, by, bw, 5), arcade.color.GREEN)
+
+        # 建造模式预览格：吸附目标格半透明实心方块（合法绿/非法红，禁线框）
+        gs = view.window.game_state
+        if getattr(gs, "build_mode", False):
+            from entities.build_defs import BUILDS
+            cam = view.controller.camera.position
+            mx = view._mouse_x + cam[0] - WINDOW_WIDTH / 2
+            my = view._mouse_y + cam[1] - WINDOW_HEIGHT / 2
+            sx, sy = view.build_system.snap(mx, my)
+            ok, _ = view.build_system.can_place(mx, my, gs.build_kind)
+            size = BUILDS[gs.build_kind]["size"]
+            color = (70, 190, 70, 110) if ok else (200, 70, 70, 110)
+            arcade.draw_rect_filled(arcade.XYWH(sx, sy, size, size), color)
 
     # 世界层一次性绘制
     if wb is not None:
@@ -652,6 +823,13 @@ def render_game(view):
     # ── 右上角小地图（房间/宝箱/撤离点 + 玩家；M 键切换周围视野/全图）──
     draw_minimap(view)
 
+    # ── 阶段4 随机事件：开局事件横幅（3 秒）+ 商队换购弹层（实心面板）──
+    draw_event_banner(view)
+    draw_caravan_panel(view)
+
+    # ── 局内建造选择面板（仅建造模式绘制；函数内自守 build_mode/net_mode，渲染层零副作用）──
+    draw_build_panel(view)
+
     # 消息提示
     if view._message_timer > 0:
         view._hud_text("msg", view._message, WINDOW_WIDTH // 2, 40,
@@ -713,3 +891,126 @@ def render_game(view):
                            WINDOW_WIDTH // 2, WINDOW_HEIGHT - 60,
                            color, 22, anchor_x="center", anchor_y="center",
                            bold=True)
+
+
+# ===================== 局内建造：建造选择面板（纯只读渲染层） =====================
+
+# 面板文本缓存单例（懒创建，见 _build_panel_cache）
+_BUILD_PANEL_TEXT_CACHE = None
+
+
+def _build_panel_cache():
+    """取（或首次创建）建造面板 TextCache 单例。
+
+    面板中文文本必须经 TextCache 绘制：7 行 + 标题 + 提示每帧刷新，走
+    arcade.draw_text 会每帧重建纹理（卡顿 + PerformanceWarning）。
+    views.text_cache 走**函数内延迟 import**：views/game_view.py 在模块层 import
+    game.rendering，模块层再 import views 会成环（全仓既有惯例，见根 AGENTS.md）。
+    """
+    global _BUILD_PANEL_TEXT_CACHE
+    if _BUILD_PANEL_TEXT_CACHE is None:
+        from views.text_cache import TextCache
+        _BUILD_PANEL_TEXT_CACHE = TextCache()
+    return _BUILD_PANEL_TEXT_CACHE
+
+
+def _build_affordable(cost: dict, resources: dict) -> bool:
+    """造价资源是否齐备（只读判定，资源口径同 BuildSystem.can_place 的资源段）
+
+    故意不复用 can_place：它连带做边界/距离/压墙/占位校验、且对 net_mode=="client"
+    直接拒绝，而面板只需要「与落点无关的材料够不够」这一个维度。
+    禁在此改写 run_carried —— 扣资源唯一入口是 BuildSystem.place（渲染层禁写业务状态）。
+    """
+    return all(int(resources.get(rid, 0) or 0) >= int(qty) for rid, qty in cost.items())
+
+
+def draw_build_panel(view):
+    """局内建造选择面板：屏幕右侧列出全部建筑的「序号 / 中文名 / 造价 / 可否建」
+
+    - **为何只在 build_mode 绘制**：本函数是纯表现层，不在建造模式时屏幕不该出现建造清单；
+      新增建筑后行数随 BUILDS 自动增长，禁硬编码行数与建筑顺序。
+    - **为何 client 不画**：联机建造由房主裁决（BuildSystem.can_place/place 对
+      net_mode=="client" 直接拒绝，见 game/AGENTS.md），客户端画出来是一份永远建不了的清单。
+    - **纯只读**：只读 BUILDS 定义与 gs.run_carried["resource"]，禁在此扣资源/放置建筑。
+    - 行序 = BUILDS 插入序，与 input_handler 的 1-N 热键位序一一对应（序号即键位）。
+    - 一律不透明实心填充，禁 draw_*_outline / draw_arc_outline / draw_line（渲染铁律）。
+    """
+    gs = view.window.game_state
+    if not getattr(gs, "build_mode", False):
+        return
+    if getattr(gs, "net_mode", "solo") == "client":
+        return
+    from entities.build_defs import BUILDS
+    # 造价文案唯一口径：复用建造模式浮动文字的 _build_cost_text（禁在此另写一套格式）
+    from game.input_handler import _build_cost_text
+
+    build_kinds = list(BUILDS.keys())
+    total = len(build_kinds)
+    if total == 0:
+        return
+    # 选中项字段名 = gs.build_kind（main.GameState）；getattr 容错，字段缺失时回退第 1 项
+    sel_kind = getattr(gs, "build_kind", None)
+    sel_index = build_kinds.index(sel_kind) if sel_kind in build_kinds else 0
+
+    # 局内携带资源：run_carried["resource"] = {item_id: qty}，键名 wood/stone/ore 为跨层契约
+    carried = getattr(gs, "run_carried", None) or {}
+    resources = carried.get("resource") or {}
+
+    panel_w = BUILD_PANEL_WIDTH
+    row_block_h = BUILD_PANEL_ROW_H - BUILD_PANEL_ROW_GAP
+    # 面板高度随条目数自适应（行数 = BUILDS 条目数，禁硬编码）
+    panel_h = (BUILD_PANEL_MARGIN * 2 + BUILD_PANEL_TITLE_H
+               + total * BUILD_PANEL_ROW_H + BUILD_PANEL_HINT_H)
+    # 贴屏幕右侧：避开屏幕中心的鼠标瞄准/落点预览区
+    cx = WINDOW_WIDTH - BUILD_PANEL_SIDE_MARGIN - panel_w / 2
+    cy = WINDOW_HEIGHT / 2
+    row_w = panel_w - BUILD_PANEL_MARGIN * 2
+    row_left = cx - row_w / 2
+    cache = _build_panel_cache()
+
+    # 面板底（实心）
+    arcade.draw_rect_filled(arcade.XYWH(cx, cy, panel_w, panel_h), BUILD_PANEL_BG)
+    # 标题条（实心，兼作边框，禁 outline 绘制）
+    title_y = cy + panel_h / 2 - BUILD_PANEL_MARGIN - BUILD_PANEL_TITLE_H / 2
+    arcade.draw_rect_filled(
+        arcade.XYWH(cx, title_y, panel_w - 8, BUILD_PANEL_TITLE_H), BUILD_PANEL_ROW_BG)
+    sel_def = BUILDS[build_kinds[sel_index]]
+    cache.text("bp_title", f"建造模式  {sel_index + 1}/{total}  {sel_def.get('name', '')}",
+               cx, title_y, BUILD_PANEL_TEXT_HL, BUILD_PANEL_TITLE_SIZE,
+               anchor_x="center", anchor_y="center", bold=True)
+
+    # 行块（自上而下 1..N，序号 = 键位）
+    rows_top = cy + panel_h / 2 - BUILD_PANEL_MARGIN - BUILD_PANEL_TITLE_H
+    for idx, kind in enumerate(build_kinds):
+        bdef = BUILDS[kind]
+        ry = rows_top - idx * BUILD_PANEL_ROW_H
+        selected = idx == sel_index
+        cost = bdef.get("cost", {})
+        affordable = _build_affordable(cost, resources)
+        arcade.draw_rect_filled(
+            arcade.XYWH(cx, ry, row_w, row_block_h),
+            BUILD_PANEL_ROW_HL if selected else BUILD_PANEL_ROW_BG)
+        # 行首序号实心块：定宽块让 1-7 序号列对齐，玩家一眼看到键位
+        key_cx = row_left + BUILD_PANEL_KEY_PAD + BUILD_PANEL_KEY_W / 2
+        arcade.draw_rect_filled(
+            arcade.XYWH(key_cx, ry, BUILD_PANEL_KEY_W, row_block_h), BUILD_PANEL_KEY_BG)
+        cache.text(f"bp_key_{idx}", str(idx + 1), key_cx, ry,
+                   BUILD_PANEL_TEXT_HL, BUILD_PANEL_KEY_SIZE,
+                   anchor_x="center", anchor_y="center", bold=True)
+        # 行文案：名称 + 造价；材料不足追加中文提示（禁只靠暗色区分可建性）
+        text = f"{bdef.get('name', kind)}   {_build_cost_text(cost)}"
+        if selected:
+            color = BUILD_PANEL_TEXT_HL if affordable else BUILD_PANEL_TEXT_WARN
+        else:
+            color = BUILD_PANEL_TEXT if affordable else BUILD_PANEL_TEXT_DIM
+        if not affordable:
+            text += "  [材料不足]"
+        cache.text(f"bp_row_{idx}", text,
+                   key_cx + BUILD_PANEL_KEY_W / 2 + BUILD_PANEL_KEY_PAD, ry,
+                   color, BUILD_PANEL_TEXT_SIZE, anchor_x="left", anchor_y="center")
+
+    # 底部操作提示（键位区间随条目数自适应，上限 9 = input_handler 支持的数字键位数）
+    hint_y = cy - panel_h / 2 + BUILD_PANEL_MARGIN + BUILD_PANEL_HINT_H / 2
+    cache.text("bp_hint", f"1-{min(total, 9)} 选建筑  左键放置  B 退出建造",
+               cx, hint_y, BUILD_PANEL_TEXT, BUILD_PANEL_HINT_SIZE,
+               anchor_x="center", anchor_y="center")

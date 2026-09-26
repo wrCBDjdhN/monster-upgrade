@@ -1,4 +1,9 @@
-"""装备与药品定义：头盔、护甲、背包、药水"""
+"""装备与药品定义：头盔、护甲、背包、药水
+
+阶段9 套装字段：部分头盔/护甲带 ``set``（套装 id，见 config.SET_BONUSES 的
+"mummy" 木乃伊套 / "space" 航天套 / "strong_force" 强相互作用力套），
+武器侧的 ``set`` 字段在 entities/weapon_defs.py；无套装的普通装备**不加**该字段。
+"""
 
 # ── 头盔 ──
 HELMETS = {
@@ -34,6 +39,7 @@ HELMETS = {
         "color": (210, 190, 120),
         "description": "减少10点伤害",
         "capacity_cost": 1,
+        "set": "mummy",  # 套装：木乃伊套（头盔+护甲+诅咒弯刀，3 件）
         "market_restricted": True,  # 不可在市场购买
     },
     # === 航天头盔（航天基地掉落，不可在市场购买）===
@@ -44,6 +50,7 @@ HELMETS = {
         "color": (80, 100, 140),
         "description": "减少12点伤害",
         "capacity_cost": 1,
+        "set": "space",  # 套装：航天套（头盔+护甲+航天枪械，4 件）
         "market_restricted": True,  # 不可在市场购买
     },
     # === 神器头盔（仅锻造获得，不可购买）===
@@ -54,6 +61,7 @@ HELMETS = {
         "color": (200, 200, 255),
         "description": "由强相互作用力材料制成，防御极高",
         "capacity_cost": 3,
+        "set": "strong_force",  # 套装：强相互作用力套（头盔+护甲，2 件）
         "artifact": True,  # 神器标记
     },
     "holy_crown": {
@@ -64,6 +72,18 @@ HELMETS = {
         "description": "由神圣之光凝聚而成，防御远超普通头盔",
         "capacity_cost": 3,
         "artifact": True,
+    },
+    # === 图鉴配方专属头盔（集齐武器图鉴后由锻造坊"配方"页制作，唯一来源）===
+    "codex_weapon_helm": {
+        "name": "守望者冠冕",
+        "defense": 50,  # 强于常规神器头盔最高（圣光冠冕44）
+        "price": 0,  # 价格为0：不可在市场购买，仅配方制作获得
+        "color": (90, 200, 255),  # 亮蓝=守望
+        "description": "集齐武器图鉴后锻成，防御冠绝所有头盔",
+        "capacity_cost": 3,
+        "artifact": True,           # 神器标记
+        "market_restricted": True,  # 市场禁购标记
+        "recipe_only": True,        # 配方专属：仅"配方"页可制作
     },
 }
 
@@ -101,6 +121,7 @@ ARMORS = {
         "color": (200, 180, 110),
         "description": "减少15点伤害",
         "capacity_cost": 2,
+        "set": "mummy",  # 套装：木乃伊套（头盔+护甲+诅咒弯刀，3 件）
         "market_restricted": True,  # 不可在市场购买
     },
     # === 航天护甲（航天基地掉落，不可在市场购买）===
@@ -111,6 +132,7 @@ ARMORS = {
         "color": (60, 80, 120),
         "description": "减少18点伤害",
         "capacity_cost": 2,
+        "set": "space",  # 套装：航天套（头盔+护甲+航天枪械，4 件）
         "market_restricted": True,  # 不可在市场购买
     },
     # === 神器护甲（仅锻造获得，不可购买）===
@@ -121,7 +143,8 @@ ARMORS = {
         "color": (200, 200, 255),
         "description": "由强相互作用力材料制成，防御力极高",
         "capacity_cost": 3,
-        "artifact": True,  # 神器标记
+        "set": "strong_force",  # 套装：强相互作用力套（头盔+护甲，2 件）
+        "artifact": True,
     },
     "dragon_scale_armor": {
         "name": "龙鳞战甲",
@@ -132,16 +155,32 @@ ARMORS = {
         "capacity_cost": 3,
         "artifact": True,
     },
+    # === 图鉴配方专属护甲（集齐药水图鉴后由锻造坊"配方"页制作，唯一来源）===
+    "codex_potion_cuirass": {
+        "name": "不朽胸铠",
+        "defense": 82,  # 强于常规神器护甲最高（龙鳞战甲68）
+        "price": 0,  # 价格为0：不可在市场购买，仅配方制作获得
+        "color": (120, 255, 180),  # 翠绿=药力
+        "description": "以万种药力淬炼，坚不可摧且百毒不侵",
+        "capacity_cost": 3,
+        "artifact": True,           # 神器标记
+        "market_restricted": True,  # 市场禁购标记
+        "recipe_only": True,        # 配方专属：仅"配方"页可制作
+    },
 }
 
 # ── 背包 ──
 BACKPACKS = {
     "small_bag": {
         "name": "小布袋",
-        "capacity": 5,
-        "price": 20,
+        # 2026-09-26 用户决策：新玩家首局赠送本背包 + 扩容至 10。
+        # 原因：全新存档无背包 → 容量 0 → 无法拾取资源 → 撤离点激活（森林 3+3+1=7）
+        # 与路障/建筑（8）材料永远攒不够，首局双死锁。10 同时覆盖两者且仍小于中背包 12。
+        # 容量变大故同步提价 20→35，价格口径仍由本表驱动，勿在别处硬编码。
+        "capacity": 10,
+        "price": 35,
         "color": (100, 70, 40),
-        "description": "可携带5个资源",
+        "description": "可携带10个资源",
         "capacity_cost": 1,  # 占1格背包容量
     },
     "medium_bag": {
@@ -177,6 +216,18 @@ BACKPACKS = {
         "description": "传说中能吞下天空的宝袋，容量高达500",
         "capacity_cost": 1,
         "artifact": True,  # 神器标记
+    },
+    # === 图鉴配方专属背包（集齐装备图鉴后由锻造坊"配方"页制作，唯一来源）===
+    "codex_equipment_bag": {
+        "name": "万物流转囊",
+        "capacity": 620,  # 强于常规神器背包（吞天包500）
+        "price": 0,  # 价格为0：不可在市场购买，仅配方制作获得
+        "color": (255, 200, 120),  # 琥珀=万物归流
+        "description": "集齐装备图鉴后锻成，容量冠绝所有背包",
+        "capacity_cost": 1,
+        "artifact": True,           # 神器标记
+        "market_restricted": True,  # 市场禁购标记
+        "recipe_only": True,        # 配方专属：仅"配方"页可制作
     },
 }
 

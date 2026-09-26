@@ -1,15 +1,27 @@
-"""仓库页面：查看/售卖资源，装备/售卖武器，管理装备（支持滚轮滚动）"""
+"""仓库页面：查看/售卖资源，装备/售卖武器，管理装备（支持滚轮滚动）
+
+阶段10：武器/装备的**售价**计入市场设施的售出回收加成
+（entities.facility_defs.market_sell_bonus(市场设施等级)）：
+Lv0（未建造）/Lv1 = +0% → 与旧口径完全一致；Lv2 = +5%、Lv3 = +10%。
+显示价与实际入账金币同经 db 的 weapon_sell_price/equipment_sell_price 纯函数计算，
+保证「看到的价 = 售得的金币」。资源售卖价走 config 的 sell_price，不受该加成影响。
+"""
 
 import arcade
 from config import WINDOW_WIDTH, WINDOW_HEIGHT
 from entities.resource_defs import RESOURCES
+from entities.facility_defs import market_sell_bonus
 from db.database import (
     get_warehouse, get_weapons, get_gold, sell_warehouse_item, sell_weapon,
     get_equipment_inventory, equip_from_inventory, sell_equipment,
+    get_facility_level, weapon_sell_price, equipment_sell_price,
 )
 from views.scroll_view import ScrollView
 from views.text_cache import TextCache
 from game.sound_manager import sound_manager
+
+# 市场设施 id（售出回收加成的来源；等级 0 = 未建造 → 无加成）
+MARKET_FACILITY_ID = "market"
 
 
 class WarehouseView(ScrollView):
@@ -96,6 +108,8 @@ class WarehouseView(ScrollView):
         wh = get_warehouse(pid)
         weapons = get_weapons(pid)
         offset = self.scroll_offset
+        # 阶段10：市场设施售出回收加成（Lv0/Lv1 = 0.0 → 与旧口径完全一致）
+        sell_bonus = market_sell_bonus(get_facility_level(pid, MARKET_FACILITY_ID))
 
         # 固定头部
         self._tc.text("header_title", "仓 库", WINDOW_WIDTH // 2, WINDOW_HEIGHT - 50,
@@ -166,8 +180,8 @@ class WarehouseView(ScrollView):
                 self._tc.text(f"wep_equip_{i}", "已装备" if is_equipped else "装备",
                               eq_btn.center_x, eq_btn.center_y,
                               arcade.color.WHITE, 10, anchor_x="center", anchor_y="center")
-                # 售卖按钮
-                sell_price = int(w["damage"]) * 2
+                # 售卖按钮（显示价 = 实际入账金币，同经 db 纯函数计算）
+                sell_price = weapon_sell_price(w["damage"], sell_bonus)
                 sv_btn = arcade.XYWH(WINDOW_WIDTH - 80, y + 6, 70, 26)
                 self.weapon_sell_buttons.append((sv_btn, w, sell_price))
                 arcade.draw_rect_filled(sv_btn, (100, 30, 30))
@@ -211,9 +225,9 @@ class WarehouseView(ScrollView):
                 self._tc.text(f"eq_equip_{i}", "已装备" if eq["is_equipped"] else "装备",
                               eq_btn.center_x, eq_btn.center_y,
                               arcade.color.WHITE, 10, anchor_x="center", anchor_y="center")
-                # 售卖按钮
+                # 售卖按钮（显示价 = 实际入账金币，同经 db 纯函数计算）
                 base = eq["capacity"] if eq["slot"] == "backpack" else eq["defense"]
-                sell_price = int(base) * 2
+                sell_price = equipment_sell_price(base, sell_bonus)
                 sv_btn = arcade.XYWH(WINDOW_WIDTH - 80, y + 6, 70, 26)
                 self.equip_sell_buttons.append((sv_btn, eq, sell_price))
                 arcade.draw_rect_filled(sv_btn, (100, 30, 30))
@@ -300,10 +314,11 @@ class WarehouseView(ScrollView):
                     gs.equipped_weapon_id = w["id"]
                 return
 
-        # 售卖武器
+        # 售卖武器（价格含市场设施回收加成，与本页显示价同口径）
+        sell_bonus = market_sell_bonus(get_facility_level(pid, MARKET_FACILITY_ID))
         for btn, w, sell_price in self.weapon_sell_buttons:
             if btn.point_in_rect((x, y)):
-                sell_weapon(pid, w["id"])
+                sell_weapon(pid, w["id"], sell_bonus)
                 if gs.equipped_weapon_id == w["id"]:
                     gs.equipped_weapon_id = None
                 self._rebuild()
@@ -345,10 +360,10 @@ class WarehouseView(ScrollView):
                 self._rebuild()
                 return
 
-        # 售卖装备（头盔/护甲/背包）
+        # 售卖装备（价格含市场设施回收加成，与本页显示价同口径）
         for btn, eq, sell_price in self.equip_sell_buttons:
             if btn.point_in_rect((x, y)):
-                sell_equipment(pid, eq["id"])
+                sell_equipment(pid, eq["id"], sell_bonus)
                 self._rebuild()
                 return
 
@@ -363,8 +378,9 @@ class WarehouseView(ScrollView):
                 self.window.show_view(StartView(self.window_ref))
             return
 
-        # 市场
+        # 市场（阶段10：过 _enter_facility 守卫——未建造先进设施页）
         if self.market_rect.point_in_rect((x, y)):
             from views.market_view import MarketView
-            self.window.show_view(MarketView(self.window_ref))
+            from views.start_view import _enter_facility
+            _enter_facility(self, "market", MarketView)
             return

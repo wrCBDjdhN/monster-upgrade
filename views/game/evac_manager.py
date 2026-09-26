@@ -56,6 +56,14 @@ class EvacManager:
         # 本局药水槽一并清空（死亡/撤离失败 = 药水随携带物丢失）
         if hasattr(gs, 'run_potions'):
             gs.run_potions = {}
+        # 局内建造系统（阶段1）：run 结束统一清场——反注册怪物碰撞网格并关闭建造模式
+        build_system = getattr(self.gv, "build_system", None)
+        if build_system is not None:
+            build_system.clear()
+        elif hasattr(gs, "buildings"):
+            gs.buildings.clear()
+        if hasattr(gs, "build_mode"):
+            gs.build_mode = False
         # 从数据库中删除装备（撤离失败 = 死亡，丢失所有装备）
         pid = gs.player_id
         if pid:
@@ -87,6 +95,13 @@ class EvacManager:
         if self.gv.player is None:
             return
         gs = self.gv.window.game_state
+        # 阶段2 防守撤离：本局行动失败 → 撤离点失活、怪物解除对撤离点的锁定
+        # （三条分支共用：host 主机玩家阵亡不代表全房结束，但主机玩家已无防守能力；
+        #  观战期间不得再有怪物扑向撤离点）
+        self.gv._clear_evac_defense()
+        # 阶段5 祝福：本局结束（三条失败分支共用）→ 清空持有的祝福并把属性还原到无祝福基准，
+        # 避免观战/结算页残留上一局的加成（下一局 setup() 会重新固定基准）
+        self.gv.clear_blessings()
         if gs.net_mode == "host":
             # 联机主机死亡/超时：清装备 → 观战模式（不关房、不广播 ROOM_ENDED，
             # 房间生命周期与单局解耦：剩余客户端继续玩，全员结束后回房等待）

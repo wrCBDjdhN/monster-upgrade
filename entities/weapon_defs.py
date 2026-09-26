@@ -15,6 +15,7 @@
 - color: 渲染颜色 RGB
 - shape: 武器形状标识（用于绘制）
 - special: 特殊属性（penetrating=穿透, explosive=爆炸）
+- set: 所属套装 id（阶段9；仅套装武器有，缺省表示无套装，见 config.SET_BONUSES）
 
 相关配置从 config.py 导入：
 - PROJECTILE_SPEED: 远程弹丸基础速度
@@ -84,8 +85,26 @@ MELEE_WEAPONS = {
         "color": (140, 200, 90),  # 绿色=诅咒毒系
         "shape": "sword",
         "capacity_cost": 2,
+        "set": "mummy",  # 套装：木乃伊套（头盔+护甲+诅咒弯刀，3 件）
         "debuff": "poison",  # 命中附加中毒
         "market_restricted": True,  # 市场禁购标记
+    },
+    # === 图鉴配方专属武器（集齐怪物图鉴后由锻造坊"配方"页制作，唯一来源）===
+    "codex_monster_blade": {
+        "kind": "melee",
+        "item_id": "codex_monster_blade",
+        "name": "屠魔者之刃",
+        "damage": 72,  # 强于常规神器近战最高（和道一文字60 / 雷神之锤58）
+        "attack_speed": 1.1,
+        "range": 62,
+        "price": 0,  # 价格为0：不可在市场购买，仅配方制作获得
+        "color": (200, 60, 60),  # 血红=屠魔
+        "shape": "sword",
+        "capacity_cost": 3,
+        "debuff": "poison",  # 命中附加中毒（怪物图鉴主题）
+        "artifact": True,           # 神器标记（图鉴按 ★ 显示）
+        "market_restricted": True,  # 市场禁购标记（市场列表跳过）
+        "recipe_only": True,        # 配方专属：不进普通锻造神器池，仅"配方"页可制作
     },
     # === 神器武器（仅锻造获得，不可购买）===
     "wado_ichimonji": {
@@ -257,6 +276,7 @@ RANGED_WEAPONS = {
         "shape": "gun",
         "capacity_cost": 3,
         "special": "penetrating",  # 穿透敌人
+        "set": "space",  # 套装：航天套（头盔+护甲+航天枪械，4 件）
         "market_restricted": True,  # 市场禁购标记（枪械类：仅宝箱/锻造/怪物掉落）
     },
     "rocket_launcher": {
@@ -272,6 +292,7 @@ RANGED_WEAPONS = {
         "shape": "gun",
         "capacity_cost": 4,
         "special": "explosive",  # 爆炸范围伤害
+        "set": "space",  # 套装：航天套（头盔+护甲+航天枪械，4 件）
         "market_restricted": True,  # 市场禁购标记（枪械类：仅宝箱/锻造/怪物掉落）
     },
     # === 木乃伊系远程武器（不可在市场购买，仅开箱/锻造/怪物掉落）===

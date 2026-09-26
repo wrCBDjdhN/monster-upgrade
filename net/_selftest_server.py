@@ -9,6 +9,11 @@
    JOIN_REJECT（原因含"满员"）
 4. 断线感知：客户端主动断开后触发 on_disconnect 回调，房间人数-1
 5. stop() 优雅关闭：服务器线程退出，无 hang
+6. 阶段11 新消息的服务器层路由（Task 11.2 Step 2）：
+   - 客户端上报 EVAC_POINT_ACTION → 入站封装原样透传，且入站 player_id 以服务器
+     认定为准（防伪造：主机一律用发送者身份，不信载荷里的 player_id）
+   - 主机 broadcast EVAC_POINT_STATE → 全体客户端收到且 7 个状态字段一致
+   - 主机 send_to 单播 MISSION_PROGRESS → 只到归属端（防双计铁律的传输层保证）
 
 运行方式：python net/_selftest_server.py
 """
@@ -163,6 +168,55 @@ async def main() -> int:
         except asyncio.TimeoutError:
             pass  # B 确实没收到，符合预期
         print("  [2d] 广播 exclude 生效: 仅 A 收到")
+
+        # ── 2e 阶段11 新消息的服务器层路由（Task 11.2 Step 2）──
+        # 2e-1 客户端上报 EVAC_POINT_ACTION：入站封装原样透传，
+        #      且入站 player_id 以服务器认定为准（主机一律用发送者身份，防伪造）
+        evac_action = {"player_id": pid_a, "action": "activate", "x": 640.0, "y": 360.0}
+        await ws_a.send(encode(MsgType.EVAC_POINT_ACTION, evac_action))
+        env_evac = await _wait_inbound(
+            bridge,
+            lambda e: e.get("player_id") == pid_a
+            and e.get("msg_type") == "EVAC_POINT_ACTION",
+        )
+        assert env_evac["payload"] == evac_action, f"EVAC_POINT_ACTION 应原样透传: {env_evac}"
+        assert env_evac["player_id"] == pid_a, "入站 player_id 应为服务器认定的发送者（防伪造）"
+        print(f"  [2e-1] EVAC_POINT_ACTION 入站封装（发送者={env_evac['player_id']} 与握手一致，载荷原样）")
+
+        # 2e-2 主机广播 EVAC_POINT_STATE：全体客户端收到，7 字段一致（客户端只镜像不本地推演）
+        evac_state = {
+            "x": 640.0, "y": 360.0, "state": "defending",
+            "hp": 1000.0, "max_hp": 1000.0, "defend_left": 60.0, "wave_no": 1,
+        }
+        server.broadcast(MsgType.EVAC_POINT_STATE, evac_state)
+        for ws, tag in ((ws_a, "A"), (ws_b, "B")):
+            st_type, st_payload = decode(
+                await asyncio.wait_for(ws.recv(), timeout=MSG_TIMEOUT)
+            )
+            assert st_type == MsgType.EVAC_POINT_STATE, f"{tag} 应收到 EVAC_POINT_STATE: {st_type}"
+            assert st_payload == evac_state, f"{tag} 撤离点状态字段不符: {st_payload}"
+        print("  [2e-2] EVAC_POINT_STATE 广播: A/B 均收到且 7 字段一致")
+
+        # 2e-3 任务进度单播：只到归属端 B，A 收不到
+        #      （局内事件唯一计数端=主机，防双计首先靠传输层不外泄保证）
+        server.send_to(pid_b, MsgType.MISSION_PROGRESS, {
+            "player_id": pid_b, "event": "kill", "amount": 1,
+        })
+        mp_type, mp_payload = decode(
+            await asyncio.wait_for(ws_b.recv(), timeout=MSG_TIMEOUT)
+        )
+        assert mp_type == MsgType.MISSION_PROGRESS, f"B 应收到 MISSION_PROGRESS: {mp_type}"
+        assert (
+            mp_payload["player_id"] == pid_b
+            and mp_payload["event"] == "kill"
+            and mp_payload["amount"] == 1
+        ), f"单播进度载荷不符: {mp_payload}"
+        try:
+            await asyncio.wait_for(ws_a.recv(), timeout=0.5)
+            raise AssertionError("MISSION_PROGRESS 单播外泄：A 不应收到")
+        except asyncio.TimeoutError:
+            pass  # A 确实没收到（send_to 只发给归属端），符合预期
+        print("  [2e-3] MISSION_PROGRESS 单播: 仅归属端 B 收到，A 收不到")
 
         # ── 3) 满员拒绝：3 个客户端入座后（槽位 0 保留主机），第 4 个客户端被拒 ──
         ws_c, pid_c = await _handshake_join(server.port, "玩家C")

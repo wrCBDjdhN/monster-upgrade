@@ -2,6 +2,7 @@
 
 显示结构（自上而下）：
 - 装备栏（当前装备的武器/头盔/护甲/背包，来自 GameState，不占背包容量，可丢弃）
+- 套装（阶段9：装备栏下方显示套装名 + 进度 2/3，激活时附套装效果文案）
 - 金币（不可丢弃）
 - 资源（可丢弃）
 - 武器（可丢弃，run_carried 中的多余武器）
@@ -16,6 +17,7 @@
 
 import math
 import arcade
+from arcade.types import Color
 from config import WINDOW_WIDTH, WINDOW_HEIGHT
 from db.connection import _conn
 from entities.resource_defs import RESOURCES
@@ -61,9 +63,10 @@ class BackpackView(ScrollView):
         y_start = WINDOW_HEIGHT - 120
         y = y_start
 
-        # 装备栏（标题 + 4 槽 + 间距）
+        # 装备栏（标题 + 4 槽 + 套装行 + 间距）
         y -= 32          # 标题
         y -= 32 * 4      # 4 个槽位
+        y -= 24 * len(self._set_display_rows())  # 套装行（阶段9，与 on_draw 同一方法算行数）
         y -= 20          # 间距
 
         # 金币
@@ -200,6 +203,52 @@ class BackpackView(ScrollView):
         self._discard_dialog_item = None
         # 执行丢弃
         self._discard_item(item_type, item_id, level, qty=qty)
+        # 丢弃装备栏物品会改变穿戴组合 → 必须重算套装（脱下套装件即刻失效，不残留）
+        self._sync_set_bonuses()
+
+    def _equipped_item_ids(self) -> list[str]:
+        """当前装备栏的 item_id 清单（武器/头盔/护甲/背包，空槽不计入）
+
+        直接复用 ``game.player.equipped_item_ids_from_gs``（与祝福收口处同一取数口），
+        保证「属性生效」与「套装展示」两处统计永远一致。
+        """
+        from game.player import equipped_item_ids_from_gs
+        return equipped_item_ids_from_gs(self.window_ref.game_state)
+
+    def _sync_set_bonuses(self) -> None:
+        """丢弃/换装后重算套装加成（套装加值并入属性基准，祝福在其后叠加）"""
+        player = getattr(self.game_view, "player", None)
+        if player is not None:
+            player.refresh_set_bonuses(self._equipped_item_ids())
+
+    def _set_display_rows(self) -> list[tuple[str, Color, int, int]]:
+        """套装展示行（阶段9）：返回 [(文本, 颜色, 字号, 左偏移 x)]
+
+        on_draw 与 _build_content 共用本方法，保证「画出来的行」与「预留的高度」
+        严格一致（否则套装行会与下方区域重叠）。
+        渲染铁律：只画不透明实心文字，不画任何描边/线框。
+        激活档用金色 + 套装效果文案；未达档用灰色 + 还差几件提示。
+        """
+        from game.player import set_bonus_report
+        rows: list[tuple[str, Color, int, int]] = []
+        report = set_bonus_report(self._equipped_item_ids())
+        if not report:
+            return rows
+        rows.append(("套装:", arcade.color.WHITE, 16, 50))
+        for entry in report:
+            active = bool(entry["active_text"])
+            rows.append((f"{entry['name']} {entry['progress']}",
+                         arcade.color.GOLD if active else arcade.color.LIGHT_GRAY, 14, 60))
+            if active:
+                rows.append((f"套装效果: {entry['active_text']}", arcade.color.GOLD, 12, 70))
+            else:
+                pending = [tier for tier in entry["tiers"] if not tier[1]]
+                if pending:
+                    next_tier = min(pending, key=lambda tier: tier[0])
+                    lack = max(0, next_tier[0] - entry["have"])
+                    rows.append((f"再穿 {lack} 件激活: {next_tier[2]}",
+                                 arcade.color.GRAY, 12, 70))
+        return rows
 
     def on_key_press(self, key, modifiers):
         """处理键盘输入（丢弃对话框数字输入）"""
@@ -716,6 +765,11 @@ class BackpackView(ScrollView):
         else:
             self._tc.text("equip_pack", "背包: (空)", 60, y, arcade.color.GRAY, 14)
         y -= 32
+
+        # ── 套装（阶段9：套装名 + 进度 2/3，激活时附套装效果文案）──
+        for i, (row_text, row_color, row_size, row_x) in enumerate(self._set_display_rows()):
+            self._tc.text(f"set_{i}", row_text, row_x, y, row_color, row_size)
+            y -= 24
         y -= 20  # 装备栏与下方区域间距
 
         # ── 金币 ──

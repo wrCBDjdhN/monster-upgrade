@@ -50,26 +50,38 @@ class CharacterSelectView(arcade.View):
         self.back_hover = False
         # 是否已主动选定角色：False 时不显示「进入地图」按钮（选定后才出现）
         self._picked = False
-        # 新手教程（阶段 2）：角色选择向导
+        # 新手教程（阶段 1）：角色选择向导
         self.tut_pages = self._build_tutorial_pages()
         self.tut_next_rect = None
         self.tut_skip_rect = None
         self.tut_next_hover = False
 
     def _build_tutorial_pages(self):
-        """新手教程阶段 2：角色选择向导（介绍角色系统，引导选初始角色）"""
-        from views.tutorial import TutorialPage
+        """新手教程阶段 1：角色选择向导（介绍角色系统，引导选免费初始角色）
+
+        阶段编号口径见 main.TutorialState（0 开始界面 / 1 角色选择 / 2 地图选择 /
+        3 游戏内 / 4 撤离结算 / 5 市场 / 6 完成）——本文件原 docstring 误写
+        「阶段 2」，与判定用的 tut.stage == 1 矛盾，2026-09-26 修正。
+
+        文案去硬编码（2026-09-26）：角色数量取 len(CHARACTER_ORDER)、
+        付费角色取 CHARACTERS 里 price>0 的条目、技能键位实查
+        action_key_label("skill")（可重绑），禁写死「4 个角色」「按 F」。
+        """
+        from views.tutorial import TutorialPage, action_key_label
+        paid = [str(CHARACTERS[c]["name"]) for c in CHARACTER_ORDER
+                if int(CHARACTERS[c].get("price", 0) or 0) > 0]
         return [
             TutorialPage("选择角色", [
-                "4 个角色可选：初始角色免费，法师/骑士/刺客可金币购买解锁。",
-                "每个角色有专属技能（游戏中按 F 释放）和被动加成。",
-                "新手先用免费的【初始角色】即可，点击卡片选中它，",
+                f"{len(CHARACTER_ORDER)} 个角色可选，初始角色免费，",
+                f"其余（{'/'.join(paid) if paid else '无'}）可金币购买解锁。",
+                f"每个角色有专属技能（游戏中按 {action_key_label('skill')} 释放）和被动加成。",
+                "新手先用免费的初始角色即可，点击卡片选中它，",
                 "再点击底部【进入地图】按钮。",
             ], highlight=self.cards[0]),
         ]
 
     def _tut_showing(self):
-        """教程向导是否正在本界面显示（阶段 2 且未翻完页）"""
+        """教程向导是否正在本界面显示（阶段 1 且未翻完页）"""
         tut = getattr(self.window.game_state, "tutorial", None)
         return (tut is not None and tut.active and tut.stage == 1
                 and tut.page < len(self.tut_pages))
@@ -257,7 +269,7 @@ class CharacterSelectView(arcade.View):
             arcade.color.WHITE, size=14, anchor_x="center", anchor_y="center",
         )
 
-        # 新手教程（阶段 2）：向导弹窗覆盖层（画在最上层）
+        # 新手教程（阶段 1）：向导弹窗覆盖层（画在最上层）
         if self._tut_showing():
             from views.tutorial import draw_tutorial_page
             tut = getattr(self.window.game_state, "tutorial", None)
@@ -321,7 +333,7 @@ class CharacterSelectView(arcade.View):
         # 进入地图按钮（需已选定角色后才可用，正常必有）
         if self._picked and self.enter_rect.point_in_rect((x, y)):
             if self.selected in self._unlocked:
-                # 新手教程：角色已选定 → 进入地图选择（阶段 3 接管）
+                # 新手教程：角色已选定 → 进入地图选择（阶段 2 接管）
                 tut = getattr(self.window.game_state, "tutorial", None)
                 if tut is not None and tut.active and tut.stage == 1:
                     tut.stage = 2

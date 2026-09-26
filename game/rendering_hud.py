@@ -8,13 +8,24 @@ import arcade
 from config import (
     WINDOW_WIDTH, WINDOW_HEIGHT, MINIMAP_SIZE, MINIMAP_PADDING, MINIMAP_VIEW_RADIUS,
     MAP_WIDTH, MAP_HEIGHT,
+    EVAC_STATE_COLORS,  # 阶段2 主撤离点小地图状态标记配色
+    ELITE_SHIELD_BAR_WIDTH, ELITE_SHIELD_BAR_HEIGHT, ELITE_SHIELD_BAR_OFFSET,
+    ELITE_SHIELD_BAR_COLOR, ELITE_LABEL_COLOR,  # 阶段3 精英护盾条/词缀名前缀
+    ELITE_MINIMAP_COLOR, ELITE_MINIMAP_DOT_RADIUS,  # 阶段3 小地图精英紫点
+    # 阶段4 随机事件：开局横幅 + 商队换购弹层 + 小地图事件标记
+    EVENT_BANNER_HEIGHT, EVENT_BANNER_Y, EVENT_BANNER_BG, EVENT_BANNER_EDGE,
+    EVENT_BANNER_TEXT_COLOR,
+    EVENT_PANEL_BG, EVENT_PANEL_ROW_BG, EVENT_PANEL_ROW_HL, EVENT_PANEL_TEXT,
+    EVENT_PANEL_TEXT_HL, EVENT_PANEL_ROW_H, EVENT_PANEL_MARGIN, EVENT_PANEL_WIDTH,
+    EVENT_BANNER_MAX_HALF_W,
+    EVENT_AIRDROP_MINIMAP_COLOR, EVENT_CARAVAN_MINIMAP_COLOR, EVENT_MINIMAP_MARK_SIZE,
 )
 from game.render_helpers import (
     draw_monster_base, draw_monster_armor, draw_monster_face, draw_monster_weapon,
     draw_monster_body,
 )
 # 怪物武器颜色从 monster_defs.py 统一读取（原 MONSTER_WEAPON_COLOR 已并入 MONSTER_METADATA）
-from entities.monster_defs import MONSTER_METADATA
+from entities.monster_defs import MONSTER_METADATA, ELITE_AFFIXES
 
 # 怪物标签中文名映射（本地/远端怪物共用）
 _MONSTER_NAMES = {
@@ -40,11 +51,15 @@ _WEAPON_NAMES = {
 def _draw_monster(view, m, wb):
     """绘制单个怪物（本地权威 + 联机远端快照共用同一套表现逻辑）
 
-    - 本地怪物：weapon/armor 为携带装备 dict，攻击冷却条读本地 AI 的 _attack_timer；
+    - 本地怪物：weapon/armor 为携带装备 dict，攻击冷却条读本地 AI 的 _attack_timer，
+      护盾条读本地 shield/max_shield；
     - 远端怪物（remote_monsters 里的真实怪物类实例）：weapon/armor 为 None，
       武器/护甲/头盔颜色与名称走主机广播的 net_weapon_color/net_armor_color/
       net_helmet_color 等快照值（修复远端怪物装备与主机不一致）；
-      攻击冷却条读主机广播的 net_attack_anim（客户端不跑怪物 AI，_attack_timer 恒为 0）；
+      护盾条优先读主机广播的 net_shield/net_max_shield（客户端幽灵只有
+      MONSTER_CONFIGS 默认值，不读则精英护盾条永不显示）；
+      攻击冷却条优先读主机广播的归一化剩余比例 net_attack_cd（客户端按 dt
+      线性衰减，与主机曲线同源），无该字段的旧主机退回 net_attack_anim；
       武器名标签优先取 net_weapon。
     """
     # 怪物尺寸：所有怪物继承基类，_size 属性已统一设置
@@ -92,12 +107,58 @@ def _draw_monster(view, m, wb):
         bx = m.center_x - bar_w // 2
         by = m.center_y + m_size + 8
 
+    # 阶段3 护盾词缀：头顶护盾条（实心填充，禁线框；尺寸/偏移/配色由 config 驱动）
+    # 画在血条上方（by - OFFSET），与下方攻击冷却条不重叠
+    # 主机/幽灵双读（同 net_armor_color 模式）：远端怪物优先读主机广播的
+    # net_shield/net_max_shield（客户端幽灵只有 MONSTER_CONFIGS 默认值 shield=0，
+    # 不读快照则精英护盾条在客户端永远不显示）；旧主机未下发该字段（值为
+    # None）时回退读本地 shield/max_shield；本地怪物无 net_* 字段同样回退。
+    shield = getattr(m, 'net_shield', None)
+    if shield is None:
+        shield = getattr(m, 'shield', 0)
+    max_shield = getattr(m, 'net_max_shield', None)
+    if max_shield is None:
+        max_shield = getattr(m, 'max_shield', 0)
+    shield_ratio = 0.0
+    if shield > 0 and max_shield > 0:
+        shield_ratio = shield / max_shield
+    if shield_ratio > 0:
+        shield_w = ELITE_SHIELD_BAR_WIDTH
+        sy = by - ELITE_SHIELD_BAR_OFFSET
+        sbx = m.center_x - shield_w // 2
+        if wb is not None:
+            wb.rect(sbx + shield_w // 2, sy, shield_w, ELITE_SHIELD_BAR_HEIGHT, arcade.color.DARK_BLUE)
+            wb.rect(sbx + shield_w * shield_ratio // 2, sy,
+                    shield_w * shield_ratio, ELITE_SHIELD_BAR_HEIGHT, ELITE_SHIELD_BAR_COLOR)
+        else:
+            arcade.draw_rect_filled(
+                arcade.XYWH(sbx + shield_w // 2, sy, shield_w, ELITE_SHIELD_BAR_HEIGHT),
+                arcade.color.DARK_BLUE)
+            arcade.draw_rect_filled(
+                arcade.XYWH(sbx + shield_w * shield_ratio // 2, sy,
+                           shield_w * shield_ratio, ELITE_SHIELD_BAR_HEIGHT),
+                ELITE_SHIELD_BAR_COLOR)
+
     # 攻击冷却条（血条上方）：_attack_delay 已由基类统一设置。
-    # 远端怪物客户端不跑 AI，_attack_timer 恒 0，改读主机广播的 net_attack_anim 快照值
-    atk_timer = getattr(m, 'net_attack_anim', getattr(m, '_attack_timer', 0.0))
-    if atk_timer > 0:
-        max_delay = getattr(m, '_attack_delay', 1.0)
+    # 三条取值路径（主机 / 远端新主机 / 远端旧主机）：
+    # 1) 远端怪物且主机下发了归一化剩余比例 net_attack_cd（0~1）：直接用
+    #    1 - ratio 作填充比例。该比例由客户端按 dt/attack_delay 线性衰减
+    #    （game_view 客户端块），与主机 _attack_timer 曲线同源，不会出现脏值；
+    # 2) 远端怪物但主机未下发该字段（旧主机）：退回裸计时器 net_attack_anim，
+    #    分母优先用主机广播的 net_attack_delay（词缀/等级可能改过冷却长度），
+    #    再退回本地 _attack_delay；
+    # 3) 本地怪物：读 AI 实时 _attack_timer / _attack_delay（主机/solo 权威本地模拟）。
+    net_cd = getattr(m, 'net_attack_cd', None)
+    if net_cd is not None:
+        cd_ratio = 1.0 - max(0.0, min(1.0, net_cd))
+        show_cd = net_cd > 0.0
+    else:
+        atk_timer = getattr(m, 'net_attack_anim', getattr(m, '_attack_timer', 0.0))
+        max_delay = getattr(m, 'net_attack_delay', None) or getattr(m, '_attack_delay', 1.0)
+        show_cd = atk_timer > 0
         cd_ratio = 1.0 - (atk_timer / max_delay)
+    cd_ratio = max(0.0, min(1.0, cd_ratio))  # 夹紧防脏进度条（比例越界时画满/画空）
+    if show_cd:
         cy = by + 7
         if wb is not None:
             wb.rect(bx + bar_w // 2, cy, bar_w, 3, (40, 40, 40))
@@ -109,7 +170,15 @@ def _draw_monster(view, m, wb):
     # 怪物标签（按类名映射中文名）
     label_y = by + 15
     monster_name = _MONSTER_NAMES.get(m_cls, m_cls)
-    view._world_labels.append((m.center_x, label_y, monster_name, (255, 200, 200), 10))
+    # 阶段3 精英词缀：头顶名加词缀前缀并转紫色（如「[狂暴] 僵尸」）
+    # 远端快照怪物读 net_affix（客户端不跑 apply_affix）
+    affix_id = getattr(m, 'affix', None) or getattr(m, 'net_affix', None)
+    label_color = (255, 200, 200)
+    if affix_id:
+        affix_name = ELITE_AFFIXES.get(affix_id, {}).get("name", affix_id)
+        monster_name = f"[{affix_name}]{monster_name}"
+        label_color = ELITE_LABEL_COLOR
+    view._world_labels.append((m.center_x, label_y, monster_name, label_color, 10))
     label_y += 13
     # 武器名标签：优先取快照同步的 net_weapon（远端怪物）→ 实际携带武器名 → 类名映射兜底
     net_weapon = getattr(m, 'net_weapon', None)
@@ -302,19 +371,33 @@ def draw_minimap(view):
                 arcade.XYWH(mm_x + sx, mm_y + sy, 4, 4),
                 (230, 200, 60))
 
-    # 撤离点（绿色小方块）；space 主题无撤离点，改绘火箭发射台（青色）
-    evac_pts = view.map_data.get("evac_points", [])
-    if view.map_data.get("theme") == "space":
-        evac_pts = view.map_data.get("rocket_pads", [])
-        evac_color = (120, 200, 255)
-    else:
-        evac_color = (80, 230, 120)
-    for ex, ey in evac_pts:
-        sx, sy = _mm(ex, ey)
+    # 撤离点（阶段2）：主撤离点按状态配色 + 放大标记（防守中/被拆额外加白色外圈告警）；
+    # 无主撤离点时回退旧撤离圈坐标（space 主题改绘火箭发射台，青色）
+    evac_point = getattr(view, "evac_point", None)
+    if evac_point is not None:
+        sx, sy = _mm(evac_point.x, evac_point.y)
         if 0 <= sx <= MINIMAP_SIZE and 0 <= sy <= MINIMAP_SIZE:
+            if evac_point.state in ("defending", "destroyed"):
+                # 白色实心外圈：先画大块再画内层状态色，形成醒目告警环
+                arcade.draw_rect_filled(
+                    arcade.XYWH(mm_x + sx, mm_y + sy, 11, 11),
+                    (240, 240, 240))
             arcade.draw_rect_filled(
-                arcade.XYWH(mm_x + sx, mm_y + sy, 4, 4),
-                evac_color)
+                arcade.XYWH(mm_x + sx, mm_y + sy, 7, 7),
+                EVAC_STATE_COLORS.get(evac_point.state, (80, 230, 120)))
+    else:
+        evac_pts = view.map_data.get("evac_points", [])
+        if view.map_data.get("theme") == "space":
+            evac_pts = view.map_data.get("rocket_pads", [])
+            evac_color = (120, 200, 255)
+        else:
+            evac_color = (80, 230, 120)
+        for ex, ey in evac_pts:
+            sx, sy = _mm(ex, ey)
+            if 0 <= sx <= MINIMAP_SIZE and 0 <= sy <= MINIMAP_SIZE:
+                arcade.draw_rect_filled(
+                    arcade.XYWH(mm_x + sx, mm_y + sy, 4, 4),
+                    evac_color)
 
     # BOSS 建筑（金色小方块）：沙漠金字塔 BOSS 区域在小地图上标记为金色
     boss_spawn = view.map_data.get("boss_spawn")
@@ -324,6 +407,37 @@ def draw_minimap(view):
             arcade.draw_rect_filled(
                 arcade.XYWH(mm_x + sx, mm_y + sy, 6, 6),
                 (255, 215, 0))
+
+    # 阶段3 精英词缀怪（紫色实心圆点）：场上精英一眼可见，避免漏掉高价值目标。
+    # 客户端读 net_is_elite（快照同步，见 views/game/network_sync.py）。
+    for m in getattr(view, "monsters", []):
+        if not getattr(m, "alive", False):
+            continue
+        if not (getattr(m, "is_elite", False) or getattr(m, "net_is_elite", False)):
+            continue
+        ex, ey = _mm(m.center_x, m.center_y)
+        if 0 <= ex <= MINIMAP_SIZE and 0 <= ey <= MINIMAP_SIZE:
+            arcade.draw_circle_filled(mm_x + ex, mm_y + ey,
+                                      ELITE_MINIMAP_DOT_RADIUS, ELITE_MINIMAP_COLOR)
+
+    # 阶段4 事件标记：空投补给箱（橙色）+ 商队交互点（青色），均为实心小方块。
+    # 读 view.chests 里 is_airdrop 的箱（空投是运行时生成，map_data.chest_positions 不含）
+    # 与 view.caravan_point（主机/客户端由 EVENT_START + FULL_STATE 同步）。
+    for chest in getattr(view, "chests", []):
+        if getattr(chest, "opened", False) or not getattr(chest, "is_airdrop", False):
+            continue
+        ax, ay = _mm(chest.center_x, chest.center_y)
+        if 0 <= ax <= MINIMAP_SIZE and 0 <= ay <= MINIMAP_SIZE:
+            arcade.draw_rect_filled(
+                arcade.XYWH(mm_x + ax, mm_y + ay, EVENT_MINIMAP_MARK_SIZE, EVENT_MINIMAP_MARK_SIZE),
+                EVENT_AIRDROP_MINIMAP_COLOR)
+    caravan_point = getattr(view, "caravan_point", None)
+    if caravan_point is not None:
+        vx, vy = _mm(caravan_point.center_x, caravan_point.center_y)
+        if 0 <= vx <= MINIMAP_SIZE and 0 <= vy <= MINIMAP_SIZE:
+            arcade.draw_rect_filled(
+                arcade.XYWH(mm_x + vx, mm_y + vy, EVENT_MINIMAP_MARK_SIZE, EVENT_MINIMAP_MARK_SIZE),
+                EVENT_CARAVAN_MINIMAP_COLOR)
 
     # 玩家（白色实心方块，居中于小地图中心附近；小地图外不绘制）
     px, py = view.player.center_x, view.player.center_y
@@ -396,3 +510,120 @@ def draw_boss_hp_bar(view):
     _t.value = hp_text
     _t.position = (bar_x, bar_y + bar_h // 2 + 2)
     _t.draw()
+
+
+# ===================== 阶段4：随机事件横幅 / 商队换购弹层 =====================
+
+def draw_event_banner(view):
+    """绘制开局随机事件横幅（阶段4）
+
+    - 文案与显示时长由 game/map_events.event_banner() 决定（无事件/超时返回 None）；
+    - 一律不透明实心矩形（底板 + 内层实心条当"边框"，禁 outline/线框绘制防闪烁）。
+    """
+    from game.map_events import event_banner
+
+    text = event_banner(view)
+    if not text:
+        return
+    half_w = min(EVENT_BANNER_MAX_HALF_W, _event_banner_text_width(text))
+    cx = WINDOW_WIDTH // 2
+    # 底板（实心）
+    arcade.draw_rect_filled(
+        arcade.XYWH(cx, EVENT_BANNER_Y, half_w * 2, EVENT_BANNER_HEIGHT), EVENT_BANNER_BG)
+    # 内层实心高亮条（替代线框边框，视觉分隔仍清晰）
+    arcade.draw_rect_filled(
+        arcade.XYWH(cx, EVENT_BANNER_Y + EVENT_BANNER_HEIGHT / 2 - 3,
+                    half_w * 2 - 8, 3), EVENT_BANNER_EDGE)
+    if not hasattr(draw_event_banner, "_txt"):
+        draw_event_banner._txt = arcade.Text(
+            "", cx, EVENT_BANNER_Y, EVENT_BANNER_TEXT_COLOR, 15,
+            anchor_x="center", anchor_y="center", bold=True)
+    _t = draw_event_banner._txt
+    _t.value = text
+    _t.position = (cx, EVENT_BANNER_Y)
+    _t.draw()
+
+
+def _event_banner_text_width(text: str) -> int:
+    """按字符数粗估中文/英文混排宽度（arcade.Text 尺寸需 GL 上下文，避免每帧重建）"""
+    width = 0
+    for ch in text:
+        width += 15 if ord(ch) > 0x2E80 else 8
+    return width + 40
+
+
+def draw_caravan_panel(view):
+    """绘制商队换购弹层（阶段4，仅 view._caravan_panel_open 时绘制）
+
+    - 行内容：物品中文名 + 单价 + 当前携带金币 + 已持有数量；
+    - 买不起的行用暗色，购买成功/失败由 map_events 弹浮动文字提示；
+    - 客户端同样渲染（主机权威：客户端 E 键不生效，此处只做表现层同步）。
+    """
+    if not getattr(view, "_caravan_panel_open", False):
+        return
+    from game.map_events import caravan_label, caravan_prices
+
+    items = caravan_prices()
+    if not items:
+        return
+    gs = view.window.game_state
+    carried = getattr(gs, "run_carried", None) or {}
+    gold = int(carried.get("gold", 0) or 0)
+    owned = dict(carried.get("potion") or {})
+    for rid, qty in (carried.get("resource") or {}).items():
+        owned[rid] = owned.get(rid, 0) + qty
+
+    title = f"流浪商队  持有金币 {gold}"
+    hint = "↑↓ 选择   E/回车 购买   走远自动关闭"
+    panel_w = EVENT_PANEL_WIDTH
+    panel_h = EVENT_PANEL_MARGIN * 2 + 30 + len(items) * EVENT_PANEL_ROW_H + 18
+    px = WINDOW_WIDTH // 2
+    py = WINDOW_HEIGHT // 2
+    # 面板底（实心）
+    arcade.draw_rect_filled(
+        arcade.XYWH(px, py, panel_w, panel_h), EVENT_PANEL_BG)
+    # 标题实心条
+    arcade.draw_rect_filled(
+        arcade.XYWH(px, py + panel_h / 2 - 24, panel_w - 8, 30), EVENT_PANEL_ROW_BG)
+    _caravan_text(view, title, px, py + panel_h / 2 - 24, 14, EVENT_PANEL_TEXT_HL,
+                  anchor_y="center", bold=True)
+    rows_top = py + panel_h / 2 - 44
+    sel = getattr(view, "_caravan_index", 0)
+    for idx, (item_id, price) in enumerate(items.items()):
+        ry = rows_top - idx * EVENT_PANEL_ROW_H
+        row_w = panel_w - 16
+        arcade.draw_rect_filled(
+            arcade.XYWH(px, ry, row_w, EVENT_PANEL_ROW_H - 4),
+            EVENT_PANEL_ROW_HL if idx == sel else EVENT_PANEL_ROW_BG)
+        color = EVENT_PANEL_TEXT_HL if idx == sel else EVENT_PANEL_TEXT
+        name = caravan_label(item_id)
+        count = int(owned.get(item_id, 0) or 0)
+        text = f"{name}   {price}金" + (f"（持有{count}）" if count else "")
+        if price > gold:
+            text += "  [金币不足]"
+            color = (150, 110, 110) if idx != sel else EVENT_PANEL_TEXT_HL
+        _caravan_text(view, text, px - row_w / 2 + 10, ry, 12, color,
+                      anchor_x="left", anchor_y="center")
+    _caravan_text(view, hint, px, py - panel_h / 2 + 16, 10, EVENT_PANEL_TEXT,
+                  anchor_y="center")
+
+
+def _caravan_text(view, text, x, y, size, color, anchor_x="center", anchor_y="center",
+                  bold=False):
+    """弹层文本绘制（arcade.Text 缓存复用，禁每帧重建纹理）"""
+    cache = getattr(draw_caravan_panel, "_texts", None)
+    if cache is None:
+        cache = {}
+        draw_caravan_panel._texts = cache
+    key = (text, x, y, size, color, anchor_x, anchor_y, bold)
+    t = cache.get(key)
+    if t is None:
+        # 缓存键过多时清空重建（弹层条目固定 7 项，不会膨胀）
+        if len(cache) > 64:
+            cache.clear()
+        t = arcade.Text(text, x, y, color, size,
+                        anchor_x=anchor_x, anchor_y=anchor_y, bold=bold)
+        cache[key] = t
+    t.value = text
+    t.position = (x, y)
+    t.draw()

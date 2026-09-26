@@ -25,7 +25,9 @@ AI 行为：
 
 import math
 from config import MAP_WIDTH, MAP_HEIGHT, PLAYER_SIZE
-from entities.monster_defs import MONSTER_CONFIGS
+from entities.monster_defs import (
+    BOSS_SKILLS, MONSTER_CONFIGS, get_boss_skill, get_boss_skill_cooldowns,
+)
 from game.monster_base import _WallGrid, Projectile, _MeleeMonsterBase, _RangedMonsterBase, _select_target, _has_line_of_sight
 
 # Re-export for backward compatibility
@@ -132,6 +134,150 @@ def _boss_summon_minions(boss, summon_types: list[tuple[str, int, int]], theme: 
     return summoned
 
 
+# ══════════════════════ BOSS 技能效果落地（数值唯一来源 = entities/monster_defs.BOSS_SKILLS）══════════════════════
+# 设计约定：
+# 1) 冷却 / 射程 / 伤害倍率 / AOE 半径 / 弹丸数 / 眩晕时长 / debuff 强度全部读 BOSS_SKILLS，
+#    本模块不硬编码任何平衡数值（改平衡只改数据表）。
+# 2) 释放入口统一在 try_attack 覆写里（与 BossSpace 原有实现同口径），
+#    而 try_attack 只被 views/game_view.py 的怪物 AI 循环调用，该循环整体在
+#    `if gs.net_mode != "client"` 守卫内 → 客户端天然不会本地触发 BOSS 技能（主机权威）。
+# 3) 伤害走 player.take_damage 唯一入口（护甲/护盾/角色被动/易伤/荆棘反伤口径与普攻完全一致），
+#    受击钩子按 _pending_debuff* 广播附带效果给受击方客户端（与怪物普攻/弹丸同一口径）。
+
+def _boss_skill_damage(monster, cfg: dict) -> int:
+    """技能伤害 = BOSS 基础攻击 × damage_mult（至少 1 点；damage_mult<=0 = 纯控制技能返回 0）"""
+    mult = float(cfg.get("damage_mult", 0) or 0)
+    if mult <= 0:
+        return 0
+    return max(1, round(monster.damage * mult))
+
+
+def _boss_skill_hit_targets(monster, cfg: dict, player, players) -> list:
+    """按 aoe_radius 收集技能命中的玩家列表
+
+    - aoe_radius 缺省/<=0：单目标语义（只打当前目标）
+    - aoe_center="target"：以目标脚下为圆心（箭雨/导弹等落在玩家位置的技能）
+    - aoe_center="self"（缺省）：以 BOSS 自身为圆心（咆哮/新星/毒雾等自身释放技能）
+    - 存活判断与 monster_base._select_target 同一口径（alive 优先，回退 hp>0）
+    """
+    if player is None and not players:
+        return []
+    radius = float(cfg.get("aoe_radius", 0) or 0)
+    if radius <= 0:
+        return [player] if player is not None else []
+    if str(cfg.get("aoe_center", "self")) == "target" and player is not None:
+        center_x, center_y = player.center_x, player.center_y
+    else:
+        center_x, center_y = monster.center_x, monster.center_y
+    candidates = list(players) if players else ([player] if player is not None else [])
+    radius_sq = radius * radius
+    hit = []
+    for p in candidates:
+        if p is None:
+            continue
+        alive = getattr(p, "alive", None)
+        if alive is None:
+            alive = getattr(p, "hp", 1) > 0
+        if not alive:
+            continue
+        dx = p.center_x - center_x
+        dy = p.center_y - center_y
+        if dx * dx + dy * dy <= radius_sq:  # 平方距离比较，避免开根号
+            hit.append(p)
+    return hit
+
+
+def _boss_skill_debuff_pairs(cfg: dict) -> list:
+    """技能附带的 debuff 列表 [(id, level)]：debuff_id 字段 + stun 字段（眩晕）"""
+    pairs = []
+    debuff_id = cfg.get("debuff_id")
+    if debuff_id:
+        pairs.append((debuff_id, int(cfg.get("debuff_level", 1) or 1)))
+    if cfg.get("stun"):
+        # stun_level 取效果表上限等级：效果表 stun 时长上限 1.6s，
+        # 实际时长随后由 _boss_skill_force_duration 按 BOSS_SKILLS 的 stun 秒数覆盖
+        pairs.append(("stun", int(cfg.get("stun_level", 1) or 1)))
+    return pairs
+
+
+def _boss_skill_force_duration(target, debuff_id: str, seconds: float):
+    """把玩家身上某个 debuff 的持续时间覆盖为技能配置值
+
+    player.apply_debuff 的时长固定取 effects_defs 效果表（stun 最高 1.6s），
+    而 BOSS_SKILLS 声明的眩晕时长（2.0/1.5/2.5s）超出该上限；
+    故施加后就地改写 duration（仅改时长，不动已生效的 stun 标记，无需重算）。
+    """
+    if seconds <= 0 or not hasattr(target, "debuffs"):
+        return
+    for d in target.debuffs:
+        if d.get("id") == debuff_id:
+            d["duration"] = seconds
+            return
+
+
+def _boss_skill_apply_hit(monster, target, cfg: dict) -> int:
+    """对单个玩家结算 BOSS 技能：伤害 + debuff + 眩晕，返回实际扣血量
+
+    伤害为「聚合口径」：projectile_count 只决定视觉弹丸数量，
+    伤害按 damage_mult 一次性结算（避免同帧多次 take_damage 造成数字刷屏与秒放）。
+    """
+    if target is None:
+        return 0
+    amount = _boss_skill_damage(monster, cfg)
+    actual = 0
+    if amount > 0:
+        debuffs = _boss_skill_debuff_pairs(cfg)
+        # 联机主机：受击钩子按 _pending_debuff* 广播附带效果（与怪物普攻/弹丸同一口径）
+        target._pending_debuff = debuffs[0][0] if debuffs else None
+        target._pending_debuff_level = debuffs[0][1] if debuffs else 1
+        target._pending_debuff_effects = debuffs
+        actual = target.take_damage(amount)
+        # 玩家荆棘反伤：按实际承受伤害的百分比反弹给技能来源（与近战普攻 monster_base 同口径）
+        thorns_pct = float(getattr(target, "equip_thorns", 0.0) or 0.0)
+        if thorns_pct > 0 and actual > 0:
+            monster.take_damage(max(1, round(actual * thorns_pct)))
+    # 伤害数字不另弹：本地玩家掉血由 game_view 的 hp 差值检测统一显示（2308-2315），
+    # 远端幽灵由受击方客户端的 PLAYER_HURT 事件显示，此处重复弹会双重显示。
+    for debuff_id, level in _boss_skill_debuff_pairs(cfg):
+        if not hasattr(target, "apply_debuff"):
+            continue
+        target.apply_debuff(debuff_id, level)
+        if debuff_id == "stun":
+            _boss_skill_force_duration(target, "stun", float(cfg.get("stun", 0) or 0))
+    return actual
+
+
+def _boss_skill_strike(monster, class_name: str, skill_id: str, player, players):
+    """BOSS 技能命中结算：按 BOSS_SKILLS 的 AOE 规则找出目标并逐个结算效果"""
+    cfg = get_boss_skill(class_name, skill_id)
+    for target in _boss_skill_hit_targets(monster, cfg, player, players):
+        _boss_skill_apply_hit(monster, target, cfg)
+
+
+def _boss_try_skill(monster, class_name: str, emitters: dict, player, players) -> bool:
+    """BOSS 技能释放统一入口：按 BOSS_SKILLS 顺序逐个判定「冷却就绪 + 目标在射程内」
+
+    emitters: {技能id: 释放函数}，函数签名 (player, players, cfg)
+    命中第一个可用技能即释放并返回 True（同一帧只放一个技能）。
+    """
+    if player is None or not getattr(monster, "alive", False):
+        return False
+    dist = math.hypot(player.center_x - monster.center_x, player.center_y - monster.center_y)
+    for cfg in BOSS_SKILLS.get(class_name, []):
+        skill_id = cfg.get("id")
+        emitter = emitters.get(skill_id)
+        if emitter is None:
+            continue
+        if monster._skill_timers.get(skill_id, 0.0) > 0:
+            continue  # 冷却中
+        if dist > float(cfg.get("range", 0) or 0):
+            continue  # 目标不在射程内
+        monster._skill_timers[skill_id] = float(cfg.get("cooldown", 0.0) or 0.0)
+        emitter(player, players, cfg)
+        return True
+    return False
+
+
 class BossZombie(_MeleeMonsterBase):
     """BOSS 僵尸：血厚攻高移速慢，攻击附加燃烧，需要 Lv5+ 武器/装备
 
@@ -150,29 +296,20 @@ class BossZombie(_MeleeMonsterBase):
         self._max_summons = len(self._summon_phase_thresholds)
         self._summon_callback = None
         self._theme = "forest"
-        # 技能系统：冷却计时器
+        # 技能系统：冷却计时器（冷却秒数取自 BOSS_SKILLS，本类不硬编码）
         self._skill_timers = {"flame_charge": 0.0, "zombie_roar": 0.0}
-        self._skill_cooldowns = {"flame_charge": 8.0, "zombie_roar": 15.0}
+        self._skill_cooldowns = get_boss_skill_cooldowns("BossZombie")
 
-    def _try_use_skill(self, player, dt) -> bool:
-        """尝试释放技能，返回是否释放了技能"""
-        if not self.alive or player is None:
-            return False
-        dist = math.hypot(player.center_x - self.center_x, player.center_y - self.center_y)
-        # 技能 1：烈焰冲击（扇形火焰弹幕，范围 200px）
-        if self._skill_timers["flame_charge"] <= 0 and dist < 200:
-            self._skill_timers["flame_charge"] = self._skill_cooldowns["flame_charge"]
-            self._emit_flame_charge(player)
-            return True
-        # 技能 2：僵尸咆哮（范围眩晕，范围 120px）
-        if self._skill_timers["zombie_roar"] <= 0 and dist < 120:
-            self._skill_timers["zombie_roar"] = self._skill_cooldowns["zombie_roar"]
-            self._emit_zombie_roar()
-            return True
-        return False
+    def _try_use_skill(self, player, dt, players=None) -> bool:
+        """尝试释放技能，返回是否释放了技能（冷却/射程全部读 BOSS_SKILLS）"""
+        return _boss_try_skill(
+            self, "BossZombie",
+            {"flame_charge": self._emit_flame_charge, "zombie_roar": self._emit_zombie_roar},
+            player, players,
+        )
 
-    def _emit_flame_charge(self, player):
-        """烈焰冲击：向前方扇形范围发射火焰弹幕"""
+    def _emit_flame_charge(self, player, players, cfg):
+        """烈焰冲击：向前方扇形范围发射火焰弹幕（命中目标受伤 + 点燃）"""
         from game.effects import particle_system, floating_texts
         angle = math.atan2(player.center_y - self.center_y, player.center_x - self.center_x)
         # 扇形火焰弹幕
@@ -184,14 +321,32 @@ class BossZombie(_MeleeMonsterBase):
                 8, (255, 100, 30), speed=180, life=0.4, size=5, spread=10)
         floating_texts.add(self.center_x, self.center_y + 40,
                           "烈焰冲击!", (255, 120, 40), life=0.8, font_size=14, vy=50)
+        _boss_skill_strike(self, "BossZombie", "flame_charge", player, players)
 
-    def _emit_zombie_roar(self):
-        """僵尸咆哮：以自身为中心释放冲击波"""
+    def _emit_zombie_roar(self, player, players, cfg):
+        """僵尸咆哮：以自身为中心释放冲击波（范围内玩家眩晕 stun 秒）"""
         from game.effects import particle_system, floating_texts
         particle_system.emit(self.center_x, self.center_y, 20, (255, 80, 80),
                            speed=120, life=0.5, size=6, spread=360)
         floating_texts.add(self.center_x, self.center_y + 40,
                           "僵尸咆哮!", (255, 60, 60), life=0.8, font_size=14, vy=50)
+        _boss_skill_strike(self, "BossZombie", "zombie_roar", player, players)
+
+    def try_attack(self, player=None, players=None) -> bool:
+        """BOSS 僵尸攻击：优先尝试技能释放，否则走近战基类攻击
+
+        与 BossSpace.try_attack 同一口径（存活/眩晕守卫 → 选目标 → 先放技能）；
+        该方法仅由 game_view 的主机/单机 AI 循环调用，客户端不执行（无本地重复触发）。
+        """
+        if not self.alive or self._stunned:
+            return False
+        if players is not None:
+            player = _select_target(players, self.center_x, self.center_y)
+        if player is None:
+            return False
+        if self._try_use_skill(player, 0.0, players):
+            return False
+        return super().try_attack(player, players)
 
     def update(self, player_x: float = 0.0, player_y: float = 0.0,
                delta_time: float = 0.0, players=None):
@@ -239,29 +394,20 @@ class BossSkeleton(_RangedMonsterBase):
         self._max_summons = len(self._summon_phase_thresholds)
         self._summon_callback = None
         self._theme = "forest"
-        # 技能系统
+        # 技能系统（冷却秒数取自 BOSS_SKILLS，本类不硬编码）
         self._skill_timers = {"skeleton_rain": 0.0, "frost_nova": 0.0}
-        self._skill_cooldowns = {"skeleton_rain": 10.0, "frost_nova": 18.0}
+        self._skill_cooldowns = get_boss_skill_cooldowns("BossSkeleton")
 
-    def _try_use_skill(self, player, dt) -> bool:
-        """尝试释放技能，返回是否释放了技能"""
-        if not self.alive or player is None:
-            return False
-        dist = math.hypot(player.center_x - self.center_x, player.center_y - self.center_y)
-        # 技能 1：骷髅箭雨（在目标位置召唤 8 支箭从天而降，范围 350px）
-        if self._skill_timers["skeleton_rain"] <= 0 and dist < 350:
-            self._skill_timers["skeleton_rain"] = self._skill_cooldowns["skeleton_rain"]
-            self._emit_skeleton_rain(player)
-            return True
-        # 技能 2：冰冻新星（以自身为中心释放冰冻波，范围 150px）
-        if self._skill_timers["frost_nova"] <= 0 and dist < 150:
-            self._skill_timers["frost_nova"] = self._skill_cooldowns["frost_nova"]
-            self._emit_frost_nova()
-            return True
-        return False
+    def _try_use_skill(self, player, dt, players=None) -> bool:
+        """尝试释放技能，返回是否释放了技能（冷却/射程全部读 BOSS_SKILLS）"""
+        return _boss_try_skill(
+            self, "BossSkeleton",
+            {"skeleton_rain": self._emit_skeleton_rain, "frost_nova": self._emit_frost_nova},
+            player, players,
+        )
 
-    def _emit_skeleton_rain(self, player):
-        """骷髅箭雨：在玩家周围 80px 范围内生成 8 支从天而降的箭"""
+    def _emit_skeleton_rain(self, player, players, cfg):
+        """骷髅箭雨：在目标脚下召唤箭矢（范围内玩家受伤，projectile_count 只管视觉弹丸数）"""
         from game.effects import particle_system, floating_texts
         for i in range(8):
             angle = math.radians(i * 45)
@@ -273,14 +419,32 @@ class BossSkeleton(_RangedMonsterBase):
                                speed=60, life=0.3, size=3, spread=360)
         floating_texts.add(self.center_x, self.center_y + 40,
                           "骷髅箭雨!", (200, 200, 255), life=0.8, font_size=14, vy=50)
+        _boss_skill_strike(self, "BossSkeleton", "skeleton_rain", player, players)
 
-    def _emit_frost_nova(self):
-        """冰冻新星：以自身为中心释放冰冻波"""
+    def _emit_frost_nova(self, player, players, cfg):
+        """冰冻新星：以自身为中心释放冰冻波（范围内玩家受伤 + 冰冻减速 + 眩晕）"""
         from game.effects import particle_system, floating_texts
         particle_system.emit(self.center_x, self.center_y, 25, (100, 180, 255),
                            speed=150, life=0.6, size=5, spread=360)
         floating_texts.add(self.center_x, self.center_y + 40,
                           "冰冻新星!", (120, 200, 255), life=0.8, font_size=14, vy=50)
+        _boss_skill_strike(self, "BossSkeleton", "frost_nova", player, players)
+
+    def try_attack(self, player=None, players=None) -> Projectile | None:
+        """BOSS 骷髅攻击：优先尝试技能释放，否则走远程基类开火
+
+        与 BossSpace.try_attack 同一口径（存活/眩晕守卫 → 选目标 → 先放技能）；
+        该方法仅由 game_view 的主机/单机 AI 循环调用，客户端不执行（无本地重复触发）。
+        """
+        if not self.alive or self._stunned:
+            return None
+        if players is not None:
+            player = _select_target(players, self.center_x, self.center_y)
+        if player is None:
+            return None
+        if self._try_use_skill(player, 0.0, players):
+            return None
+        return super().try_attack(player, players)
 
     def update(self, player_x: float = 0.0, player_y: float = 0.0,
                delta_time: float = 0.0, players=None):
@@ -327,50 +491,58 @@ class BossMummy(_MeleeMonsterBase):
         self._max_summons = len(self._summon_phase_thresholds)
         self._summon_callback = None
         self._theme = "desert"
-        # 技能系统
+        # 技能系统（冷却秒数取自 BOSS_SKILLS，本类不硬编码）
         self._skill_timers = {"poison_fog": 0.0, "mummy_grab": 0.0}
-        self._skill_cooldowns = {"poison_fog": 12.0, "mummy_grab": 20.0}
+        self._skill_cooldowns = get_boss_skill_cooldowns("BossMummy")
 
-    def _try_use_skill(self, player, dt) -> bool:
-        """尝试释放技能，返回是否释放了技能"""
-        if not self.alive or player is None:
-            return False
-        dist = math.hypot(player.center_x - self.center_x, player.center_y - self.center_y)
-        # 技能 1：毒雾弥漫（范围 180px 中毒）
-        if self._skill_timers["poison_fog"] <= 0 and dist < 180:
-            self._skill_timers["poison_fog"] = self._skill_cooldowns["poison_fog"]
-            self._emit_poison_fog()
-            return True
-        # 技能 2：木乃伊缠绕（拉近玩家 + 眩晕 2.5 秒，范围 100px）
-        if self._skill_timers["mummy_grab"] <= 0 and dist < 100:
-            self._skill_timers["mummy_grab"] = self._skill_cooldowns["mummy_grab"]
-            self._emit_mummy_grab(player)
-            return True
-        return False
+    def _try_use_skill(self, player, dt, players=None) -> bool:
+        """尝试释放技能，返回是否释放了技能（冷却/射程全部读 BOSS_SKILLS）"""
+        return _boss_try_skill(
+            self, "BossMummy",
+            {"poison_fog": self._emit_poison_fog, "mummy_grab": self._emit_mummy_grab},
+            player, players,
+        )
 
-    def _emit_poison_fog(self):
-        """毒雾弥漫：以自身为中心释放毒雾粒子"""
+    def _emit_poison_fog(self, player, players, cfg):
+        """毒雾弥漫：以自身为中心释放毒雾（范围内玩家受伤 + 持续中毒）"""
         from game.effects import particle_system, floating_texts
         particle_system.emit(self.center_x, self.center_y, 30, (100, 200, 60),
                            speed=80, life=1.0, size=7, spread=360)
         floating_texts.add(self.center_x, self.center_y + 40,
                           "毒雾弥漫!", (120, 220, 80), life=0.8, font_size=14, vy=50)
+        _boss_skill_strike(self, "BossMummy", "poison_fog", player, players)
 
-    def _emit_mummy_grab(self, player):
-        """木乃伊缠绕：拉近玩家并眩晕"""
+    def _emit_mummy_grab(self, player, players, cfg):
+        """木乃伊缠绕：范围缠绕（受伤 + 眩晕 stun 秒 + 减速）
+
+        降级说明：本项目无位移机制（玩家位移只在 player.update 内结算，且联机由快照同步），
+        故 BOSS_SKILLS 的 pull=True 降级为「眩晕 + 减速」组合控制，不改动玩家移动代码。
+        （旧实现直接改写 player.center_x 会穿墙且联机不同步；旧 debuffs.append(("stun", 2.5))
+          写的是元组而 debuffs 存字典，下一帧结算会抛异常，一并去掉。）
+        """
         from game.effects import particle_system, floating_texts
-        # 拉近效果：将玩家向 BOSS 方向推近 50px
-        angle = math.atan2(self.center_y - player.center_y, self.center_x - player.center_x)
-        player.center_x += math.cos(angle) * 50
-        player.center_y += math.sin(angle) * 50
-        # 缠绕粒子
+        # 缠绕粒子（以目标为中心）
         particle_system.emit(player.center_x, player.center_y, 15, (180, 160, 100),
                            speed=60, life=0.5, size=4, spread=360)
         floating_texts.add(player.center_x, player.center_y + 30,
                           "缠绕!", (200, 180, 120), life=0.7, font_size=14, vy=60)
-        # 施加眩晕（通过 debuff 系统）
-        if hasattr(player, 'debuffs'):
-            player.debuffs.append(("stun", 2.5))
+        _boss_skill_strike(self, "BossMummy", "mummy_grab", player, players)
+
+    def try_attack(self, player=None, players=None) -> bool:
+        """BOSS 木乃伊攻击：优先尝试技能释放，否则走近战基类攻击
+
+        与 BossSpace.try_attack 同一口径（存活/眩晕守卫 → 选目标 → 先放技能）；
+        该方法仅由 game_view 的主机/单机 AI 循环调用，客户端不执行（无本地重复触发）。
+        """
+        if not self.alive or self._stunned:
+            return False
+        if players is not None:
+            player = _select_target(players, self.center_x, self.center_y)
+        if player is None:
+            return False
+        if self._try_use_skill(player, 0.0, players):
+            return False
+        return super().try_attack(player, players)
 
     def update(self, player_x: float = 0.0, player_y: float = 0.0,
                delta_time: float = 0.0, players=None):
@@ -438,6 +610,9 @@ class RocketTroop(_RangedMonsterBase):
         if self._stunned:
             # 眩晕状态下无法攻击
             return None
+        # 阶段 2：进攻撤离点期间不在这里攻击玩家（伤害已在 _update_evac_aggro 结算）
+        if self.aggro_point is not None:
+            return None
         if players is not None:
             # 多目标模式：重新选取最近存活玩家作为攻击目标
             player = _select_target(players, self.center_x, self.center_y)
@@ -488,29 +663,20 @@ class BossSpace(_RangedMonsterBase):
         self._max_summons = len(self._summon_phase_thresholds)
         self._summon_callback = None
         self._theme = "space"
-        # 技能系统
+        # 技能系统（冷却秒数取自 BOSS_SKILLS，本类不硬编码）
         self._skill_timers = {"laser_sweep": 0.0, "missile_barrage": 0.0}
-        self._skill_cooldowns = {"laser_sweep": 10.0, "missile_barrage": 16.0}
+        self._skill_cooldowns = get_boss_skill_cooldowns("BossSpace")
 
-    def _try_use_skill(self, player, dt) -> bool:
-        """尝试释放技能，返回是否释放了技能"""
-        if not self.alive or player is None:
-            return False
-        dist = math.hypot(player.center_x - self.center_x, player.center_y - self.center_y)
-        # 技能 1：激光扫射（扇形范围持续伤害，范围 400px）
-        if self._skill_timers["laser_sweep"] <= 0 and dist < 400:
-            self._skill_timers["laser_sweep"] = self._skill_cooldowns["laser_sweep"]
-            self._emit_laser_sweep(player)
-            return True
-        # 技能 2：导弹齐射（3枚追踪导弹，范围 350px）
-        if self._skill_timers["missile_barrage"] <= 0 and dist < 350:
-            self._skill_timers["missile_barrage"] = self._skill_cooldowns["missile_barrage"]
-            self._emit_missile_barrage(player)
-            return True
-        return False
+    def _try_use_skill(self, player, dt, players=None) -> bool:
+        """尝试释放技能，返回是否释放了技能（冷却/射程全部读 BOSS_SKILLS）"""
+        return _boss_try_skill(
+            self, "BossSpace",
+            {"laser_sweep": self._emit_laser_sweep, "missile_barrage": self._emit_missile_barrage},
+            player, players,
+        )
 
-    def _emit_laser_sweep(self, player):
-        """激光扫射：向玩家方向发射扇形激光粒子"""
+    def _emit_laser_sweep(self, player, players, cfg):
+        """激光扫射：向目标方向发射扇形激光（命中目标承受 damage_mult 倍伤害）"""
         from game.effects import particle_system, floating_texts
         angle = math.atan2(player.center_y - self.center_y, player.center_x - self.center_x)
         # 扇形激光粒子
@@ -522,9 +688,10 @@ class BossSpace(_RangedMonsterBase):
                 6, (255, 80, 255), speed=250, life=0.3, size=4, spread=8)
         floating_texts.add(self.center_x, self.center_y + 40,
                           "激光扫射!", (255, 120, 255), life=0.8, font_size=14, vy=50)
+        _boss_skill_strike(self, "BossSpace", "laser_sweep", player, players)
 
-    def _emit_missile_barrage(self, player):
-        """导弹齐射：在玩家周围生成 3 枚爆炸粒子"""
+    def _emit_missile_barrage(self, player, players, cfg):
+        """导弹齐射：在目标位置生成导弹（命中目标承受 damage_mult 倍伤害）"""
         from game.effects import particle_system, floating_texts
         for i in range(3):
             angle = math.radians(i * 120 + 30)
@@ -534,6 +701,7 @@ class BossSpace(_RangedMonsterBase):
                                speed=0, life=0.6, size=6, spread=20)
         floating_texts.add(self.center_x, self.center_y + 40,
                           "导弹齐射!", (255, 130, 60), life=0.8, font_size=14, vy=50)
+        _boss_skill_strike(self, "BossSpace", "missile_barrage", player, players)
 
     def update(self, player_x: float = 0.0, player_y: float = 0.0,
                delta_time: float = 0.0, players=None):
@@ -573,7 +741,7 @@ class BossSpace(_RangedMonsterBase):
         if player is None:
             return None
         # 优先尝试技能释放
-        if self._try_use_skill(player, 0.0):
+        if self._try_use_skill(player, 0.0, players):
             return None
         dist = math.hypot(player.center_x - self.center_x, player.center_y - self.center_y)
         if dist < self._aggro_range and self._attack_timer <= 0 and _has_line_of_sight(

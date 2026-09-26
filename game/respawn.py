@@ -2,11 +2,11 @@
 
 import math
 import random
-from config import TILE_SIZE, MONSTER_GEAR_LEVEL_RANGE, MONSTER_WEAPON_LEVEL_RANGE, MONSTER_SPAWN_MIN_DIST, HARVEST_SPAWN_MIN_DIST
+from config import TILE_SIZE, MONSTER_GEAR_LEVEL_RANGE, MONSTER_WEAPON_LEVEL_RANGE, MONSTER_SPAWN_MIN_DIST, HARVEST_SPAWN_MIN_DIST, EVAC_WAVE_HP_GROWTH, EVAC_WAVE_DAMAGE_GROWTH, EVAC_WAVE_SPEED_GROWTH, EVAC_WAVE_SPEED_CAP, EVAC_WAVE_SPAWN_MIN_DIST, EVAC_WAVE_SPAWN_MAX_DIST, EVAC_WAVE_SPAWN_MIN_PLAYER_DIST, ELITE_SPAWN_MIN_DIST, ELITE_MAX_ALIVE
 from game.harvestable import HarvestableEntity
 from game.monsters import Zombie, Skeleton, MummyMelee, MummyRanged, Camel, Sniper, Assault, Bandit, RocketTroop
 from game.monster_utils import assign_monster_armor, assign_monster_helmet, assign_monster_weapon
-from entities.monster_defs import MONSTER_COMPOSITIONS
+from entities.monster_defs import MONSTER_COMPOSITIONS, ELITE_CONFIG
 
 # 主题对应的资源类型池（沙漠多仙人掌）
 THEME_HARVEST_TYPES = {
@@ -18,6 +18,20 @@ THEME_MONSTER_TYPES = {
     "forest": ["zombie", "skeleton"],
     "desert": ["mummy_melee", "mummy_ranged", "camel", "zombie", "skeleton"],
     "space": ["sniper", "assault", "bandit", "rocket_troop"],
+}
+
+# 主题怪物类型名（小写标识）到类名的映射：THEME_MONSTER_TYPES 用小写，
+# MONSTER_CLASS_MAP 用类名键，spawn_wave 借这张表按主题随机取怪
+THEME_MONSTER_CLASS_NAMES = {
+    "zombie": "Zombie",
+    "skeleton": "Skeleton",
+    "mummy_melee": "MummyMelee",
+    "mummy_ranged": "MummyRanged",
+    "camel": "Camel",
+    "sniper": "Sniper",
+    "assault": "Assault",
+    "bandit": "Bandit",
+    "rocket_troop": "RocketTroop",
 }
 
 # 怪物类名到实例化函数的映射
@@ -49,12 +63,29 @@ def _in_excluded_zone(x, y, map_data):
     return False
 
 
-def _find_valid_spawn_position(view, walls, rooms, map_w, map_h, min_dist_from_others=80):
-    """寻找有效的刷新位置（不在排除区域、房间内、墙壁上、与其他实体过近）"""
+def _find_valid_spawn_position(view, walls, rooms, map_w, map_h, min_dist_from_others=80,
+                              ring_center=None, ring_min_dist=0.0, ring_max_dist=0.0,
+                              min_player_dist=None):
+    """寻找有效的刷新位置（不在排除区域、房间内、墙壁上、与其他实体过近）
+
+    ring_center/ring_min_dist/ring_max_dist：可选「外围环带」约束——以 ring_center 为圆心，
+    只接受落在 [ring_min_dist, ring_max_dist] 环带内的候选点（供撤离波次从外围进场）。
+    min_player_dist：与玩家的最小距离（像素）。留空时用全局口径 MONSTER_SPAWN_MIN_DIST
+    （超出屏幕可视范围，避免野外刷新时贴脸出现）；撤离波次走"环带 + 小间距"口径，
+    因为玩家本来就守在撤离点上，仍套 600 会让每波怪步行 9~18 秒才到，45 秒防守期里
+    第 3/4 波根本赶不到（用户缺陷⑦修复 2026-09-26）。
+    两组环带参数与 min_player_dist 留空时，行为与原来完全一致（随机全图刷新）。
+    """
     for _ in range(60):  # 最多尝试60次
         x = random.randint(TILE_SIZE * 3, max(TILE_SIZE * 3 + 1, map_w - TILE_SIZE * 3))
         y = random.randint(TILE_SIZE * 3, max(TILE_SIZE * 3 + 1, map_h - TILE_SIZE * 3))
-        
+
+        # 外围环带约束：必须落在以 ring_center 为圆心的指定环带内
+        if ring_center is not None and ring_max_dist > 0:
+            ring_dist = math.hypot(x - ring_center[0], y - ring_center[1])
+            if ring_dist < ring_min_dist or ring_dist > ring_max_dist:
+                continue
+
         # 不在 BOSS 建筑/水井排除区域
         if _in_excluded_zone(x, y, view.map_data):
             continue
@@ -83,8 +114,11 @@ def _find_valid_spawn_position(view, walls, rooms, map_w, map_h, min_dist_from_o
                 break
         if too_close:
             continue
-        # 怪物刷新需与玩家保持最小距离（超出屏幕可视范围）
-        if math.hypot(view.player.center_x - x, view.player.center_y - y) < MONSTER_SPAWN_MIN_DIST:
+        # 怪物刷新需与玩家保持最小距离（超出屏幕可视范围；
+        # 撤离波次传 EVAC_WAVE_SPAWN_MIN_PLAYER_DIST 走"环带内小间距"口径，见函数 docstring）
+        player_min_dist = (MONSTER_SPAWN_MIN_DIST if min_player_dist is None
+                           else min_player_dist)
+        if math.hypot(view.player.center_x - x, view.player.center_y - y) < player_min_dist:
             continue
         
         return x, y
@@ -197,6 +231,8 @@ def _spawn_monster_group(view, composition, theme, walls, rooms, map_w, map_h):
             m = monster_class(center_x=x, center_y=y)
             m.set_on_death(view._on_monster_death)
             m._walls = walls
+            # 注入建筑查询/伤害回调（怪物不持有 GameView 引用）
+            view.build_system.attach_monster(m)
             
             # 分配装备
             assign_monster_armor(m, level=random.randint(*MONSTER_GEAR_LEVEL_RANGE), theme=theme)
@@ -249,3 +285,222 @@ def respawn_monsters(view, dt):
     
     # 刷新怪物组合
     _spawn_monster_group(view, selected_composition, theme, walls, rooms, map_w, map_h)
+
+
+def spawn_wave(view, theme, origin_xy, count, aggro_xy=None):
+    """生成一波进攻撤离点的怪物（阶段 2 防守撤离专用）。
+
+    与野外刷新（respawn_monsters）的区别：
+    - 从撤离点「外围环带」刷新（EVAC_WAVE_SPAWN_MIN/MAX_DIST），避免贴脸刷怪，
+      怪物会一路推进到撤离点；
+    - 每只怪都标记 aggro_point，朝撤离点移动并攻击（见 monster_base._update_evac_aggro）；
+    - 波次强度递增：血量/伤害/移速按 wave_index 线性加成，wave_index 单调递增存在
+      GameView 上（主机裁决，客户端不自行刷怪）。
+
+    Args:
+        view: 游戏视图（提供地图数据、怪物列表、死亡回调、建筑系统）
+        theme: 地图主题（forest/desert/space），决定怪物类型池
+        origin_xy: 撤离点坐标 (x, y)，作为刷新区中心与进攻目标
+        count: 本波怪物数量
+        aggro_xy: 进攻目标坐标；默认与 origin_xy 相同
+
+    Returns:
+        list: 本次生成的怪物列表
+    """
+    spawned_monsters = []
+    if count <= 0:
+        return spawned_monsters
+
+    walls = view.map_data.get("walls", [])
+    rooms = view.map_data.get("rooms", [])
+    map_w, map_h = view.map_data.get("map_size", (0, 0))
+
+    # 波次序号单调递增（存于 GameView，随地图重开重置）
+    wave_index = int(getattr(view, "evac_wave_index", 0)) + 1
+    view.evac_wave_index = wave_index
+    # 强度加成：第 n 波按 (n-1) 线性叠加，移速有上限
+    steps = wave_index - 1
+    hp_mult = 1.0 + EVAC_WAVE_HP_GROWTH * steps
+    dmg_mult = 1.0 + EVAC_WAVE_DAMAGE_GROWTH * steps
+    spd_mult = min(EVAC_WAVE_SPEED_CAP, 1.0 + EVAC_WAVE_SPEED_GROWTH * steps)
+
+    # 主题怪物池（不含 BOSS，BOSS 由火箭发射台/金字塔单独生成）
+    type_pool = THEME_MONSTER_TYPES.get(theme) or THEME_MONSTER_TYPES["forest"]
+    target_xy = aggro_xy if aggro_xy is not None else origin_xy
+
+    for _ in range(count):
+        # 外围环带找位：离撤离点足够远（不会凭空出现在点旁边），
+        # 且与玩家的最小距离单独收紧（玩家守在撤离点上时仍能按期抵达）
+        x, y = _find_valid_spawn_position(
+            view, walls, rooms, map_w, map_h,
+            ring_center=origin_xy,
+            ring_min_dist=EVAC_WAVE_SPAWN_MIN_DIST,
+            ring_max_dist=EVAC_WAVE_SPAWN_MAX_DIST,
+            min_player_dist=EVAC_WAVE_SPAWN_MIN_PLAYER_DIST,
+        )
+        if x is None:
+            continue
+
+        class_name = THEME_MONSTER_CLASS_NAMES.get(random.choice(type_pool))
+        monster_class = MONSTER_CLASS_MAP.get(class_name) if class_name else None
+        if not monster_class:
+            continue
+
+        m = monster_class(center_x=x, center_y=y)
+        m.set_on_death(view._on_monster_death)
+        m._walls = walls
+        # 注入建筑查询/伤害回调（怪物不持有 GameView 引用）
+        view.build_system.attach_monster(m)
+
+        # 分配装备（沿用野外刷新口径）
+        assign_monster_armor(m, level=random.randint(*MONSTER_GEAR_LEVEL_RANGE), theme=theme)
+        assign_monster_helmet(m, level=random.randint(*MONSTER_GEAR_LEVEL_RANGE), theme=theme)
+        assign_monster_weapon(m, level=random.randint(*MONSTER_WEAPON_LEVEL_RANGE), theme=theme)
+
+        # 波次强度加成（血量上限与当前值同步放大，保持满血进场）
+        m.max_hp = int(m.max_hp * hp_mult)
+        m.hp = m.max_hp
+        m.damage = m.damage * dmg_mult
+        m.speed = m.speed * spd_mult
+
+        # 标记进攻目标：撤离点引用经 GameView 注入（怪物不持有 GameView）
+        m.aggro_point = tuple(target_xy)
+        m.set_evac_point_provider(getattr(view, "get_evac_point", None))
+
+        view.monsters.append(m)
+        spawned_monsters.append(m)
+
+    return spawned_monsters
+
+
+def spawn_minion_group(view, kind, count, origin_xy, spread=30):
+    """在 origin_xy 周围按 spread 半径散布生成 count 只指定类型小怪。
+
+    供阶段 3 精英词缀复用：分裂（死亡时）与召唤（周期）共用同一套生成逻辑，
+    死亡回调/墙体/建筑查询/装备分配口径与野外刷新一致（见 _spawn_monster_group）。
+
+    Args:
+        view: 游戏视图（提供地图数据、怪物列表、死亡回调、建筑系统）
+        kind: 小写类型标识（THEME_MONSTER_CLASS_NAMES 的键，如 "zombie"）
+        count: 生成数量
+        origin_xy: 中心坐标 (x, y)（精英怪当前位置）
+        spread: 散布半径（像素），实际落点为半径内的随机偏移
+
+    Returns:
+        list: 本次生成的小怪列表（数量可能少于 count，落点越界/类型非法时跳过）
+    """
+    spawned = []
+    if count <= 0:
+        return spawned
+
+    walls = view.map_data.get("walls", [])
+    theme = view.map_data.get("theme", "forest")
+    class_name = THEME_MONSTER_CLASS_NAMES.get(kind)
+    monster_class = MONSTER_CLASS_MAP.get(class_name) if class_name else None
+    if not monster_class:
+        return spawned
+
+    for _ in range(count):
+        # 以 origin 为中心随机角度 + [0, spread] 半径偏移，避免小怪完全重叠
+        angle = random.uniform(0, math.tau)
+        radius = random.uniform(0, spread)
+        x = origin_xy[0] + math.cos(angle) * radius
+        y = origin_xy[1] + math.sin(angle) * radius
+        # 越界（地图边缘外）跳过
+        map_w, map_h = view.map_data.get("map_size", (0, 0))
+        if map_w and map_h and not (TILE_SIZE <= x <= map_w - TILE_SIZE
+                                   and TILE_SIZE <= y <= map_h - TILE_SIZE):
+            continue
+
+        m = monster_class(center_x=x, center_y=y)
+        m.set_on_death(view._on_monster_death)
+        m._walls = walls
+        view.build_system.attach_monster(m)
+        # 召唤计数标记：on_affix_update 据此统计场上召唤怪数以执行 summon_max_alive 上限
+        m.affix_summoned = True
+        assign_monster_armor(m, level=random.randint(*MONSTER_GEAR_LEVEL_RANGE), theme=theme)
+        assign_monster_helmet(m, level=random.randint(*MONSTER_GEAR_LEVEL_RANGE), theme=theme)
+        assign_monster_weapon(m, level=random.randint(*MONSTER_WEAPON_LEVEL_RANGE), theme=theme)
+        view.monsters.append(m)
+        spawned.append(m)
+
+    return spawned
+
+
+def spawn_elite(view):
+    """刷新一只带随机词缀的精英怪（阶段 3）。
+
+    与野外刷新（respawn_monsters）的区别：
+    - 强制离玩家至少 ELITE_SPAWN_MIN_DIST（find_valid_spawn_position 自身已保证
+      MONSTER_SPAWN_MIN_DIST，此处再用更严格的 min_dist_from_others 复核一次）；
+    - 血量 ×ELITE_CONFIG['hp_mult']、伤害 ×ELITE_CONFIG['damage_mult']；
+    - 从 ELITE_AFFIXES 随机抽一个词缀交给 apply_affix；
+    - 置 is_elite / elite_drop 标记（供掉落加奖与 HUD 标记消费）。
+
+    Returns:
+        精英怪实例；找不到有效刷新位置时返回 None
+    """
+    from game.monster_affixes import apply_affix, roll_affix
+
+    theme = view.map_data.get("theme", "forest")
+    walls = view.map_data.get("walls", [])
+    rooms = view.map_data.get("rooms", [])
+    map_w, map_h = view.map_data.get("map_size", (0, 0))
+
+    # 主题怪池（不含 BOSS，BOSS 由火箭发射台/金字塔单独生成）
+    type_pool = THEME_MONSTER_TYPES.get(theme) or THEME_MONSTER_TYPES["forest"]
+    class_name = THEME_MONSTER_CLASS_NAMES.get(random.choice(type_pool))
+    monster_class = MONSTER_CLASS_MAP.get(class_name) if class_name else None
+    if not monster_class:
+        return None
+
+    x, y = _find_valid_spawn_position(view, walls, rooms, map_w, map_h,
+                                      min_dist_from_others=ELITE_SPAWN_MIN_DIST)
+    if x is None:
+        return None
+
+    m = monster_class(center_x=x, center_y=y)
+    m.set_on_death(view._on_monster_death)
+    m._walls = walls
+    view.build_system.attach_monster(m)
+    # 注入 GameView 引用 provider：词缀的分裂/召唤/火墙需要访问场景
+    # （不直接持有视图，与 _evac_point_provider 同一模式）
+    m.set_affix_view_provider(lambda v=view: v)
+
+    assign_monster_armor(m, level=random.randint(*MONSTER_GEAR_LEVEL_RANGE), theme=theme)
+    assign_monster_helmet(m, level=random.randint(*MONSTER_GEAR_LEVEL_RANGE), theme=theme)
+    assign_monster_weapon(m, level=random.randint(*MONSTER_WEAPON_LEVEL_RANGE), theme=theme)
+
+    # 精英倍率（血量上限与当前值同步放大，保持满血进场）
+    m.max_hp = int(m.max_hp * ELITE_CONFIG["hp_mult"])
+    m.hp = m.max_hp
+    m.damage = m.damage * ELITE_CONFIG["damage_mult"]
+
+    # 随机词缀 + 标记
+    apply_affix(m, roll_affix())
+    m.is_elite = True
+    m.elite_drop = True
+
+    view.monsters.append(m)
+    return m
+
+
+def update_elite_spawner(view, dt) -> None:
+    """精英刷新计时器（阶段 3 定时驱动方，挂在 game_view.on_update 的 host/solo 分支）
+
+    规则：
+    - 开局累计满 ELITE_CONFIG['interval'] 秒后首刷，之后同周期刷新；
+    - 场上存活精英少于 ELITE_MAX_ALIVE 只才刷（同一时间最多 ELITE_MAX_ALIVE 只）；
+    - spawn_elite 内部已做「距玩家足够远」与主题怪池校验，找不到位置时本次跳过，
+      计时器照常归零，下个周期重试。
+    """
+    timer = getattr(view, "_elite_spawn_timer", 0.0) + dt
+    if timer < ELITE_CONFIG["interval"]:
+        view._elite_spawn_timer = timer
+        return
+    view._elite_spawn_timer = 0.0
+    alive_elites = sum(1 for m in view.monsters
+                       if getattr(m, "alive", False) and getattr(m, "is_elite", False))
+    if alive_elites >= ELITE_MAX_ALIVE:
+        return
+    spawn_elite(view)

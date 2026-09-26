@@ -214,11 +214,23 @@ def upgrade_equipment(pid: int, equip_id: int = None, material_id: int = None) -
         return True
 
 
-def sell_equipment(pid: int, equip_id: int) -> int:
+def equipment_sell_price(base, sell_bonus: float = 0.0) -> int:
+    """装备售卖价（纯函数，不查库）：int(基础值 × 2 × (1 + 市场回收加成))
+
+    基础值：背包取容量，头盔/护甲取防御（与旧口径一致）。
+    sell_bonus 取 entities.facility_defs.market_sell_bonus(市场设施等级)：
+    Lv0（未建造）/Lv1 = 0.0 → 与旧口径 **完全一致**（零回归）；Lv2 = +5%、Lv3 = +10%。
+    """
+    return int(int(base) * 2 * (1.0 + sell_bonus))
+
+
+def sell_equipment(pid: int, equip_id: int, sell_bonus: float = 0.0) -> int:
     """售卖装备（头盔/护甲/背包），返回获得金币数
 
-    修复：售卖价以仓库页显示价为准（显示 = 背包容量/其余防御 × 2），不再按升级成本折算，
+    售卖价以仓库页显示价为准（显示 = 背包容量/其余防御 × 2，见 equipment_sell_price），
     保证玩家在仓库页看到的售价与实际售得金币一致。
+
+    sell_bonus：市场设施的售出回收加成（阶段10，Lv0/Lv1 传 0.0 即旧口径）。
     """
     with _conn() as c:
         row = c.execute(
@@ -228,9 +240,9 @@ def sell_equipment(pid: int, equip_id: int) -> int:
         if not row:
             return 0
         slot, defense, capacity = row
-        # 售卖价 = 基础值（背包取容量，其余取防御）× 2（与仓库页显示价同一口径）
+        # 售卖价 = 基础值（背包取容量，其余取防御）× 2 × (1 + 回收加成)
         base = capacity if slot == "backpack" else defense
-        gold_earned = int(base) * 2
+        gold_earned = equipment_sell_price(base, sell_bonus)
         c.execute("DELETE FROM equipment WHERE id=?", (equip_id,))
         c.execute("UPDATE players SET gold=gold+? WHERE id=?", (gold_earned, pid))
         return gold_earned
@@ -246,3 +258,19 @@ def delete_equipment(pid: int, equip_id: int) -> bool:
             return False
         c.execute("DELETE FROM equipment WHERE id=?", (equip_id,))
         return True
+
+
+def reforge_equipment(equipment_id: int, new_effects: str) -> None:
+    """重铸装备词条：只把 effects 列整体覆盖为 new_effects，**等级/防御/容量一律不动**
+
+    new_effects 为 entities.effects_defs.serialize_effects() 产出的 "id:level" 逗号分隔字符串
+    （由调用方按物品等级 roll 生成，装备走 passive 池，slot 分类同样由调用方经
+    roll_effects_for_slot 传入）。
+
+    语义说明：重铸是**完全重新随机**，结果可能比原词条更差（词条种类、组合均为随机）；
+    这与「升级只升不降」的 refresh_effect_levels 口径互不冲突——升级只负责抬升已有词条等级，
+    重铸只负责整体替换词条内容，两者永不互相覆盖对方的保证。
+    装备 id 为全局自增主键，无需再按 player_id 过滤（调用方从玩家自己的装备列表取值）。
+    """
+    with _conn() as c:
+        c.execute("UPDATE equipment SET effects=? WHERE id=?", (new_effects or "", equipment_id))

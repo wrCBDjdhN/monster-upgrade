@@ -57,7 +57,6 @@
 | 314-357 | 加载玩家当前武器（按 `gs.equipped_weapon_id` 查 DB → 写满 `gs.weapon_*` 属性） | 双端 | — | 各端加载本地玩家武器配置；主机侧随玩家快照携带武器信息（C1） |
 | 359-360 | 创建 `CombatSystem(self.wall_list)`（弹丸/激光容器） | 双端 | — | 客户端用于本地弹丸纯表现（D）；命中判定主机（见 740-750 行） |
 | 362-363 | 创建 `EvacState()`（撤离读条状态机） | 双端 | — | 客户端本地读条（B12，见 920-921 行） |
-| 365-372 | 生成撤离点精灵（evac_sprites） | 双端 | — | 静态 |
 | 374-375 | 重置 `gs.run_carried = {}` | 双端 | — | 各端本地携带物；撤离以主机结算清单为准（B12） |
 | 377-380 | 创建物理引擎 + PlayerController + 相机初始位置 | 双端 | — | 客户端本地物理仅作用于本地玩家；远端玩家不受本地物理影响（C2） |
 | 382-419 | 收集攻击 debuff（武器/装备被动与 debuff 字段 → `_attack_debuffs`） | 双端 | — | 各端本地玩家数据；攻击事件携带 debuff 上报（B7） |
@@ -196,3 +195,48 @@
 3. **input_handler 攻击分支**（第 3 节）是 todo 9 之外的必改点：客户端近战/远程不得调用 `combat.melee_attack` 等命中判定，改为发攻击事件。
 4. **`_fail_run`/`commit_run_to_warehouse`**：客户端只在收到主机死亡事件 / 结算清单后调用，禁止本地自行裁决（行动超时、撤离成功除外——均改由主机事件驱动）。
 5. 行号以本文件基准（commit d571a1d）为准；实施时若代码有变动须同步更新本矩阵。
+
+---
+
+## 5. 阶段 1-10 新增消息归属矩阵（v1.5.0，消息全集以 `net/protocol.py` 的 `MsgType` + `MESSAGE_SCHEMAS` 为准）
+
+> 本节只覆盖玩法大改新增/扩展的消息与载荷字段。第 1-4 节的行号矩阵仍以 commit d571a1d 为基准，未随本次改动重算。
+
+### 5.1 新增消息类型
+
+| 消息 | 方向 | 归属 | 客户端禁用 | 备注（数据流） |
+|------|------|------|-----------|----------------|
+| `EVAC_POINT_STATE` | 主机 → 全部 | 主机 | ⛔ | 主撤离点权威状态（阶段2 防守式撤离）：状态变化时立即广播 + 每 `config.EVAC_STATE_BCAST_SEC`（1.0s）周期广播。载荷 `x/y/state/hp/max_hp/defend_left/wave_no`，`state ∈ dormant/defending/secured/destroyed`。⛔ 客户端不跑 `EvacPoint.update` 与波次，只按本消息镜像并渲染倒计时/血量 |
+| `EVAC_POINT_ACTION` | 客户端 → 主机 | 主机 | — | 客户端请求激活/修复（载荷 `player_id/action∈{activate,repair}/x/y`）；主机判距（防作弊）并校验资源后执行，再广播 `EVAC_POINT_STATE`。⛔ 客户端禁本地推进状态机 |
+| `EVENT_START` | 主机 → 全部 | 主机 | ⛔ | 阶段4 本局随机事件 id 广播（`''`=无事件）。数据流：`主机 pick_event 一次→广播 event_id+flags→客户端 apply_event 写 view.event_flags 并显示 3 秒横幅`（纯表现层，⛔ 客户端禁本地抽选；晚加入客户端靠 `FULL_STATE.event_id`/`event_flags` 补看横幅） |
+| `MISSION_PROGRESS` | 主机 → **归属客户端单播** | 主机 | — | 阶段6 任务/成就进度下发（`player_id` + `event` + `amount`，`event` 取自 `MISSION_EVENT_KEYS` 七键之一）。单播归属端而非广播，避免其他端重复计数 |
+
+### 5.2 既有消息的载荷扩展
+
+| 消息 | 扩展字段 | 方向 | 归属 | 备注 |
+|------|---------|------|------|------|
+| `PLAYER_SNAPSHOT` | `stats: dict\|None` | 主机 → 全部 | 主机 | 阶段5 祝福生效后的**有效属性**（含套装加成），由 `BlessingState.stats_payload()` 产出；客户端只应用到本地玩家，不本地重算 |
+| `MAP_CHANGE` | 新 `change_type`：`build_place` / `build_destroy` / `fire_zone` | 主机 → 全部 | 主机 | 阶段1 建造放置/拆除、阶段3 火墙词缀区。协议层按不透明字符串透传（枚举由 game 层 `client._apply_map_change` 校验，未列出者显式记日志禁静默）。数据流：`主机 place/remove/生成火墙→广播→客户端只渲染（⛔ 禁本地建造/禁 update）`。载荷：`build_place` 的 `state={kind,x,y,hp}`；`fire_zone` 的 `state={action,zid,x,y,r,life,dps,burn_duration}`（`action`='add'/'remove'） |
+| `MAP_CHANGE` | `env_damage`（`state.hp` + `extra.damage`） | 主机 → 全部 | 主机 | 阶段2 环境物/撤离点受损同步；⛔ 客户端禁本地扣血 |
+| `FULL_STATE` | `buildings: list[dict]` | 主机 → 全部 | 主机 | 阶段1 晚加入客户端补齐已建建筑，每项 `{bid, kind, x, y, hp}`；`bid` 与 `MAP_CHANGE` `build_place`/`build_destroy` 的 `obj_id` 同口径 |
+| `FULL_STATE` | `evac_point: dict\|None` | 主机 → 全部 | 主机 | 晚加入客户端补齐主撤离点状态（格式同 `EVAC_POINT_STATE`；`None`=尚未建立） |
+| `FULL_STATE` | `event_id: str` + `event_flags: dict` | 主机 → 全部 | 主机 | 晚加入客户端补看本局事件横幅（`event_id`=`''`=无事件；`event_flags` 格式同 `EVENT_START`） |
+
+### 5.3 建造系统联机归属（阶段1，`game/build_system.py`）
+
+| 行为 | 归属 | 客户端禁用 | 备注 |
+|------|------|-----------|------|
+| `can_place` / `place`（资源扣减、建筑落位、注册怪物碰撞网格） | 主机 | ⛔ | 客户端直接返回 `(False, "联机建造由房主裁决")`，本地只做预览 |
+| `remove` / `take_damage`（被摧毁） | 主机 | ⛔ | 客户端只按 `MAP_CHANGE` 广播移除/掉血，不本地结算 |
+| `update(dt)`（箭塔攻击 / 陷阱触发） | 主机 | ⛔ | 客户端 `update` 提前 return（build_system.py:142），只渲染 |
+| 建筑渲染（实心填充，禁空心/线框） | 双端 | — | 客户端建筑**不注册**玩家物理也不注册怪物碰撞网格，纯表现 |
+
+### 5.4 任务/成就计数归属（阶段6，`game/mission_tracker.py`）
+
+| 事件键分组 | 归属 | 说明 |
+|-----------|------|------|
+| 局内 `kill`/`elite_kill`/`harvest`/`chest`/`evac` | **主机唯一计数端** | ⛔ 客户端禁本地计数；主机 `on_event` 后经 `MISSION_PROGRESS` 单播归属端 |
+| 局外 `forge`/`reforge` | **各端本地** | 锻造坊/市场本就是本地 UI + 本地 DB，禁走网络 |
+| 精英死亡 | 主机 | 同时计 `kill` 与 `elite_kill`（entity_callbacks.py:88-106，用户口径 2026-09-26） |
+| 未知事件键 | — | 显式告警后忽略（禁静默，见 net/AGENTS.md 铁律） |
+

@@ -27,6 +27,8 @@ _ACTION_NAMES = {
     "potion_2": "药水 2", "potion_3": "药水 3",
     "rocket_destroy": "发射台-炸毁", "rocket_evac": "发射台-撤离",
     "spectate": "观战切换", "minimap_zoom": "小地图缩放",
+    # 补 build 动作中文名，否则设置页显示字面量 build
+    "build": "建造模式",
 }
 
 

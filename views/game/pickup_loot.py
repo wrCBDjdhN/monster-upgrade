@@ -245,6 +245,12 @@ class PickupLootManager:
                 "level": 1, "effects": [],
             }
 
+        # 阶段5 祝福：装备/武器变化后重新固定「无祝福基准」并按当前祝福重算。
+        # 换武器会把 gs.weapon_damage/speed 重置为「新武器 + 等级加成」（不含祝福），
+        # 故必须 rebase_weapon=True 覆盖旧武器基准，否则祝福会乘在旧武器数值上。
+        # 头盔/护甲/背包只改玩家属性，武器基准不变。
+        self.gv.refresh_blessing_stats(rebase_weapon=(d.item_type == "weapon"))
+
     def _add_equipped_to_carried(self, gs: "GameState") -> None:
         """撤离前将装备栏中**局内免费拾取**的物品加入 run_carried，以便 commit_run_to_warehouse 入库
 

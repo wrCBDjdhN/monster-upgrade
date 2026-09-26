@@ -930,9 +930,11 @@ class LobbyView(arcade.View):
         self.window.show_view(WarehouseView(self.window_ref))
 
     def _open_market(self):
-        """房间内打开市场（联机保持连接，返回时回 LobbyView 复用连接）"""
+        """房间内打开市场（联机保持连接，返回时回 LobbyView 复用连接）
+        阶段10：过 _enter_facility 守卫——未建造先进设施页"""
         from views.market_view import MarketView
-        self.window.show_view(MarketView(self.window_ref))
+        from views.start_view import _enter_facility
+        _enter_facility(self, "market", MarketView)
 
     def _close_room(self):
         """主机关闭房间：广播 ROOM_ENDED(room_closed) → 停止服务器 → 回主菜单"""

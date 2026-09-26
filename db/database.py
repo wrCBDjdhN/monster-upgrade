@@ -186,6 +186,56 @@ def init_db():
             if new_item_id:
                 c.execute("UPDATE weapons SET item_id = ? WHERE id = ?", (new_item_id, wid))
 
+        # 每日任务表（db/missions.py：每日抽 config.DAILY_COUNT 条，按 slot 存进度/领奖，date 跨日即重抽）
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS daily_missions (
+                player_id INTEGER NOT NULL, slot INTEGER NOT NULL,
+                mission_id TEXT NOT NULL, progress INTEGER NOT NULL DEFAULT 0,
+                claimed INTEGER NOT NULL DEFAULT 0, date TEXT NOT NULL,
+                PRIMARY KEY (player_id, slot)
+            )
+        """)
+        # 成就进度表（db/missions.py：一次性奖励，累计进度不清零）
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS mission_progress (
+                player_id INTEGER NOT NULL, achievement_id TEXT NOT NULL,
+                progress INTEGER NOT NULL DEFAULT 0, claimed INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (player_id, achievement_id)
+            )
+        """)
+        # 图鉴档位领奖表（db/codex.py：每类图鉴达到 config.CODEX_TIERS 档位后可领一次；
+        # 复合主键保证同玩家同类同档位只记一次 → claim_codex_reward 幂等）
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS codex_rewards (
+                player_id INTEGER NOT NULL,
+                category TEXT NOT NULL,
+                tier INTEGER NOT NULL,
+                claimed_at TEXT DEFAULT (datetime('now', 'localtime')),
+                PRIMARY KEY (player_id, category, tier)
+            )
+        """)
+        # 地图星级表（阶段8：db/map_progress.py 记录玩家各图最高星数；
+        # 复合主键保证同玩家同图只有一行，record_stars 用 UPSERT 取 max 实现「只升不降」）
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS map_stars (
+                player_id INTEGER NOT NULL,
+                theme TEXT NOT NULL,
+                stars INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (player_id, theme)
+            )
+        """)
+        # 设施等级表（阶段10：db/facilities.py 市场/锻造坊建造与升级；
+        # 复合主键保证同玩家同设施只有一行，level 0=未建造，UPSERT 更新等级）
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS facilities (
+                player_id INTEGER NOT NULL,
+                facility_id TEXT NOT NULL,
+                level INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (player_id, facility_id),
+                FOREIGN KEY(player_id) REFERENCES players(id)
+            )
+        """)
+
 
 # ── Re-exports（保持向后兼容） ──
 
@@ -193,17 +243,20 @@ def init_db():
 from db.players import get_or_create_player, get_gold, add_gold, spend_gold  # noqa: F401, E402
 
 # 武器管理
-from db.weapons import create_weapon, add_weapon, get_weapons, upgrade_weapon, sell_weapon, delete_weapon  # noqa: F401, E402
+from db.weapons import create_weapon, add_weapon, get_weapons, upgrade_weapon, sell_weapon, weapon_sell_price, delete_weapon, reforge_weapon  # noqa: F401, E402
 
 # 装备管理
 from db.equipment import (  # noqa: F401, E402
     get_equipment, get_equipment_inventory, equip_item, equip_from_inventory,
     unequip_slot, get_total_defense, get_backpack_capacity, add_equipment,
-    get_equipment_materials, upgrade_equipment, sell_equipment, delete_equipment,
+    get_equipment_materials, upgrade_equipment, sell_equipment, equipment_sell_price,
+    delete_equipment, reforge_equipment,
 )
 
 # 仓库管理
-from db.warehouse import add_warehouse_item, get_warehouse, sell_warehouse_item  # noqa: F401, E402
+from db.warehouse import (  # noqa: F401, E402
+    add_warehouse_item, get_warehouse, sell_warehouse_item, spend_warehouse_item,
+)
 
 # 药水管理
 from db.potions import add_potion, get_potions, use_potion, remove_potion  # noqa: F401, E402
@@ -240,4 +293,18 @@ from db.settings import (  # noqa: F401, E402
 )
 
 # 图鉴解锁管理（怪物/武器/装备/药水条目解锁记录，codex_view 读取）
-from db.codex import unlock_codex_entry, get_codex_unlocks  # noqa: F401, E402
+from db.codex import (  # noqa: F401, E402
+    unlock_codex_entry, get_codex_unlocks,
+    get_codex_count, get_claimed_rewards, claim_codex_reward,
+)
+
+# 每日任务与成就管理（清单在 entities/mission_defs.py，进度/领奖在 db/missions.py）
+from db.missions import roll_daily, get_daily, bump_mission, claim_daily, get_achievements, bump_achievement, claim_achievement  # noqa: F401, E402
+
+# 设施等级管理（阶段10：市场/锻造坊建造与升级，数据在 entities/facility_defs.py）
+from db.facilities import (  # noqa: F401, E402
+    get_facilities, get_facility_level, build_facility, upgrade_facility, facility_can_afford,
+)
+
+# 地图星级管理（阶段8：各主题地图最高星数；判定在 game/level_progress.py，map_select_view 读取）
+from db.map_progress import get_stars, record_stars  # noqa: F401, E402

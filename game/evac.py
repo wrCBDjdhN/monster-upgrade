@@ -12,7 +12,105 @@
 """
 
 import arcade
-from config import EVAC_CHANNEL_TIME, EVAC_RADIUS, EVAC_COLOR
+from config import (
+    EVAC_CHANNEL_TIME,
+    EVAC_COLOR,
+    EVAC_DEFEND_TIME,
+    EVAC_POINT_HP,
+    EVAC_RADIUS,
+    EVAC_WAVE_INTERVAL,
+)
+
+
+class EvacPoint:
+    """防守式撤离点状态机。
+
+    dormant →（激活）→ defending →（倒计时归零）→ secured；
+    defending 中血量归零会进入 destroyed，修复后重新开始防守。
+    secured 后由 GameView 把本点坐标交给 EvacState，复用现有三秒读条与结算链。
+    资源扣减由主机调用方完成；activate 的 free 参数仅保留航天图免费激活语义。
+    """
+
+    def __init__(self, x: float, y: float, theme: str) -> None:
+        self.x = x
+        self.y = y
+        self.theme = theme
+        self.state = "dormant"
+        self.max_hp = EVAC_POINT_HP
+        self.hp = self.max_hp
+        self._defend_duration = float(EVAC_DEFEND_TIME.get(theme, EVAC_DEFEND_TIME["forest"]))
+        self.defend_left = self._defend_duration
+        self.wave_timer = EVAC_WAVE_INTERVAL
+        self.wave_no = 0
+        self._wave_pending = False
+
+    def activate(self, *, free: bool = False) -> bool:
+        """激活休眠撤离点；free 供击败 BOSS 后免费建立的航天撤离点使用。"""
+        del free  # 资源由主机调用方校验并扣除，本方法只负责状态转换。
+        if self.state != "dormant":
+            return False
+        self.state = "defending"
+        self.hp = self.max_hp
+        self._reset_defense()
+        return True
+
+    def repair(self) -> bool:
+        """修复被摧毁的撤离点，并重置血量、波次与防守倒计时。"""
+        if self.state != "destroyed":
+            return False
+        self.hp = self.max_hp
+        self.state = "defending"
+        self._reset_defense()
+        return True
+
+    def take_damage(self, damage: int) -> bool:
+        """承受进攻伤害；返回 True 表示本次攻击摧毁了撤离点。"""
+        if self.state != "defending" or damage <= 0:
+            return False
+        self.hp = max(0, self.hp - damage)
+        if self.hp > 0:
+            return False
+        self.state = "destroyed"
+        self.defend_left = 0.0
+        self._wave_pending = False
+        return True
+
+    def update(self, delta_time: float) -> None:
+        """推进防守倒计时；波次到点时记录一次待生成事件。"""
+        if self.state != "defending":
+            return
+        self.defend_left = max(0.0, self.defend_left - delta_time)
+        if self.defend_left <= 0.0:
+            self.state = "secured"
+            self._wave_pending = False
+            return
+
+        self.wave_timer -= delta_time
+        if self.wave_timer <= 0.0:
+            self.wave_no += 1
+            self.wave_timer = EVAC_WAVE_INTERVAL
+            self._wave_pending = True
+
+    def consume_wave_event(self) -> bool:
+        """读取并清除一次待生成波次事件，防止同一帧重复刷怪。"""
+        pending = self._wave_pending
+        self._wave_pending = False
+        return pending
+
+    def progress(self) -> float:
+        """返回 0.0~1.0 防守进度；secured 固定为 1.0。"""
+        if self.state == "secured":
+            return 1.0
+        if self.state != "defending" or self._defend_duration <= 0.0:
+            return 0.0
+        return max(0.0, min(1.0, 1.0 - self.defend_left / self._defend_duration))
+
+    def _reset_defense(self) -> None:
+        """开始新的防守周期。"""
+        self.defend_left = self._defend_duration
+        self.wave_timer = EVAC_WAVE_INTERVAL
+        self.wave_no = 0
+        self._wave_pending = False
 
 
 class EvacState:

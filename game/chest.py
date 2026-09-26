@@ -19,7 +19,12 @@
 
 import random
 import arcade
-from config import CHEST_THEME_CONFIGS, CHEST_GOLD_MIN, CHEST_GOLD_MAX
+from config import (
+    CHEST_THEME_CONFIGS, CHEST_GOLD_MIN, CHEST_GOLD_MAX,
+    EVENT_AIRDROP_CHEST_COLOR, EVENT_AIRDROP_EXTRA_GEAR, EVENT_AIRDROP_GOLD_MAX,
+    EVENT_AIRDROP_GOLD_MIN, EVENT_AIRDROP_LEVEL_SHIFT, EVENT_AIRDROP_MIN_LEVEL,
+    EVENT_AIRDROP_POTION_CHANCE,
+)
 from entities.equipment_defs import HELMETS, ARMORS, BACKPACKS, POTIONS
 from entities.weapon_defs import MELEE_WEAPONS, RANGED_WEAPONS
 
@@ -33,6 +38,10 @@ class Chest(arcade.SpriteSolidColor):
         self.center_y = center_y
         self.opened = False
         self.theme = theme  # 主题：forest/desert/space，决定掉落池与等级区间
+        # 阶段4 神器低语事件（relic）注入的神器等级加成比例（0 = 无事件加成）。
+        # 由 map_events.trigger_event 在事件生效时统一写入本局所有普通宝箱，
+        # 神器档命中时按此比例上调等级（见 _apply_artifact_bonus）。
+        self.artifact_bonus = 0.0
 
     def open_chest(self) -> dict:
         """打开宝箱，返回战利品"""
@@ -65,6 +74,21 @@ class Chest(arcade.SpriteSolidColor):
         )
         return pool
 
+    def _is_artifact(self, slot: str, item_id: str) -> bool:
+        """判定槽位物品是否为神器（artifact 标记，与 _build_artifact_pool 同源）"""
+        pools = {"weapon": {**MELEE_WEAPONS, **RANGED_WEAPONS}, "helmet": HELMETS, "armor": ARMORS}
+        return bool(pools.get(slot, {}).get(item_id, {}).get("artifact"))
+
+    def _apply_artifact_bonus(self, level: int) -> int:
+        """神器等级加成：按 artifact_bonus 比例取整上调（至少 +1 级，保证加成可感知）
+
+        阶段4 神器低语事件（relic）专用；无事件时 artifact_bonus=0，原样返回。
+        """
+        bonus = max(0.0, float(self.artifact_bonus or 0.0))
+        if bonus <= 0.0:
+            return level
+        return max(level + 1, int(round(level * (1.0 + bonus))))
+
     def _generate_loot(self) -> dict:
         """生成随机战利品（按 self.theme 对应 CHEST_THEME_CONFIGS 的池/概率/等级）
 
@@ -95,10 +119,12 @@ class Chest(arcade.SpriteSolidColor):
             self._append_loot_item(loot, slot, item_id, self._roll_level(cfg["elite_level"]))
         else:
             # 神器（仅航天 20% 档；森林/沙漠 artifact_chance=0 时不可达）
+            # 阶段4 神器低语事件：artifact_bonus>0 时按比例上调神器等级
             pool = self._build_artifact_pool()
             if pool:
                 slot, item_id = random.choice(pool)
-                self._append_loot_item(loot, slot, item_id, self._roll_level(cfg["artifact_level"]))
+                level = self._apply_artifact_bonus(self._roll_level(cfg["artifact_level"]))
+                self._append_loot_item(loot, slot, item_id, level)
         # 必定掉落资源（2组，每组1-3个）
         res_types = ["wood", "stone", "ore"]
         for _ in range(2):
@@ -119,3 +145,60 @@ def spawn_chests(rooms, rng, count_per_room: int = 1) -> list[tuple]:
             y = rng.randint(room.y + 64, room.y + room.h - 64)
             result.append((x, y))
     return result
+
+
+class AirdropChest(Chest):
+    """空投补给箱（阶段 4 airdrop 事件）
+
+    继承 Chest，因此开箱交互（E）、障碍物碰撞、图鉴解锁、渲染与网络同步
+    全部沿用现有宝箱路径，无需另起一套机制。相对普通宝箱的差异：
+
+    - 主掉落强制取"高级装备池"（主题 elite_pool，缺失时回落 main_pool），
+      等级区间按 EVENT_AIRDROP_LEVEL_SHIFT 上浮，并保底 1 件等级 ≥ EVENT_AIRDROP_MIN_LEVEL；
+    - 必定附带金币（EVENT_AIRDROP_GOLD_MIN~MAX，高于普通宝箱）与资源；
+    - artifact_bonus（神器低语事件的 view.event_flags.artifact_bonus）按比例抬高神器等级；
+    - is_airdrop=True 供渲染层区分配色（橙色系 + 高亮饰条，仍为一律实心矩形）。
+    """
+
+    def __init__(self, center_x: float, center_y: float, theme: str = "forest",
+                 artifact_bonus: float = 0.0):
+        super().__init__(center_x, center_y, theme=theme)
+        self.is_airdrop = True          # 渲染/小地图据此用空投配色与标记
+        self.artifact_bonus = artifact_bonus  # 神器等级加成比例（0 = 无加成）
+        self.color = EVENT_AIRDROP_CHEST_COLOR
+
+    def open_chest(self) -> dict:
+        """打开空投箱（复用父类状态机，仅战利品生成走空投口径）"""
+        return super().open_chest()
+
+    def _airdrop_level(self, cfg: dict) -> int:
+        """空投主装备等级：主题高级档区间上浮后，再保底到 EVENT_AIRDROP_MIN_LEVEL"""
+        lo, hi = cfg.get("elite_level") or cfg.get("main_level", (1, 1))
+        lo = int(lo) + EVENT_AIRDROP_LEVEL_SHIFT
+        hi = int(hi) + EVENT_AIRDROP_LEVEL_SHIFT
+        return max(EVENT_AIRDROP_MIN_LEVEL, self._roll_level((lo, max(lo, hi))))
+
+    def _generate_loot(self) -> dict:
+        """生成空投战利品（高级装备池 + 保底 Lv≥10 + 附赠药水/资源/更多金币）"""
+        cfg = CHEST_THEME_CONFIGS.get(self.theme, CHEST_THEME_CONFIGS["forest"])
+        loot = {"weapons": [], "equipment": [], "resources": [], "gold": 0,
+                "backpack": None, "potions": []}
+        pool = cfg.get("elite_pool") or cfg.get("main_pool") or []
+        # 主装备 1 件（保底 Lv≥10；神器按 artifact_bonus 抬等级）
+        for _ in range(1 + max(0, EVENT_AIRDROP_EXTRA_GEAR)):
+            if not pool:
+                break
+            slot, item_id = random.choice(pool)
+            level = self._airdrop_level(cfg)
+            if self._is_artifact(slot, item_id):
+                level = self._apply_artifact_bonus(level)
+            self._append_loot_item(loot, slot, item_id, level)
+        # 附带 1 瓶药水（果实 price=0 属怪物专属掉落，不进补给箱池）
+        if random.random() < EVENT_AIRDROP_POTION_CHANCE:
+            loot["potions"].append(random.choice([k for k, v in POTIONS.items() if v.get("price", 0) > 0]))
+        # 必定掉落资源（2 组，每组 1-3 个）
+        for _ in range(2):
+            loot["resources"].append((random.choice(["wood", "stone", "ore"]), random.randint(1, 3)))
+        # 必定掉落金币（空投档显著高于普通宝箱）
+        loot["gold"] = random.randint(EVENT_AIRDROP_GOLD_MIN, EVENT_AIRDROP_GOLD_MAX)
+        return loot

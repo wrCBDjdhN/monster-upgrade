@@ -28,13 +28,32 @@ def _action_keys(view, *actions) -> set:
     return codes
 
 
+def _build_cost_text(cost: dict) -> str:
+    """把建筑 cost 的资源 id 翻译成中文资源名（木材×6 石材×2）用于建造模式浮动文字
+
+    cost 键名是 wood/stone/ore 契约，界面提示须经 entities.resource_defs.RESOURCES 取中文名；
+    未登记的资源 id 原样显示，避免提示缺名。
+    """
+    from entities.resource_defs import RESOURCES
+    return " ".join(
+        f"{RESOURCES.get(rid, {}).get('name', rid)}×{qty}"
+        for rid, qty in cost.items()
+    )
+
+
 def handle_key_press(view, key, modifiers):
     """处理键盘按下事件"""
     gs = view.window.game_state
 
     # 设置界面键 (ESC)：任何模式（含观战）都可打开设置界面调整按键/音量。
     # 放在观战早退之前：观战中玩家也要能开设置。
+    # 局内建造系统（阶段1）：建造模式下 ESC 只退出建造模式，不打开设置
     if key == arcade.key.ESCAPE:
+        if getattr(gs, "build_mode", False):
+            gs.build_mode = False
+            floating_texts.add(view.player.center_x, view.player.center_y + 60,
+                               "已退出建造模式", arcade.color.WHITE, life=1.5, font_size=14)
+            return
         from views.settings_view import SettingsView
         view.window.show_view(SettingsView(view.window_ref, game_view=view))
         return
@@ -54,9 +73,48 @@ def handle_key_press(view, key, modifiers):
             view._cycle_spectate_target()
         return
 
+    # ── 阶段4 商队换购弹层：↑↓ 选择、E/回车/数字键 购买 ──
+    # 放在控制器之前：弹层开启期间方向键只用于换行，不再驱动玩家移动；
+    # E 只买当前高亮项，不顺带触发宝箱交互（避免一次按键既买货又开箱）。
+    if getattr(view, "_caravan_panel_open", False):
+        from game.map_events import caravan_panel_buy, caravan_panel_move
+        if key in _action_keys(view, "interact") or key == arcade.key.ENTER:
+            caravan_panel_buy(view)
+            return
+        if key == arcade.key.UP:
+            caravan_panel_move(view, 1)
+            return
+        if key == arcade.key.DOWN:
+            caravan_panel_move(view, -1)
+            return
+        # 数字键 1-N 直购对应条目（弹层条目固定，便于快速补货）
+        for idx, code in enumerate((arcade.key.KEY_1, arcade.key.KEY_2, arcade.key.KEY_3,
+                                    arcade.key.KEY_4, arcade.key.KEY_5, arcade.key.KEY_6,
+                                    arcade.key.KEY_7, arcade.key.KEY_8, arcade.key.KEY_9)):
+            if key == code:
+                caravan_panel_buy(view, idx)
+                return
+        # 弹层开启期间吞掉其余按键，避免误触发建造/背包等面板
+        return
+
     # 控制器
     if view.controller:
         view.controller.on_key_press(key)
+
+    # 局内建造系统（阶段1）：B 键切换建造模式（观战守卫已在上方拦截，此处仅存活玩家可达）
+    if key in _action_keys(view, "build"):
+        gs.build_mode = not getattr(gs, "build_mode", False)
+        if gs.build_mode:
+            from entities.build_defs import BUILDS
+            bdef = BUILDS.get(gs.build_kind, {})
+            cost_txt = _build_cost_text(bdef.get("cost", {}))
+            floating_texts.add(view.player.center_x, view.player.center_y + 60,
+                               f"建造模式：{bdef.get('name', '')}（{cost_txt}）",
+                               arcade.color.GOLD, life=2.0, font_size=14)
+        else:
+            floating_texts.add(view.player.center_x, view.player.center_y + 60,
+                               "已退出建造模式", arcade.color.WHITE, life=1.5, font_size=14)
+        return
 
     # 宝箱交互键
     if key in _action_keys(view, "interact"):
@@ -103,6 +161,26 @@ def handle_key_press(view, key, modifiers):
                 view._rocket_pad_menu = pad
                 handle_rocket_pad_choice(view, choice)
                 return
+
+    # 局内建造系统：建造模式下 1-9 动态选择建筑（位序 = BUILDS 插入序，禁硬编码种类表，
+    # 新增建筑自动纳入热键）；超出条目数的数字键不消费，落回下方药水热键
+    if getattr(gs, "build_mode", False):
+        for _i, _code in enumerate((arcade.key.KEY_1, arcade.key.KEY_2, arcade.key.KEY_3,
+                                    arcade.key.KEY_4, arcade.key.KEY_5, arcade.key.KEY_6,
+                                    arcade.key.KEY_7, arcade.key.KEY_8, arcade.key.KEY_9)):
+            if key != _code:
+                continue
+            from entities.build_defs import BUILDS
+            build_kinds = tuple(BUILDS.keys())
+            if _i >= len(build_kinds):
+                break  # 无对应建筑：不消费按键，保持药水等原有热键行为
+            gs.build_kind = build_kinds[_i]
+            bdef = BUILDS[gs.build_kind]
+            cost_txt = _build_cost_text(bdef.get("cost", {}))
+            floating_texts.add(view.player.center_x, view.player.center_y + 60,
+                               f"选择：{bdef['name']}（{cost_txt}）",
+                               arcade.color.GOLD, life=2.0, font_size=14)
+            return
 
     # 药水快捷键 (1-3)：候选 = 本局药水槽（run:item_id，不占容量优先用）+ 仓库药水
     potion_index = -1
@@ -244,6 +322,24 @@ def handle_mouse_press(view, x, y, button, modifiers):
         world_y = y + cam[1] - WINDOW_HEIGHT / 2
 
         gs = view.window.game_state
+
+        # 局内建造系统（阶段1）：建造模式下左键=放置建筑（普通模式左键仍是攻击）。
+        # 世界坐标已在上方换算（逻辑坐标 + 相机 − 窗口中心），直接复用
+        if getattr(gs, "build_mode", False) and hasattr(view, "build_system"):
+            if gs.net_mode == "client":
+                # 阶段1 不做客户端建造请求协议：客户端只预览，不在本地扣资源/创建建筑。
+                floating_texts.add(view.player.center_x, view.player.center_y + 60,
+                                   "联机建造由房主裁决", arcade.color.GOLD,
+                                   life=1.5, font_size=14)
+                return
+            ok, reason = view.build_system.can_place(world_x, world_y, gs.build_kind)
+            if not ok:
+                floating_texts.add(view.player.center_x, view.player.center_y + 60,
+                                   reason, arcade.color.RED, life=1.5, font_size=14)
+                return
+            view.build_system.place(world_x, world_y, gs.build_kind)
+            return
+
         kind = gs.current_weapon_kind
         weapon_range = getattr(gs, 'weapon_range', 40)
         view._last_attack_range = weapon_range

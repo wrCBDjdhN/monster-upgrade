@@ -1,4 +1,4 @@
-"""仓库管理：存储/售卖资源和武器"""
+"""仓库管理：存储/售卖/消耗资源和武器"""
 from db.connection import _conn
 
 
@@ -29,6 +29,33 @@ def get_warehouse(pid: int) -> list[dict]:
             {"id": r[0], "item_type": r[1], "item_id": r[2], "quantity": r[3]}
             for r in rows
         ]
+
+
+def spend_warehouse_item(player_id: int, item_id: str, qty: int = 1) -> bool:
+    """从仓库扣除指定数量的物品（锻造配方制作等局外界面消耗资源用）
+
+    返回 True=扣除成功；False=库存不足或数量非法（不改动库存）。
+    库存按 warehouse_items 的 (player_id, item_type, item_id) 定位，
+    扣至 0 时删除该行（不留 0 库存残行）。
+    """
+    if qty <= 0:
+        return False
+    with _conn() as c:
+        row = c.execute(
+            "SELECT id, quantity FROM warehouse_items "
+            "WHERE player_id=? AND item_id=?",
+            (player_id, item_id),
+        ).fetchone()
+        if not row:
+            return False
+        wid, quantity = int(row[0]), int(row[1])
+        if quantity < qty:
+            return False
+        if quantity == qty:
+            c.execute("DELETE FROM warehouse_items WHERE id=?", (wid,))
+        else:
+            c.execute("UPDATE warehouse_items SET quantity=? WHERE id=?", (quantity - qty, wid))
+        return True
 
 
 def sell_warehouse_item(pid: int, item_id: int) -> tuple[int, str]:

@@ -166,18 +166,45 @@ class TutorialState:
     - page：当前阶段内的向导页码
     - kill_count / pickup_count：游戏内引导的击杀/拾取计数（阶段 3 检测用）
     - minimap_taught：小地图是否已讲解（避免重复弹讲解）
-    - boss_taught：BOSS房间是否已讲解（避免重复弹讲解）
+    - boss_taught：BOSS 房间是否已讲解（避免重复弹讲解）
     - 教程中途退出（关游戏）不写 tutorial_done，下次启动从头开始
+
+    Bug 修复（2026-09-26）：stage 改为**属性**，在「回到开始界面(0)」与
+    「进入新一局(3)」时自动重置局内进度（kill_count / pickup_count /
+    minimap_taught / boss_taught）。原因：views/start_view.py:164 的
+    `tut.stage = 0` 只重置了 stage/page，局内计数被留在了对象上——教程局
+    阵亡/超时回大厅后重开，draw_in_game_tutorial 会因残留的 kill_count>0
+    与 minimap_taught=True 直接跳到最后的撤离横幅，把打怪/拾取/小地图
+    引导整段吞掉。改成属性后 start_view 无需改动即可正确重来。
     """
+
+    # 进入这些阶段时视为「局内进度作废」：0=回大厅从头开始，3=开新一局
+    _RESET_ON_STAGE = (0, 3)
 
     def __init__(self, active: bool):
         self.active = active
-        self.stage = 0
+        self._stage = 0
         self.page = 0
         self.kill_count = 0
         self.pickup_count = 0
         self.minimap_taught = False
         self.boss_taught = False
+
+    @property
+    def stage(self) -> int:
+        """当前教程阶段（0-6，语义见类 docstring）"""
+        return self._stage
+
+    @stage.setter
+    def stage(self, value: int) -> None:
+        """切换阶段；切到 0（回大厅）或 3（开新一局）时清空局内进度计数"""
+        new_stage = int(value)
+        if new_stage != self._stage and new_stage in self._RESET_ON_STAGE:
+            self.kill_count = 0
+            self.pickup_count = 0
+            self.minimap_taught = False
+            self.boss_taught = False
+        self._stage = new_stage
 
 
 class GameState:
@@ -191,8 +218,17 @@ class GameState:
         self.player_name: str = "hero"              # 玩家名称（默认 "hero"）
         self.character_id: str = "initial"          # 当前选择角色（initial/mage/knight/assassin，单机/联机共用）
         self.run_carried: dict = {}                 # 本次携带物: {"resource": {id: qty}, "gold": int, "weapon": {id: qty}}
+        # 局内建造系统（阶段1）：buildings=本局已放置建筑列表（BuildSystem 持有），
+        # build_mode=是否处于建造模式（B 键切换），build_kind=当前选中建筑（barricade/tower/trap）
+        self.buildings: list = []                   # 本局建筑列表（BuildSystem.buildings 引用）
+        self.build_mode: bool = False               # 建造模式开关（B 键）
+        self.build_kind: str = "barricade"          # 当前选中建筑类型
         self.run_potions: dict = {}                 # 本局拾取的药水: {item_id: qty}（上限 RUN_POTION_SLOTS，
                                                     # 不占背包容量、无需背包即可使用；撤离时随 run_carried 一并入库）
+        # 阶段5 祝福：本局持有的 blessing_id 列表（BlessingState.ids 直接复用本 list，
+        # 单一数据源 → run 结束只需清这一处；上限见 config.BLESSING_MAX）
+        self.blessings: list[str] = []
+        self.blessing_pending: int = 0              # 待选择的祝福次数（面板逐次消费，>0 时自动打开）
         self.current_weapon_kind: str = "melee"     # 当前武器类型: "melee"(近战) 或 "ranged"(远程)
         self.current_weapon_id: int | None = None   # 当前武器数据库 ID
         self.current_weapon_item_id: str | None = None  # 当前武器物品ID（如 "iron_sword"），用于渲染

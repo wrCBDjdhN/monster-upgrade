@@ -108,7 +108,9 @@ class RocketPad:
         if self.state == self.IDLE:
             return "按E激活火箭发射台"
         elif self.state == self.BOSS_DEFEATED:
-            return "按7炸毁 | 按8启用撤离"
+            # 阶段2：撤离改为守住台心撤离点（见 GameView._sync_evac_point_from_rocket_pad），
+            # 按8 给出指引；按7 仍可炸毁夺宝（奖励常量不变）
+            return "按7炸毁夺宝 | 按8撤离指引"
         elif self.state == self.EVACUATING:
             mins = int(self._countdown_timer) // 60
             secs = int(self._countdown_timer) % 60
