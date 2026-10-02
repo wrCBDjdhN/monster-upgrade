@@ -51,11 +51,16 @@ class EvacManager:
         与单机失败结算同口径；联机主机/客户端死亡与撤离失败均复用（回房等待或观战前清装）。
         """
         # 清空本次携带数据
-        if hasattr(gs, 'run_carried'):
-            gs.run_carried = {}
-        # 本局药水槽一并清空（死亡/撤离失败 = 药水随携带物丢失）
-        if hasattr(gs, 'run_potions'):
-            gs.run_potions = {}
+        # 原地 clear() 而非 `gs.run_carried = {}`：换掉 dict 对象会让所有已持有旧引用的
+        # 调用方（commit_run_to_warehouse 入参、主机 _players_run_carried 引用、正在进行的
+        # 嵌套遍历）继续指向被丢弃的旧账本 → 账本悬空、后续写入丢失。
+        carried = getattr(gs, "run_carried", None)
+        if isinstance(carried, dict):
+            carried.clear()
+        # 本局药水槽一并清空（死亡/撤离失败 = 药水随携带物丢失）；同样原地清空保引用
+        potions = getattr(gs, "run_potions", None)
+        if isinstance(potions, dict):
+            potions.clear()
         # 局内建造系统（阶段1）：run 结束统一清场——反注册怪物碰撞网格并关闭建造模式
         build_system = getattr(self.gv, "build_system", None)
         if build_system is not None:

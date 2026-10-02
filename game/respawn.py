@@ -2,7 +2,7 @@
 
 import math
 import random
-from config import TILE_SIZE, MONSTER_GEAR_LEVEL_RANGE, MONSTER_WEAPON_LEVEL_RANGE, MONSTER_SPAWN_MIN_DIST, HARVEST_SPAWN_MIN_DIST, EVAC_WAVE_HP_GROWTH, EVAC_WAVE_DAMAGE_GROWTH, EVAC_WAVE_SPEED_GROWTH, EVAC_WAVE_SPEED_CAP, EVAC_WAVE_SPAWN_MIN_DIST, EVAC_WAVE_SPAWN_MAX_DIST, EVAC_WAVE_SPAWN_MIN_PLAYER_DIST, ELITE_SPAWN_MIN_DIST, ELITE_MAX_ALIVE
+from config import TILE_SIZE, MONSTER_GEAR_LEVEL_RANGE, MONSTER_WEAPON_LEVEL_RANGE, MONSTER_SPAWN_MIN_DIST, MONSTER_SPAWN_MAX_DIST, HARVEST_SPAWN_MIN_DIST, EVAC_WAVE_HP_GROWTH, EVAC_WAVE_DAMAGE_GROWTH, EVAC_WAVE_SPEED_GROWTH, EVAC_WAVE_SPEED_CAP, EVAC_WAVE_SPAWN_MIN_DIST, EVAC_WAVE_SPAWN_MAX_DIST, EVAC_WAVE_SPAWN_MIN_PLAYER_DIST, ELITE_SPAWN_MIN_DIST, ELITE_MAX_ALIVE
 from game.harvestable import HarvestableEntity
 from game.monsters import Zombie, Skeleton, MummyMelee, MummyRanged, Camel, Sniper, Assault, Bandit, RocketTroop
 from game.monster_utils import assign_monster_armor, assign_monster_helmet, assign_monster_weapon
@@ -74,11 +74,47 @@ def _find_valid_spawn_position(view, walls, rooms, map_w, map_h, min_dist_from_o
     （超出屏幕可视范围，避免野外刷新时贴脸出现）；撤离波次走"环带 + 小间距"口径，
     因为玩家本来就守在撤离点上，仍套 600 会让每波怪步行 9~18 秒才到，45 秒防守期里
     第 3/4 波根本赶不到（用户缺陷⑦修复 2026-09-26）。
-    两组环带参数与 min_player_dist 留空时，行为与原来完全一致（随机全图刷新）。
+    环带采样：未传 ring_center 且配置了 MONSTER_SPAWN_MAX_DIST 时，野外刷新在「玩家周围
+    [player_min_dist, MONSTER_SPAWN_MAX_DIST] 环带」内采样（缺陷⑧修复 2026-09-30）；
+    配置 MONSTER_SPAWN_MAX_DIST = 0 可退回全图随机。传了 ring_center 的撤离波次不受影响，
+    仍走「全图随机 + 环带过滤」以保持既有手感。
     """
+    # 与玩家的最小距离：留空时用全局口径 MONSTER_SPAWN_MIN_DIST；
+    # 撤离波次传 EVAC_WAVE_SPAWN_MIN_PLAYER_DIST 走"环带 + 小间距"口径（见 docstring）
+    player_min_dist = (MONSTER_SPAWN_MIN_DIST if min_player_dist is None
+                       else min_player_dist)
+    # 收集所有存活玩家（本地玩家 + 联机远程幽灵）。原先只看 view.player，联机主机刷新时
+    # 怪会直接糊在客户端玩家脸上（主机不 spawn 客户端视角的"贴脸"体验），故一并纳入距离判定。
+    # 循环外只收集一次，避免 60 次采样反复重建列表。
+    players_list = []
+    local_player = getattr(view, "player", None)
+    if local_player is not None and getattr(local_player, "alive", True):
+        players_list.append(local_player)
+    remote_players = getattr(view, "remote_players", None)
+    if remote_players:
+        for g in remote_players.values():
+            if getattr(g, "alive", True):
+                players_list.append(g)
+
     for _ in range(60):  # 最多尝试60次
-        x = random.randint(TILE_SIZE * 3, max(TILE_SIZE * 3 + 1, map_w - TILE_SIZE * 3))
-        y = random.randint(TILE_SIZE * 3, max(TILE_SIZE * 3 + 1, map_h - TILE_SIZE * 3))
+        # 野外刷新（未传 ring_center）走「玩家周围环带采样」：角度均匀、半径在
+        # [player_min_dist, MONSTER_SPAWN_MAX_DIST] 内均匀。这样既保证不会贴脸
+        # （内沿仍受最小间距约束），也不会刷到地图另一头的角落让怪步行半天——
+        # 原先全图均匀采样时，房间+走廊地图上大量采样点落在房间/墙内被拒，
+        # 60 次常常试不满，真正落地的怪距离分布严重偏斜。
+        # 撤离波次自带 ring_center（撤离点）约束，保持原「全图随机 + 环带过滤」不变。
+        if ring_center is None and MONSTER_SPAWN_MAX_DIST > 0.0 and players_list:
+            anchor = random.choice(players_list)
+            angle = random.uniform(0, math.tau)
+            radius = random.uniform(player_min_dist, MONSTER_SPAWN_MAX_DIST)
+            x = anchor.center_x + math.cos(angle) * radius
+            y = anchor.center_y + math.sin(angle) * radius
+            # 环带可能落到地图外，钳回地图内可刷新区间
+            x = min(max(x, TILE_SIZE * 3), map_w - TILE_SIZE * 3)
+            y = min(max(y, TILE_SIZE * 3), map_h - TILE_SIZE * 3)
+        else:
+            x = random.randint(TILE_SIZE * 3, max(TILE_SIZE * 3 + 1, map_w - TILE_SIZE * 3))
+            y = random.randint(TILE_SIZE * 3, max(TILE_SIZE * 3 + 1, map_h - TILE_SIZE * 3))
 
         # 外围环带约束：必须落在以 ring_center 为圆心的指定环带内
         if ring_center is not None and ring_max_dist > 0:
@@ -114,13 +150,20 @@ def _find_valid_spawn_position(view, walls, rooms, map_w, map_h, min_dist_from_o
                 break
         if too_close:
             continue
-        # 怪物刷新需与玩家保持最小距离（超出屏幕可视范围；
-        # 撤离波次传 EVAC_WAVE_SPAWN_MIN_PLAYER_DIST 走"环带内小间距"口径，见函数 docstring）
-        player_min_dist = (MONSTER_SPAWN_MIN_DIST if min_player_dist is None
-                           else min_player_dist)
-        if math.hypot(view.player.center_x - x, view.player.center_y - y) < player_min_dist:
-            continue
-        
+        # 与所有存活玩家保持最小距离：避免在任意玩家身边贴脸刷新
+        if players_list:
+            too_close_to_player = False
+            for pl in players_list:
+                if math.hypot(pl.center_x - x, pl.center_y - y) < player_min_dist:
+                    too_close_to_player = True
+                    break
+            if too_close_to_player:
+                continue
+        elif local_player is not None:
+            # 极端情况：没收集到任何存活玩家，回退只查本地玩家（保持向后兼容）
+            if math.hypot(local_player.center_x - x, local_player.center_y - y) < player_min_dist:
+                continue
+
         return x, y
     return None, None
 

@@ -6,6 +6,9 @@ from entities.monster_defs import MONSTER_METADATA, SKILL_PROMPT_CONFIG
 from config import (
     MONSTER_THEME_EQUIP,
     MUMMY_HEAL_SKILL_CD,
+    MONSTER_RAGE_CHANCE,
+    MONSTER_RAGE_COOLDOWN,
+    MONSTER_RAGE_SKILL_NAME,
     SKILL_CD_DEFAULT,
     SKILL_COOLDOWNS,
     SKILL_DIST_NEAR,
@@ -15,11 +18,19 @@ from config import (
 
 
 def lookup_weapon_range(kind: str, name: str) -> float:
-    """根据中文名查找武器攻击距离"""
+    """按武器 kind + 中文名（或 item_id）查找攻击距离，禁调用方自带魔数
+
+    调用方（背包重置为拳头、局内拾取武器、市场列表、联机幽灵开火表现等）原先各写一个
+    射程回退值（40/250/50），与武器定义表漂移：改定义射程后这些路径不会跟着变。
+    统一收口到本函数后，射程只以 entities/weapon_defs 为准。
+
+    name 兼容中文名与 item_id 两种写法（怪物侧按中文名查，玩家侧多按 item_id 查）。
+    查不到时回落到该 kind 的兜底距离（近战 50 / 远程 250，语义同武器定义表缺 range 时）。
+    """
     from entities.weapon_defs import MELEE_WEAPONS, RANGED_WEAPONS
     table = MELEE_WEAPONS if kind == "melee" else RANGED_WEAPONS
     for wdef in table.values():
-        if wdef["name"] == name:
+        if wdef["name"] == name or wdef.get("item_id") == name:
             return wdef.get("range", 50 if kind == "melee" else 250)
     return 50 if kind == "melee" else 250
 
@@ -258,6 +269,50 @@ def apply_skill_prompt_and_effect(monster, skill_index=0, target=None, nearby_pl
         cds[skill_name] = SKILL_COOLDOWNS.get(skill_name, SKILL_CD_DEFAULT)
     apply_skill_effect(monster, skill_index, target=target, nearby_players=nearby_players)
     _emit_skill_vfx(monster, skill_index, target, nearby_players)
+
+
+def try_trigger_rage(monster) -> bool:
+    """狂暴「独立触发」通路：与 near/far 距离分档无关，每帧按概率尝试放狂暴
+
+    背景：狂暴在 SKILL_PROMPT_CONFIG 里标的是 range_pref="far"，走 pick_skill_index
+    分档通路时只有在僵尸**远离**玩家（dist > SKILL_DIST_NEAR）才可能被选中——可「攻击力
+    +50%」是纯战斗向自我增益，近身缠斗全程放不出来，等于形同虚设。
+
+    做法：另开一条与距离无关的通路。与 pick_skill_index 的关系是「并行」而非「替代」：
+    - 不改动 pick_skill_index 的分档逻辑（分档仍负责其余按距离取舍的技能）；
+    - 冷却与分档通路共用 monster._skill_cds[技能名] 同一份冷却池，两条通道不会叠加冷却；
+    - 时长由 config.MONSTER_RAGE_COOLDOWN 单独掌控（与 SKILL_COOLDOWNS["狂暴"] 当前相等）。
+
+    狂暴是自身 buff（不读 target），故单机模式没有玩家对象时也能正常触发。
+    仅配了「狂暴」的怪物会命中；其余怪物走不到这里，天然无此通路。
+
+    Returns:
+        bool: 本次是否真的放出了狂暴（用于调用方/测试观察）
+    """
+    config = SKILL_PROMPT_CONFIG.get(monster.__class__.__name__)
+    if not config or not config.get("skills"):
+        return False
+    # 按技能中文名取下标（数据驱动：技能顺序/数量可变，不能写死索引）
+    skill_idx = next(
+        (i for i, s in enumerate(config["skills"])
+         if s.get("name") == MONSTER_RAGE_SKILL_NAME), None)
+    if skill_idx is None:
+        return False
+
+    # 冷却字典惰性初始化：联机快照重建的怪物可能没走过 pick_skill_index
+    cds = getattr(monster, "_skill_cds", None)
+    if cds is None:
+        cds = {}
+        monster._skill_cds = cds
+    if cds.get(MONSTER_RAGE_SKILL_NAME, 0.0) > 0.0:
+        return False
+    if random.random() >= MONSTER_RAGE_CHANCE:
+        return False
+
+    apply_skill_prompt_and_effect(monster, skill_idx)
+    # 冷却以本通路的配置为准（与分档通路共用同一冷却池，故不会互相叠加）
+    cds[MONSTER_RAGE_SKILL_NAME] = MONSTER_RAGE_COOLDOWN
+    return True
 
 
 def _emit_skill_vfx(monster, skill_index: int, target=None, nearby_players=None):
@@ -757,5 +812,16 @@ def assign_monster_weapon(monster, level: int = 1, theme: str = "forest"):
         "debuff": wdef.get("debuff"),
         "kind": wdef.get("kind", "melee"),
     }
+    # 武器射程同步到怪物本体：攻击距离/开火距离按武器 range 生效
+    # （近战取 _melee_attack_distance，远程取 _ranged_attack_distance，见 game/monster_base.py）
+    weapon_range = wdef.get("range")
+    monster._weapon_range = float(weapon_range) if weapon_range else None
+    # 攻击间隔同步武器 attack_speed（次/秒 → 冷却秒：步枪 6.0≈0.17s，见 weapon_defs 注释）：
+    # 怪物挥砍/开火节奏与所持武器一致，近战与远程均生效（用户需求 2026-10-01）；
+    # attack_speed 缺失或非法时保留 MONSTER_CONFIGS 的 attack_delay 默认值。
+    # _attack_delay 仅构造时赋值，此处落点即终值；HUD 冷却条经 net_attack_delay 广播自动跟随
+    weapon_speed = wdef.get("attack_speed")
+    if weapon_speed and float(weapon_speed) > 0:
+        monster._attack_delay = 1.0 / float(weapon_speed)
     # 武器被动效果应用到怪物属性（如速度加成、回血等）
     _apply_passive_effects(monster, monster.weapon)

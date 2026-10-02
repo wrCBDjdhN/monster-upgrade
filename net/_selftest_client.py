@@ -29,11 +29,14 @@ from websockets.exceptions import ConnectionClosed
 
 # 优先以包模块方式导入（供 pyright 静态分析 / python -m 运行时解析）
 try:
+    # client_mod：阶段5 需要临时改写 client 模块级 HEARTBEAT_TIMEOUT_SEC（压阈值加速）
+    from net import client as client_mod
     from net.client import NetClient
     from net.protocol import MsgType, decode, encode
 except ImportError:
     # 直接运行 python net/_selftest_client.py 时，脚本所在目录
     # （net/）在 sys.path 中，此时以顶层模块方式导入
+    import client as client_mod  # pyright: ignore[reportMissingImports]
     from client import NetClient  # pyright: ignore[reportMissingImports]
     from protocol import MsgType, decode, encode  # pyright: ignore[reportMissingImports]
 
@@ -44,6 +47,7 @@ DISCONNECT_TIMEOUT = 5.0   # 等待断线感知超时（秒）
 STOP_JOIN_TIMEOUT = 3.0    # 关闭服务器/客户端线程 join 超时（秒）
 DEAD_PORT = 59999          # 不存在服务的端口（连接应友好失败）
 PUSH_TIMEOUT = 5.0         # 阶段4 等待脚本化主机推送消息的超时（秒）
+WATCHDOG_TEST_TIMEOUT = 0.5  # 阶段5 临时压低的心跳看门狗阈值（秒；完测即恢复原值）
 SCRIPT_OWN_ID = 2          # 阶段4 脚本化主机分配给客户端的 player_id（联机传输 id）
 SCRIPT_OTHER_ID = 1        # 阶段4 他人（主机自身）传输 id
 EVAC_STATE_KEYS = ("x", "y", "state", "hp", "max_hp", "defend_left", "wave_no")
@@ -314,8 +318,146 @@ def _run_phase4_new_messages() -> int:
     return 0
 
 
+def _run_silent_server(port: int, ready: threading.Event, stop_event: threading.Event) -> None:
+    """阶段5「静默主机」（daemon 线程 + 独立事件循环）。
+
+    只回 JOIN_ACCEPT 一次，此后**故意不再发任何帧**：模拟主机进程卡死/断网
+    但 TCP 连接尚未被内核判定失效的场景（此时 websockets 内置 ping 被
+    ping_interval=None 关闭，收端永远等不到帧 → 只有应用层看门狗能发现）。
+    """
+
+    async def _silent_handler(ws: ServerConnection) -> None:
+        """回一次 JOIN_ACCEPT 后静默消费（不回、不发）。"""
+        try:
+            async for raw in ws:
+                if not isinstance(raw, str):
+                    continue
+                try:
+                    msg_type, _payload = decode(raw)
+                except ValueError:
+                    continue
+                if msg_type is MsgType.HELLO:
+                    await ws.send(encode(MsgType.JOIN_ACCEPT, {
+                        "player_id": SCRIPT_OWN_ID, "slot": 1, "room_id": "silent",
+                    }))
+        except ConnectionClosed:
+            pass  # 客户端断开/服务器关闭：正常退出
+
+    async def _serve_until_stopped() -> None:
+        """启动服务并保持运行，直到外部 stop_event 被设置。"""
+        async with websockets.asyncio.server.serve(
+            _silent_handler,
+            "127.0.0.1",
+            port,
+            ping_interval=None,
+        ):
+            ready.set()
+            while not stop_event.is_set():
+                await asyncio.sleep(0.05)
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(_serve_until_stopped())
+    finally:
+        try:
+            loop.close()
+        except Exception:
+            pass
+
+
+def _run_phase5_watchdog() -> int:
+    """阶段5：心跳看门狗（返回 0 通过 / 1 失败）。
+
+    覆盖三条契约：
+    - 未发过 HEARTBEAT 前**不布防**（大厅阶段主机本就不发帧，无条件布防会误断）；
+    - 发出首个 HEARTBEAT 后布防（watchdog_armed 置位）；
+    - 布防后超过阈值仍收不到任何帧 → 判定链路已死：is_disconnected 置位 +
+      on_disconnect 回调触发（复用既有断线语义，不新增回调出口）。
+    """
+    port = _pick_free_port()
+    ready = threading.Event()
+    stop_event = threading.Event()
+    server_thread = threading.Thread(
+        target=_run_silent_server,
+        args=(port, ready, stop_event),
+        daemon=True,
+        name="silent-server",
+    )
+    server_thread.start()
+    if not ready.wait(READY_TIMEOUT):
+        print("FAIL: 阶段5 静默主机启动超时")
+        return 1
+
+    # 把阈值临时压到 0.5s：自检必须秒级完成，同时用完恢复（原值来自 config）
+    original_timeout = client_mod.HEARTBEAT_TIMEOUT_SEC
+    client_mod.HEARTBEAT_TIMEOUT_SEC = WATCHDOG_TEST_TIMEOUT
+    dc_called = False
+
+    def _on_disconnect() -> None:
+        """断线回调：仅记录标志（回调运行在网络线程，不触碰主线程对象）。"""
+        nonlocal dc_called
+        dc_called = True
+
+    client = NetClient(on_disconnect=_on_disconnect)
+    thread_hung = False
+    try:
+        if not client.connect("127.0.0.1", port):
+            print("FAIL: 阶段5 connect() 对静默主机应返回 True")
+            return 1
+
+        # 5a) 未发过心跳 → 看门狗未布防（否则大厅阶段会被误判掉线）
+        if client.watchdog_armed:
+            print("FAIL: 阶段5 连接后未发心跳即布防（会误断大厅阶段）")
+            return 1
+        print("OK: 阶段5 连接后看门狗未布防（大厅阶段不误断）")
+
+        # 5b) 发出首个 HEARTBEAT → 布防
+        if not client.send((MsgType.HEARTBEAT, {"seq": 1, "client_time": 0.0})):
+            print("FAIL: 阶段5 send(HEARTBEAT) 应返回 True")
+            return 1
+        if not client.watchdog_armed:
+            print("FAIL: 阶段5 发出 HEARTBEAT 后看门狗仍未布防")
+            return 1
+        print(f"OK: 阶段5 发出 HEARTBEAT 后看门狗布防（阈值 {WATCHDOG_TEST_TIMEOUT}s）")
+
+        # 5c) 静默主机此后不再发帧 → 超时后应判定链路已死并走既有断线清理
+        deadline = time.monotonic() + WATCHDOG_TEST_TIMEOUT * 6
+        while time.monotonic() < deadline:
+            if client.is_disconnected:
+                break
+            time.sleep(0.01)
+        if not client.is_disconnected:
+            print(
+                f"FAIL: 阶段5 静默超过 {WATCHDOG_TEST_TIMEOUT}s 客户端仍未感知断线"
+                "（看门狗未生效）"
+            )
+            return 1
+        if not dc_called:
+            print("FAIL: 阶段5 看门狗超时后 on_disconnect 回调未触发")
+            return 1
+        if client.watchdog_armed:
+            print("FAIL: 阶段5 断线后看门狗未解除布防（状态泄漏）")
+            return 1
+        print(
+            f"OK: 阶段5 看门狗超时判定掉线"
+            f"（is_disconnected + on_disconnect 回调，布防已解除）"
+        )
+        return 0
+    finally:
+        client.stop()
+        client_mod.HEARTBEAT_TIMEOUT_SEC = original_timeout  # 恢复原阈值
+        stop_event.set()
+        server_thread.join(timeout=STOP_JOIN_TIMEOUT)
+        thread_hung = server_thread.is_alive()
+    if thread_hung:
+        print("FAIL: 阶段5 静默主机线程未退出（挂起）")
+        return 1
+    return 0
+
+
 def main() -> int:
-    """执行三阶段自检，返回进程退出码（0 全部通过 / 1 失败）。"""
+    """执行全部阶段自检，返回进程退出码（0 全部通过 / 1 失败）。"""
     # ── 阶段 1 + 2：真实服务器 echo 收发 + 断线感知 ──
     port = _pick_free_port()
     ready = threading.Event()
@@ -415,6 +557,11 @@ def main() -> int:
     # ── 阶段 4：脚本化主机下的新消息解码 + 任务进度归属过滤（Task 11.2 Step 2）──
     print("── 阶段 4：EVAC_POINT_ACTION→EVAC_POINT_STATE 应答 + MISSION_PROGRESS 归属过滤 ──")
     if _run_phase4_new_messages() != 0:
+        return 1
+
+    # ── 阶段 5：心跳看门狗（按发过 HEARTBEAT 布防 + 超时走既有断线语义）──
+    print("── 阶段 5：心跳看门狗（布防时机 + 超时掉线）──")
+    if _run_phase5_watchdog() != 0:
         return 1
 
     print("PASS: 全部自检通过")

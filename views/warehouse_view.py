@@ -15,6 +15,9 @@ from db.database import (
     get_warehouse, get_weapons, get_gold, sell_warehouse_item, sell_weapon,
     get_equipment_inventory, equip_from_inventory, sell_equipment,
     get_facility_level, weapon_sell_price, equipment_sell_price,
+    # 阶段11：仓库等级 / 容量上限 / 升级链路
+    get_warehouse_level, get_warehouse_capacity, warehouse_used_capacity,
+    warehouse_upgrade_cost_at, warehouse_can_afford, upgrade_warehouse,
 )
 from views.scroll_view import ScrollView
 from views.text_cache import TextCache
@@ -45,7 +48,36 @@ class WarehouseView(ScrollView):
         self.equip_item_buttons = []   # [(rect, equip_dict)]
         self.equip_sell_buttons = []   # [(rect, equip_dict, sell_price)]
         self.market_rect = arcade.XYWH(WINDOW_WIDTH - 100, 40, 120, 36)
+        # 阶段11：仓库升级按钮（底部居中；与左侧「返回」/右侧「市场」留足间距）
+        self.upgrade_rect = arcade.XYWH(WINDOW_WIDTH // 2, 40, 300, 36)
+        self.upgrade_hover = False
+        # 阶段11：飘字提示（参考 views/facility_view.py 的 toast 模式）
+        self._toasts: list[list] = []   # [[text, color, 剩余寿命], ...]
         self._rebuild()
+
+    # ── 阶段11 飘字提示 ────────────────────────────────────────────
+
+    def _toast(self, text: str, color=(255, 200, 120)) -> None:
+        """弹一条飘字提示（实心文字，禁 outline/线框以免闪烁）；最多同时 3 条
+
+        与 facility_view/codex_view/mission_view 的飘字同模式：纯文字、无描边，
+        故不受渲染铁律里「禁空心/线框绘制」的限制。
+        """
+        self._toasts.append([text, color, 2.0])
+        del self._toasts[:-3]
+
+    def on_update(self, delta_time: float) -> None:
+        """飘字寿命倒计时（到点移除，避免残留）"""
+        for t in self._toasts:
+            t[2] -= delta_time
+        self._toasts = [t for t in self._toasts if t[2] > 0]
+
+    def _draw_toasts(self) -> None:
+        """绘制飘字（屏幕中下部，自下而上堆叠；纯实心文字，禁 outline/线框绘制）"""
+        for i, (text, color, _life) in enumerate(reversed(self._toasts)):
+            ty = 96 - i * 26
+            self._tc.text(f"toast_{i}", text, WINDOW_WIDTH // 2, ty, color,
+                          14, anchor_x="center", anchor_y="center")
 
     def _rebuild(self):
         self._tc.clear()  # 内容结构变化，清空文本缓存防止旧 key 残留
@@ -56,6 +88,10 @@ class WarehouseView(ScrollView):
         self.equip_sell_buttons = []
         pid = self.window.game_state.player_id
         wh = get_warehouse(pid)
+        # 阶段11：缓存仓库等级/容量（on_draw 只读缓存，不每帧查库——同 start_view 禁每帧查库约定）
+        self._wh_level = get_warehouse_level(pid)
+        self._wh_total_cap = get_warehouse_capacity(pid)
+        self._wh_used_cap = warehouse_used_capacity(pid)
         y = WINDOW_HEIGHT - 160  # 内容区起点（下方为 Tab 栏，与 on_draw 一致）
         if self._tab == "资源":
             for item in wh:
@@ -114,7 +150,10 @@ class WarehouseView(ScrollView):
         # 固定头部
         self._tc.text("header_title", "仓 库", WINDOW_WIDTH // 2, WINDOW_HEIGHT - 50,
                       arcade.color.GOLD, 30, anchor_x="center")
-        self._tc.text("header_gold", f"金币: {gold}", WINDOW_WIDTH // 2, WINDOW_HEIGHT - 85,
+        # 阶段11：头部同排显示「金币 + 仓库容量 已用/上限 + 等级」（占用口径与背包一致）
+        self._tc.text("header_gold",
+                      f"金币: {gold}    仓库容量: {self._wh_used_cap}/{self._wh_total_cap}    Lv.{self._wh_level}",
+                      WINDOW_WIDTH // 2, WINDOW_HEIGHT - 85,
                       arcade.color.YELLOW, 18, anchor_x="center")
         self._tc.text("header_hint", "滚轮滚动或拖动滚动条查看", WINDOW_WIDTH // 2, WINDOW_HEIGHT - 105,
                       arcade.color.GRAY, 11, anchor_x="center")
@@ -248,6 +287,12 @@ class WarehouseView(ScrollView):
         # 滚动条（基类统一绘制 + 支持鼠标拖拽）
         self.draw_scrollbar(WINDOW_HEIGHT - 160)
 
+        # ── 阶段11 仓库升级区（固定位置，不随滚动）──
+        self._draw_upgrade_panel()
+
+        # 阶段11 飘字提示（实心填充）
+        self._draw_toasts()
+
         # ── 导航按钮（固定位置，不随滚动）──
         arcade.draw_rect_filled(self.back_rect, arcade.color.DARK_RED)
         self._tc.text("nav_back", "返回大厅", self.back_rect.center_x, self.back_rect.center_y,
@@ -255,6 +300,54 @@ class WarehouseView(ScrollView):
         arcade.draw_rect_filled(self.market_rect, arcade.color.DARK_BLUE)
         self._tc.text("nav_market", "市场", self.market_rect.center_x, self.market_rect.center_y,
                       arcade.color.WHITE, 13, anchor_x="center", anchor_y="center")
+
+    def _draw_upgrade_panel(self):
+        """阶段11 仓库升级区：下一级容量预告 + 费用明细 + 实心升级按钮
+
+        渲染铁律：一律不透明实心填充（禁 outline/线框）。满级时按钮置灰不可点。
+        数值全部实查 config.WAREHOUSE_*（经 db 纯函数），禁在视图里硬编码容量/费用。
+        """
+        from config import WAREHOUSE_BASE_CAPACITY, WAREHOUSE_CAPACITY_STEP, WAREHOUSE_MAX_LEVEL
+        lv = self._wh_level
+        if lv >= WAREHOUSE_MAX_LEVEL:
+            # 满级：画置灰按钮占位（与未满级同位置，避免面板忽有忽无）+ 达标文案
+            arcade.draw_rect_filled(self.upgrade_rect, (55, 50, 45))
+            self._tc.text("up_btn", f"仓库已满级 Lv.{lv}",
+                          self.upgrade_rect.center_x, self.upgrade_rect.center_y,
+                          arcade.color.GRAY, 15, anchor_x="center", anchor_y="center", bold=True)
+            self._tc.text("up_next", f"容量上限 {self._wh_total_cap} 格",
+                          WINDOW_WIDTH // 2, 78, arcade.color.GRAY, 12, anchor_x="center")
+            self._tc.text("up_cost", "", WINDOW_WIDTH // 2, 40, arcade.color.GRAY, 12,
+                          anchor_x="center")
+            return
+        next_lv = lv + 1
+        next_cap = self._wh_total_cap + WAREHOUSE_CAPACITY_STEP
+        # 容量预告：当前 → 下一级（增量取 config.WAREHOUSE_CAPACITY_STEP，不写死）
+        self._tc.text("up_next",
+                      f"下一级 Lv.{next_lv}：容量 {self._wh_total_cap} → {next_cap}"
+                      f"（+{WAREHOUSE_CAPACITY_STEP}，初始 {WAREHOUSE_BASE_CAPACITY}）",
+                      WINDOW_WIDTH // 2, 78, arcade.color.LIGHT_GRAY, 12, anchor_x="center")
+        # 费用明细（金币 + 仓库材料，顺序按费用表）
+        cost = warehouse_upgrade_cost_at(next_lv)
+        parts = []
+        for key, need in cost.items():
+            if key == "gold":
+                parts.append(f"金币{int(need)}")
+            else:
+                parts.append(f"{RESOURCES.get(key, {}).get('name', key)}×{int(need)}")
+        self._tc.text("up_cost", "费用: " + "、".join(parts),
+                      WINDOW_WIDTH // 2, 62, arcade.color.GOLD, 12, anchor_x="center")
+        # 实心升级按钮（禁空心/线框）
+        btn_color = (110, 90, 40) if self.upgrade_hover else (70, 60, 30)
+        arcade.draw_rect_filled(self.upgrade_rect, btn_color)
+        self._tc.text("up_btn", f"升级仓库 Lv.{lv} → {next_lv}",
+                      self.upgrade_rect.center_x, self.upgrade_rect.center_y,
+                      arcade.color.WHITE, 15, anchor_x="center", anchor_y="center", bold=True)
+
+    def on_mouse_motion(self, x, y, dx, dy):
+        """更新升级按钮悬停态；基类滚动条拖拽逻辑照常保留"""
+        self.upgrade_hover = self.upgrade_rect.point_in_rect((x, y))
+        super().on_mouse_motion(x, y, dx, dy)
 
     def _get_range(self, w):
         from entities.weapon_defs import MELEE_WEAPONS, RANGED_WEAPONS
@@ -366,6 +459,20 @@ class WarehouseView(ScrollView):
                 sell_equipment(pid, eq["id"], sell_bonus)
                 self._rebuild()
                 return
+
+        # 阶段11：仓库升级（先校验后扣，失败不花钱——口径同 db.upgrade_warehouse）
+        if self.upgrade_rect.point_in_rect((x, y)):
+            ok, desc = warehouse_can_afford(pid)
+            if not ok:
+                self._toast(desc, (255, 120, 120))
+                return
+            if upgrade_warehouse(pid):
+                self._rebuild()
+                self._toast(f"仓库已升级到 Lv.{self._wh_level}，容量上限 {self._wh_total_cap} 格",
+                           (140, 230, 140))
+            else:
+                self._toast("升级失败：材料或金币不足", (255, 120, 120))
+            return
 
         # 返回大厅 → StartView（联机房间内返回 LobbyView 复用连接，保持房间）
         if self.back_rect.point_in_rect((x, y)):

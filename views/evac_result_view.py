@@ -34,6 +34,12 @@ class EvacResultView(arcade.View):
         self.star_info = star_info
         # 阶段8：本次升星顺带解锁的地图名（构造时算一次并缓存，避免 on_draw 每帧查 DB）
         self._newly_unlocked = self._newly_unlocked_names(star_info)
+        # 阶段11：仓库满仓时的「未入仓」报告（撤离成功才有；取走即清空 game_state，
+        # 防止残留导致下一次撤离误显示）。由 game/evac.commit_run_to_warehouse 发布。
+        from game.evac import take_warehouse_overflow
+        overflow = take_warehouse_overflow()
+        self.overflow: dict = overflow if (
+            success and int(overflow.get("dropped", 0) or 0) > 0) else {}
         self.return_rect = arcade.XYWH(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - 180, 220, 50)
         self.return_hover = False
         # 新手教程（阶段 4）：撤离结算页的火箭发射台/BOSS/星级图文教学页（无高亮，纯图文）
@@ -217,6 +223,30 @@ class EvacResultView(arcade.View):
         self._tc.text("star_unlock", unlock_text, cx, banner.top - 86,
                       (120, 220, 255), size=13, anchor_x="center")
 
+    def _draw_overflow_banner(self):
+        """阶段11：仓库满仓「未入仓」警告横幅（仅撤离成功且确有未入仓时绘制）
+
+        渲染铁律：一律不透明实心填充（禁 outline/线框），横幅压在屏幕最顶部，
+        与星级横幅（_draw_star_banner，位于 WINDOW_HEIGHT-118）不重叠。
+        明细过长时只显示前 4 项并补「等」，避免一行撑出横幅。
+        """
+        if not self.overflow:
+            return
+        cx = WINDOW_WIDTH // 2
+        dropped = int(self.overflow.get("dropped", 0) or 0)
+        items = [str(x) for x in (self.overflow.get("dropped_items") or []) if x]
+        # 明细：前 4 项直列，超出补「等 N 项」
+        if len(items) > 4:
+            items = items[:4] + [f"等 {len(items)} 项"]
+        banner = arcade.XYWH(cx, WINDOW_HEIGHT - 30, 620, 48)
+        arcade.draw_rect_filled(banner, (120, 44, 12))  # 实心警示底，不画描边
+        self._tc.text("ovf_title", f"⚠ 仓库已满：{dropped} 件战利品未能入仓",
+                      cx, banner.top - 16, (255, 235, 200), size=18,
+                      anchor_x="center", bold=True)
+        self._tc.text("ovf_items", "、".join(items) or "（明细缺失）",
+                      cx, banner.top - 36, (255, 200, 160), size=13,
+                      anchor_x="center")
+
     def on_show_view(self):
         self.window.background_color = arcade.color.DARK_SLATE_GRAY
         
@@ -250,6 +280,8 @@ class EvacResultView(arcade.View):
 
         # 阶段8 星级横幅（撤离成功才画；升星显示「★×N 解锁！」）
         self._draw_star_banner()
+        # 阶段11 仓库满仓「未入仓」警告横幅（压在星级横幅之上，屏幕最顶部）
+        self._draw_overflow_banner()
         
         # 显示收益详情
         if self.success and self.run_carried:

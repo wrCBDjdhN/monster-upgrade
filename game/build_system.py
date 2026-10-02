@@ -1,5 +1,7 @@
 """局内建造系统：放置校验、资源扣减、建筑实体生命周期、塔/陷阱行为。
-联机约定：host 权威执行 place/remove/damage；client 经 MAP_CHANGE 同步（阶段10）。
+联机约定：host 权威执行 place/remove/damage；client 只发 BUILD_REQUEST，
+由 host 校验后经 MAP_CHANGE build_place 广播建筑本体、再单播 BUILD_RESULT 回执
+（client 不本地 place，只按广播 set_hp 镜像血量）。
 设计要点：建筑不进 PhysicsEngineSimple 的 obstacle_list——玩家可自由穿过
 己方建筑（避免 _wiggle_until_free 弹开与自锁），怪物经 _WallGrid 被阻挡。
 """
@@ -22,6 +24,22 @@ class Building:
         self.sprite.position = (x, y)
         self._fire_timer = 0.0   # 塔攻击计时
         self._sprung = False     # 陷阱是否已触发
+        # 血量变更回调（签名 (bid, hp, max_hp)）：host 在 set_hp 内触发以广播 MAP_CHANGE，
+        # client 不设置（血量以主机广播为准）。默认为 None 表示无人监听。
+        self.on_hp_changed = None
+
+    def set_hp(self, hp: float, max_hp: float | None = None) -> None:
+        """直接设定血量（不结算死亡/移除），供联机快照对齐
+
+        host 扣血走 take_damage（含归零移除）；本方法只把 hp/max_hp 镜像到给定值，
+        血量变化时触发 on_hp_changed 回调（client 收到建筑广播后据此刷新血条，
+        此前 client 无 set_hp 入口，建筑血条永远满血，怪物破障后客户端仍在渲染）。
+        """
+        if max_hp is not None:
+            self.max_hp = max_hp
+        self.hp = hp
+        if self.on_hp_changed is not None:
+            self.on_hp_changed(self.bid, self.hp, self.max_hp)
 
 
 def _apply_building_slow(monster, build_config: dict) -> None:
@@ -100,13 +118,16 @@ class BuildSystem:
 
 
     def can_place(self, x: float, y: float, kind: str) -> tuple[bool, str]:
-        """按吸附位置校验边界、玩家距离、墙体、占用和携带资源。"""
+        """按吸附位置校验边界、玩家距离、墙体、占用和携带资源（纯判定，不改任何状态）
+
+        客户端也可调用（仅供建造预览上色）：BUILD_REQUEST 已接通，客户端左键只发请求，
+        由主机权威 place 并回执 BUILD_RESULT——此前这里对 client 一律返回
+        (False, "联机建造由房主裁决")，导致客户端预览格永远红色，误以为不能建。
+        禁本地落建筑的闸口在本类的 place()（禁扣资源/建实体），不在判定层。
+        """
         if kind not in BUILDS:
             return False, "未知建筑"
         game_state = self.view.window.game_state
-        if game_state.net_mode == "client":
-            # 阶段1 未实现客户端建造请求协议：本地只做预览，禁止扣资源/落建筑
-            return False, "联机建造由房主裁决"
         player = getattr(self.view, "player", None)
         if player is None:
             return False, "无法建造"
@@ -135,7 +156,13 @@ class BuildSystem:
         return True, ""
 
     def place(self, x: float, y: float, kind: str) -> Building | None:
-        """扣资源、创建建筑并注册怪物碰撞网格；失败时返回 None。"""
+        """扣资源、创建建筑并注册怪物碰撞网格；失败时返回 None。
+
+        客户端禁本地落位（铁律：资源扣减/建筑落位只由主机权威执行）——客户端只发
+        BUILD_REQUEST，等主机广播 MAP_CHANGE build_place 再还原建筑。
+        """
+        if self.view.window.game_state.net_mode == "client":
+            return None
         ok, _reason = self.can_place(x, y, kind)
         if not ok:
             return None
@@ -149,12 +176,36 @@ class BuildSystem:
         sx, sy = self.snap(x, y)
         building = Building(self._next_bid, kind, sx, sy)
         self._next_bid += 1
+        # 血量回调 → 广播 MAP_CHANGE build_hp：此前 host 扣血只在本地生效，
+        # 客户端血条永远满血（怪物破障后客户端仍在渲染已不存在的建筑）。
+        building.on_hp_changed = self._broadcast_hp_change
         self.buildings.append(building)
         # 仅阻挡型建筑注册怪物碰撞网格；陷阱为地面触发物，需保持可踩踏
         if building.blocks_monsters:
             half = BUILDS[kind]["size"] / 2
             self.view.monster_grid.add_rect(sx, sy, half)
         return building
+
+    def _broadcast_hp_change(self, bid: int, hp: float, max_hp: float) -> None:
+        """建筑血量变更回调（host 侧）：广播 MAP_CHANGE build_hp
+
+        - 仅 host 广播（solo 无接收端、client 不本地 place 自然不会触发本回调）；
+        - obj_id = 建筑 bid，与 build_place/build_destroy 同口径，客户端据此 set_hp；
+        - 归零不由此发：建筑被摧毁走 BuildSystem.remove → _broadcast_buildings 的
+          「已广播但本地消失」差集发 build_destroy（避免同时发 build_hp=0 与
+          build_destroy 造成客户端先删后补一个 0 血建筑）。
+        """
+        game_state = self.view.window.game_state
+        if game_state.net_mode != "host" or game_state.net_server is None:
+            return
+        if hp <= 0:
+            return
+        from net.protocol import MsgType
+        game_state.net_server.broadcast(MsgType.MAP_CHANGE, {
+            "obj_id": bid, "change_type": "build_hp",
+            "state": {"hp": hp, "max_hp": max_hp},
+            "extra": {},
+        })
 
     def remove(self, bid: int) -> None:
         """移出列表并反注册怪物碰撞网格（被摧毁/局末清场共用）。"""
@@ -167,10 +218,14 @@ class BuildSystem:
                 return
 
     def take_damage(self, bid: int, amount: float) -> bool:
-        """扣除建筑生命值；归零时移除并返回 True。"""
+        """扣除建筑生命值；归零时移除并返回 True。
+
+        走 Building.set_hp 而非直接改 hp：让 on_hp_changed 回调在受击瞬间就触发，
+        host 广播建筑血量（client 血条此前永远满血，因为 client 无 set_hp 入口）。
+        """
         for building in self.buildings:
             if building.bid == bid:
-                building.hp -= amount
+                building.set_hp(building.hp - amount)
                 if building.hp <= 0:
                     self.remove(bid)
                     return True

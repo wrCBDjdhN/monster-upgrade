@@ -164,6 +164,20 @@ _ROUNDTRIP_CASES: tuple[tuple[str, MsgType, dict], ...] = (
     ("MISSION_PROGRESS/elite_kill", MsgType.MISSION_PROGRESS, {
         "player_id": 3, "event": "elite_kill", "amount": 2,
     }),
+    # 商队购买：客户端→主机请求（药水样例）
+    ("CARRIAGE_BUY/药水", MsgType.CARRIAGE_BUY, {
+        "player_id": 1, "kind": "potion", "item_id": "hp_small", "level": 0,
+        "qty": 2, "gold_before": 100.0, "gold_after": 80.0,
+    }),
+    # 商队购买回执：主机→请求者单播（成功样例）
+    ("CARRIAGE_BUY_RESULT/成功", MsgType.CARRIAGE_BUY_RESULT, {
+        "player_id": 1, "ok": True, "reason": None, "kind": "potion",
+        "item_id": "hp_small", "qty": 2,
+    }),
+    # 撤离点回执：主机→请求者单播（成功样例）
+    ("EVAC_POINT_RESULT/成功", MsgType.EVAC_POINT_RESULT, {
+        "player_id": 1, "ok": True, "reason": None, "action": "activate",
+    }),
     # 阶段1/3 MAP_CHANGE 新 change_type：协议层按不透明字符串透传（枚举由 game 层校验）
     ("MAP_CHANGE/build_place", MsgType.MAP_CHANGE, {
         "obj_id": "b1", "change_type": "build_place",
@@ -179,6 +193,40 @@ _ROUNDTRIP_CASES: tuple[tuple[str, MsgType, dict], ...] = (
     ("MAP_CHANGE/env_damage", MsgType.MAP_CHANGE, {
         "obj_id": "w1", "change_type": "env_damage",
         "state": {"hp": 40.0}, "extra": {"damage": 15.0},
+    }),
+    # 建筑受损（新增 change_type：载荷含 bid + hp，与 build_place 同口径）
+    ("MAP_CHANGE/build_hp", MsgType.MAP_CHANGE, {
+        "obj_id": "b7", "change_type": "build_hp",
+        "state": {"hp": 55.0}, "extra": {},
+    }),
+    # 阶段1 建造：客户端→主机放置请求（此前无任何上行通道）
+    ("BUILD_REQUEST", MsgType.BUILD_REQUEST, {
+        "build_id": "barricade", "x": 320.5, "y": 240.25,
+    }),
+    # 阶段1 建造：主机→请求者单播结果（成功带 bid）
+    ("BUILD_RESULT/ok", MsgType.BUILD_RESULT, {
+        "build_id": "barricade", "ok": True, "bid": "b8", "reason": None,
+    }),
+    # 阶段1 建造：放置失败（缺资源），bid 为 None
+    ("BUILD_RESULT/失败", MsgType.BUILD_RESULT, {
+        "build_id": "barricade", "ok": False, "bid": None, "reason": "no_resource",
+    }),
+    # 拒绝型 ACK：交互请求的受理结果
+    ("INTERACTION_RESULT/拒绝", MsgType.INTERACTION_RESULT, {
+        "player_id": 1, "interaction_type": "chest",
+        "ok": False, "reason": "too_far",
+    }),
+    # 拒绝型 ACK：放弃行动的受理结果
+    ("PLAYER_ABANDON_RESULT/受理", MsgType.PLAYER_ABANDON_RESULT, {
+        "player_id": 2, "ok": True, "reason": None,
+    }),
+    # 断线广播（peer_id + reason）
+    ("DISCONNECT", MsgType.DISCONNECT, {
+        "peer_id": 2, "reason": "connection_closed",
+    }),
+    # ROOM_ERROR（请求者单播）
+    ("ROOM_ERROR", MsgType.ROOM_ERROR, {
+        "reason": "已在房间中，忽略重复加入",
     }),
     # 阶段5 祝福：PLAYER_SNAPSHOT 扩展 stats（客户端上报本人 / 主机转发幽灵）
     ("PLAYER_SNAPSHOT/stats", MsgType.PLAYER_SNAPSHOT, {
@@ -202,6 +250,33 @@ _ROUNDTRIP_CASES: tuple[tuple[str, MsgType, dict], ...] = (
         },
         "event_id": "caravan", "action_time_left": 240.0,
     }),
+    # 可选字段向后兼容：ATTACK_EVENT.attack_speed（旧端不填时仍可编码/解码）
+    ("ATTACK_EVENT/无attack_speed", MsgType.ATTACK_EVENT, {
+        "player_id": 1, "seq": 7, "target_id": 3, "x": 100.0, "y": 200.0,
+    }),
+    ("ATTACK_EVENT/带attack_speed", MsgType.ATTACK_EVENT, {
+        "player_id": 1, "seq": 8, "target_id": 3, "x": 100.0, "y": 200.0,
+        "attack_speed": 1.35,
+    }),
+    # 可选字段向后兼容：EVAC_RESULT.stars（星级结算，0 星也能往返）
+    ("EVAC_RESULT/0星", MsgType.EVAC_RESULT, {
+        "player_id": 1, "gold": 500.0, "success": True,
+    }),
+    ("EVAC_RESULT/3星", MsgType.EVAC_RESULT, {
+        "player_id": 1, "gold": 500.0, "success": True, "stars": 3,
+    }),
+    # 可选字段向后兼容：PLAYER_SNAPSHOT.blessings（祝福属性，唯一收口在 BlessingState）
+    ("PLAYER_SNAPSHOT/blessings", MsgType.PLAYER_SNAPSHOT, {
+        "players": [{
+            "player_id": 1, "x": 100.0, "y": 200.0, "hp": 90.0, "max_hp": 120.0,
+            "weapon": "铁剑", "facing": 0.5, "alive": True,
+            "blessings": [{"blessing_id": "twin_shot", "stack": 2}],
+        }],
+    }),
+    # 可选字段向后兼容：POTION_ACK.for_peer（单播回执时指明回给谁）
+    ("POTION_ACK/for_peer", MsgType.POTION_ACK, {
+        "player_id": 1, "potion": "health", "ok": True, "for_peer": 2,
+    }),
 )
 
 # 各新消息 schema 必须写清的载荷键名（联机「四接线」依赖 schema 描述，故纳入断言）
@@ -211,8 +286,21 @@ _SCHEMA_KEY_EXPECT: tuple[tuple[MsgType, tuple[str, ...]], ...] = (
     (MsgType.EVAC_POINT_ACTION, ("player_id", "action", "x", "y")),
     (MsgType.EVENT_START, ("event_id", "flags")),
     (MsgType.MAP_CHANGE, ("obj_id", "change_type", "state", "extra")),
-    (MsgType.PLAYER_SNAPSHOT, ("players", "stats")),
+    (MsgType.PLAYER_SNAPSHOT, ("players", "stats", "blessings")),
     (MsgType.FULL_STATE, ("evac_point", "event_id")),
+    # 本轮新增/扩展消息的键名（联机「四接线」依赖 schema 描述，故纳入断言）
+    (MsgType.BUILD_REQUEST, ("build_id", "x", "y")),
+    (MsgType.BUILD_RESULT, ("build_id", "ok", "bid", "reason")),
+    (MsgType.INTERACTION_RESULT, ("ok", "reason")),
+    (MsgType.PLAYER_ABANDON_RESULT, ("ok", "reason")),
+    (MsgType.DISCONNECT, ("peer_id", "reason")),
+    (MsgType.ROOM_ERROR, ("reason",)),
+    (MsgType.ATTACK_EVENT, ("attack_speed",)),
+    (MsgType.EVAC_RESULT, ("stars",)),
+    (MsgType.POTION_ACK, ("for_peer",)),
+    (MsgType.CARRIAGE_BUY, ("player_id", "kind", "item_id", "level", "qty", "gold_before", "gold_after")),
+    (MsgType.CARRIAGE_BUY_RESULT, ("player_id", "ok", "reason", "kind", "item_id", "qty")),
+    (MsgType.EVAC_POINT_RESULT, ("player_id", "ok", "reason", "action")),
 )
 
 # 非法帧样本：(说明, 原始 JSON 帧) —— decode 必须一律抛 ValueError，禁止静默忽略
@@ -670,6 +758,85 @@ async def _scenario_6_mission_progress() -> tuple[bool, str]:
         server.stop()
 
 
+async def _scenario_7_room_error_and_disconnect() -> tuple[bool, str]:
+    """场景7 · 传输层裁决契约：ROOM_ERROR 单播 / BUILD_RESULT 单播 / DISCONNECT 广播。
+
+    覆盖本轮「实装死消息」的三条传输层承诺：
+    - 已入座玩家重复发 JOIN → 单播 ROOM_ERROR 给请求者，不广播、不转发主线程；
+    - BUILD_RESULT 单播只给请求者（另一端收不到，防应答串台）；
+    - 玩家断线 → 房内其余客户端收到 DISCONNECT{peer_id}（此前只有 server 侧回调）。
+    """
+    bridge = NetBridge()
+    server = NetServer(
+        bridge,
+        room_id="test-room",
+        seed=20260811,
+        theme="forest",
+        max_players=MAX_PLAYERS,
+    )
+    ws_a: ClientConnection | None = None
+    ws_b: ClientConnection | None = None
+    try:
+        server.start(TEST_HOST, _pick_free_port())
+        ws_a, pid_a = await _handshake_join(server.port, "玩家A")
+        ws_b, pid_b = await _handshake_join(server.port, "玩家B")
+
+        # 7a) 重复 JOIN → 请求者 A 单播收到 ROOM_ERROR
+        await ws_a.send(encode(MsgType.JOIN, {"name": "玩家A"}))
+        err = await _recv_until(ws_a, lambda t, _p: t is MsgType.ROOM_ERROR)
+        assert set(err) == {"reason"}, f"ROOM_ERROR 载荷应仅含 reason: {err}"
+        assert err["reason"], "ROOM_ERROR.reason 不应为空"
+
+        # 7b) ROOM_ERROR 是单播：B 收不到；A 也不会再收到 JOIN_ACCEPT（一请求一应答）
+        leaked = [t.name for t, _ in await _drain_quiet(ws_b)]
+        assert not leaked, f"ROOM_ERROR 不应广播给 B，多余消息: {leaked}"
+        extra_a = [t.name for t, _ in await _drain_quiet(ws_a)]
+        assert not extra_a, f"重复 JOIN 只应回一条 ROOM_ERROR，多余消息: {extra_a}"
+
+        # 7c) 重复 JOIN 不应透传到主线程（否则主线程会二次入座/重建房间）
+        time.sleep(QUIET_WINDOW)
+        bridged_join = [
+            e for e in bridge.poll()
+            if isinstance(e, dict) and e.get("msg_type") == "JOIN"
+        ]
+        assert not bridged_join, f"重复 JOIN 不应转发主线程: {bridged_join}"
+
+        # 7d) BUILD_RESULT 单播只给请求者 B
+        server.send_to(pid_b, MsgType.BUILD_RESULT, {
+            "build_id": "barricade", "ok": True, "bid": "b8", "reason": None,
+        })
+        res = await _recv_until(ws_b, lambda t, _p: t is MsgType.BUILD_RESULT)
+        assert res["ok"] is True and res["bid"] == "b8", f"BUILD_RESULT 载荷不符: {res}"
+        leaked_b = [p for t, p in await _drain_quiet(ws_a) if t is MsgType.BUILD_RESULT]
+        assert not leaked_b, f"BUILD_RESULT 单播不应触达 A: {leaked_b}"
+
+        # 7e) B 断线 → A 收到 DISCONNECT{peer_id, reason}
+        await ws_b.close()
+        ws_b = None  # 已主动关闭，清理阶段不再重复 close
+        disc = await _recv_until(ws_a, lambda t, _p: t is MsgType.DISCONNECT)
+        assert disc["peer_id"] == pid_b, f"DISCONNECT.peer_id 应为断线者 {pid_b}: {disc}"
+        assert disc["reason"], f"DISCONNECT.reason 不应为空: {disc}"
+        assert _wait_until(lambda: server.player_count == 1), (
+            f"断线后房间人数应为 1，实际 {server.player_count}"
+        )
+
+        return True, (
+            f"重复 JOIN → 仅请求者 A 单播 ROOM_ERROR(reason)，B 未收到、无多余 JOIN_ACCEPT，"
+            f"且未转发主线程；BUILD_RESULT(ok/bid) 单播仅 B 收到、A 未收到；"
+            f"B 断线 → A 收到 DISCONNECT(peer_id={pid_b}, reason 非空)，人数 2→1"
+        )
+    except Exception as exc:  # noqa: BLE001
+        return False, f"{type(exc).__name__}: {exc}"
+    finally:
+        for ws in (ws_a, ws_b):
+            if ws is not None:
+                try:
+                    await ws.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        server.stop()
+
+
 async def _run_scenario(
     label: str, scenario: Callable[[], Awaitable[tuple[bool, str]]]
 ) -> int:
@@ -695,10 +862,15 @@ async def main() -> int:
     failed += await _run_scenario(
         "场景6（阶段6 任务进度单播应用）", _scenario_6_mission_progress
     )
+    failed += await _run_scenario(
+        "场景7（ROOM_ERROR单播/BUILD_RESULT单播/DISCONNECT广播）",
+        _scenario_7_room_error_and_disconnect,
+    )
     if failed == 0:
         print(
-            "PASS: 六类场景全部通过（server + 2 client 收发 / 满员拒绝 / 断线感知 / "
-            "协议往返+schema+非法帧 / EVAC_POINT_ACTION→EVAC_POINT_STATE / MISSION_PROGRESS 单播应用）"
+            "PASS: 七类场景全部通过（server + 2 client 收发 / 满员拒绝 / 断线感知 / "
+            "协议往返+schema+非法帧 / EVAC_POINT_ACTION→EVAC_POINT_STATE / MISSION_PROGRESS 单播应用 / "
+            "ROOM_ERROR+BUILD_RESULT 单播+DISCONNECT 广播）"
         )
         return 0
     print(f"FAIL: {failed} 个场景未通过")

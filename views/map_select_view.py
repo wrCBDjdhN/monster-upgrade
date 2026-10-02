@@ -139,6 +139,37 @@ BATTLE_READY_REQS = {
 }
 
 
+# ── 背包提示定义（2026-10-01 用户拍板：仅红绿提示行，不拦截进入）──────────────
+# 每图建议背包：容量阈值实查 entities.equipment_defs.BACKPACKS[bag_id]["capacity"]，
+# 禁硬编码数值；判定口径 = 当前**装备中**的背包容量（没装背包 = 0 = 不满足）。
+BAG_TIPS = {
+    "forest": ("small_bag", "至少需要小布袋，否则可能无法正常撤离"),
+    "desert": ("large_bag", "需要大背包"),
+    "space": ("huge_bag", "需要巨背包"),
+}
+
+
+def bag_tip_status(pid: int, theme: str) -> tuple[bool, str]:
+    """地图卡片背包提示状态（仅提示，不参与任何拦截判定）
+
+    Returns:
+        (ok, draw_text)
+        - ok: 当前装备中的背包容量是否 ≥ 该图所需（没装背包 = 0 = 不满足）
+        - draw_text: 卡片显示文案——达标显示容量进度，未达标显示 BAG_TIPS 用户文案
+    """
+    from entities.equipment_defs import BACKPACKS
+    from db.equipment import get_backpack_capacity
+    entry = BAG_TIPS.get(theme)
+    if not entry:
+        return True, ""
+    bag_id, tip = entry
+    need = int(BACKPACKS.get(bag_id, {}).get("capacity", 0))
+    cap = get_backpack_capacity(pid)
+    if cap >= need:
+        return True, f"背包达标（{cap}/{need}）"
+    return False, tip
+
+
 # ── 地图数据定义 ───────────────────────────────────────────────────────────────
 
 MAPS = [
@@ -186,7 +217,9 @@ class MapSelectView(arcade.View):
         # 关键：arcade.XYWH(x, y, w, h) 的 x,y 是矩形【中心】坐标（anchor 默认 CENTER），
         # 不是左上角。故第一张卡片的中心 = 组中心 - 组内偏移，组中心对齐窗口中心。
         self.cards = []
-        card_w, card_h = 300, 180
+        # 高度 180→200（2026-10-01）：为卡片内新增的背包提示行腾出不重叠的排版空间
+        # （按钮/点击区/教程高亮均由 rect.bottom 派生，自动适配，无需改其它布局代码）
+        card_w, card_h = 300, 200
         spacing = 40  # 卡片间距
         # 修复：原先按「左上角语义」计算，导致卡片组中心 x=490（偏左150px）、
         # y 偏移 40（偏下），三张卡片整体不居中；现改为组中心 = 窗口中心
@@ -348,6 +381,18 @@ class MapSelectView(arcade.View):
                 f"card_desc_{i}", m["desc"], rect.center_x, rect.center_y - 15,
                 arcade.color.GRAY, size=10, anchor_x="center",
             )
+            # 背包提示行（2026-10-01 用户需求：仅提示不拦截）——
+            # 绿 = 当前装备背包已达标，红 = 未达标（含没装背包）；
+            # 位置 center_y-32：夹在描述(-15)与星级门槛(bottom+50)之间，互不重叠。
+            gs_bag = self.window.game_state
+            pid_bag = gs_bag.player_id if gs_bag else 0
+            bag_ok, bag_text = bag_tip_status(pid_bag, theme)
+            if bag_text:
+                self._tc.text(
+                    f"card_bag_{i}", bag_text, rect.center_x, rect.center_y - 32,
+                    (100, 255, 100) if bag_ok else (255, 100, 100),
+                    size=10, anchor_x="center",
+                )
             # 难度（放在卡片内部靠下位置，避免与下方按钮重合）
             # 持久 Text 对象，避免 draw_text 每帧重建纹理
             self._tc.text(

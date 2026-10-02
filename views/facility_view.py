@@ -311,9 +311,19 @@ class FacilityView(arcade.View):
             self.window.show_view(MarketView(self.window_ref))
 
     def _go_back(self):
-        """返回开始界面（延迟导入，项目导航约定）"""
-        from views.start_view import StartView
-        self.window.show_view(StartView(self.window_ref))
+        """返回上一级：单机→开始界面，联机→联机大厅复用连接（房间保持）
+
+        修改原因（2026-10-01）：原实现无条件跳 StartView，联机时从大厅点「市场」
+        被设施守卫拦到本页，返回会掉回主菜单丢失房间语境；与
+        scroll_view.handle_back_click / warehouse_view 的 net_mode 路由口径对齐。
+        """
+        gs = getattr(self.window_ref, "game_state", None)
+        if getattr(gs, "net_mode", "solo") != "solo":
+            from views.lobby_view import LobbyView
+            self.window.show_view(LobbyView(self.window_ref))
+        else:
+            from views.start_view import StartView
+            self.window.show_view(StartView(self.window_ref))
 
     def _toast(self, text: str, color):
         """压入一条飘字（追加到列表，同屏多条向上错开）"""

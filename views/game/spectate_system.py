@@ -159,11 +159,13 @@ class SpectateManager:
                 "x": self.gv.player.center_x, "y": self.gv.player.center_y,
             })
         elif gs.net_mode == "client":
-            # 客户端倒地：通知主机（主机权威裁决）
-            gs.net_client.send((MsgType.PLAYER_DOWNED, {
-                "player_id": gs.net_player_id,
-                "x": self.gv.player.center_x, "y": self.gv.player.center_y,
-            }))
+            # 客户端倒地：不再主动上报 PLAYER_DOWNED——主机入站分发（game_view.py 主机
+            # inbound 段）无该分支，只会打印「未接线消息」；主机实际靠 20Hz 幽灵轮询
+            # （game_view.py 主机权威幽灵倒地检测段）在 HP 归零时自行置
+            # _player_status[pid]="downed" 并广播 PLAYER_DOWNED，故客户端发送纯冗余
+            # （联机审计 2026-10-01）。本地倒地副作用（downed 标志/_downed_players[0]/
+            # _spectating/提示文字）均在上方本地完成，不依赖该消息。
+            pass  # 保留空分支以维持 net_mode 分流结构（无待发送消息）
         floating_texts.add(self.gv.player.center_x, self.gv.player.center_y + 60,
                            f"你已倒地！等待队友救援（{DOWNED_TIMEOUT}秒超时）",
                            arcade.color.ORANGE, life=3.0, font_size=16)
@@ -215,17 +217,25 @@ class SpectateManager:
         self.gv._rescue_timer += dt
         self.gv._rescue_progress = min(1.0, self.gv._rescue_timer / RESCUE_DURATION)
         if self.gv._rescue_timer >= RESCUE_DURATION:
-            # 救援完成：发送请求给主机
+            # 救援完成：先把目标 id 缓存到局部变量，再清空 _rescue_target
+            # 修复（P0 救援链路 100% 失效，联机审计 2026-10-01）：原实现先把
+            # _rescue_target 置 None，随后主机路径（target_id）与客户端路径（target_id）
+            # 才读取该属性 → target_id 恒为 None → 主机 _handle_rescue_request 内
+            # `_player_status.get(None) != "downed"` 直接 return，RESCUE_RESULT /
+            # PLAYER_REVIVED 永不产生，队友永远救不起来。
+            # 注：dp 是倒地玩家信息（仅 x/y/timer 键），`dp.get("target_id")` 兜底恒为
+            # None，故直接用 _downed_players 的键（倒地玩家 id）作为 target_id。
+            target_id = self.gv._rescue_target
             self.gv._rescuing = False
             self.gv._rescue_target = None
             if gs.net_mode == "host":
                 # 主机直接执行救援
                 self.gv._handle_rescue_request(0, {
                     "rescuer_id": 0,
-                    "target_id": self.gv._rescue_target or dp.get("target_id"),
+                    "target_id": target_id,
                 })
             elif gs.net_mode == "client":
                 gs.net_client.send((MsgType.RESCUE_REQUEST, {
                     "rescuer_id": gs.net_player_id,
-                    "target_id": self.gv._rescue_target,
+                    "target_id": target_id,
                 }))

@@ -300,7 +300,9 @@ class NetServer:
     def send_to(self, player_id: int, msg_type: MsgType, payload: dict) -> None:
         """单播：给指定 player_id 发送消息（线程安全，可从主线程调用）。
 
-        服务器未运行 / 玩家不在房间时静默忽略。
+        服务器未运行 / 已请求停止时不发（正常停机路径）；
+        玩家不在房间（已离线或 id 非法）时由 _enqueue_send_to 显式 print 告警，
+        禁静默丢弃——否则主线程等不到 BUILD_RESULT 之类的应答却毫无线索。
         """
         loop = self._loop
         if loop is None or loop.is_closed() or self._stop_requested:
@@ -322,14 +324,33 @@ class NetServer:
             return
         loop.call_soon_threadsafe(self._enqueue_broadcast, msg_type, payload, exclude)
 
+    def send_room_error(self, player_id: int, reason: str) -> None:
+        """单播房间错误给指定玩家（ROOM_ERROR 的 net/ 唯一出口，线程安全）。
+
+        与 send_to 同为单播通道，但固定消息类型并锁死载荷形状（protocol 的
+        ROOM_ERROR payload 仅 'reason'），房间操作失败（重入 JOIN / 房间已解散 /
+        操作非法等）一处调用即可，不必各端自己拼载荷。
+
+        参数：
+        - player_id：触发失败的那个玩家——只发给他，不广播全房；
+        - reason：失败原因文本（客户端据此回大厅并展示）。
+        """
+        self.send_to(player_id, MsgType.ROOM_ERROR, {"reason": reason})
+
     # ── 以下方法只应在事件循环线程内执行（由 call_soon_threadsafe 调度）──
 
     def _enqueue_send_to(
         self, player_id: int, msg_type: MsgType, payload: dict
     ) -> None:
-        """事件循环线程内：创建单播发送任务（玩家已离线则跳过）。"""
+        """事件循环线程内：创建单播发送任务（玩家已离线则显式告警后跳过）。"""
         player = self.room.players.get(player_id)
         if player is None:
+            # 单播目标离线：显式告警（禁静默忽略）。静默 return 会让主线程
+            # 永远等不到 BUILD_RESULT / MISSION_PROGRESS 等应答而无从排查
+            print(
+                f"[NetServer] 警告: 单播目标不存在 player_id={player_id} "
+                f"msg={msg_type.name}（玩家已离线或 id 非法），消息已丢弃"
+            )
             return
         asyncio.create_task(self._send_to_task(player, msg_type, payload))
 
@@ -386,8 +407,22 @@ class NetServer:
             async for raw in connection:
                 try:
                     msg_type, payload = decode(raw)
-                except ValueError:
-                    # 非法帧：单帧忽略，不踢人（协议层已定义抛错行为）
+                except ValueError as exc:
+                    # 非法帧：单帧忽略不踢人，但必须显式告警（禁静默忽略）
+                    print(
+                        f"[NetServer] 警告: 收到非法帧（player_id={player_id} "
+                        f"name={name!r}），已丢弃该帧: {exc}"
+                    )
+                    continue
+                # 房间操作失败的传输层裁决：已入座玩家重复发 JOIN 属于房间操作
+                # 失败，此前被静默丢给主线程、请求方永远等不到应答；
+                # 现单播 ROOM_ERROR 给请求者（实装 ROOM_ERROR，避免死消息）
+                if msg_type == MsgType.JOIN:
+                    self.send_room_error(player_id, "已在房间中，忽略重复加入")
+                    print(
+                        f"[NetServer] 警告: 拒绝重复加入 player_id={player_id} "
+                        f"name={name!r}"
+                    )
                     continue
                 # 入站消息封装后交给主线程处理（经队列桥，永不阻塞）
                 self._bridge.put_inbound({
@@ -399,11 +434,19 @@ class NetServer:
             pass  # 对端关闭 / 服务器关闭 / 网络异常，均视为断线
         finally:
             self._remove_player(player_id, name)
+            # 断线通知：向房内其余玩家广播 DISCONNECT。此前只有 server 侧的
+            # on_disconnect 回调，房内其他客户端完全不知情、界面不会更新
+            self.broadcast(MsgType.DISCONNECT, {
+                "peer_id": player_id,
+                "reason": "connection_closed",
+            })
+            print(f"[NetServer] 玩家断开: id={player_id} name={name!r}（已广播 DISCONNECT）")
             if self._on_disconnect is not None:
                 try:
                     self._on_disconnect(player_id, "connection_closed")
-                except Exception:
-                    pass  # 回调异常不得影响服务器线程
+                except Exception as exc:
+                    # 回调异常不得影响服务器线程，但必须显式告警（禁静默吞异常）
+                    print(f"[NetServer] 警告: on_disconnect 回调异常（已忽略）: {exc!r}")
 
     async def _handshake(
         self, connection: ServerConnection
@@ -419,11 +462,13 @@ class NetServer:
             raw = await asyncio.wait_for(
                 connection.recv(), timeout=HANDSHAKE_TIMEOUT
             )
-        except (TimeoutError, ConnectionClosed):
+        except (TimeoutError, ConnectionClosed) as exc:
+            print(f"[NetServer] 警告: 握手首帧超时或对端关闭（{HANDSHAKE_TIMEOUT}s），断开: {exc!r}")
             return None, None
         try:
             msg_type, payload = decode(raw)
-        except ValueError:
+        except ValueError as exc:
+            print(f"[NetServer] 警告: 握手首帧解码失败，拒绝连接: {exc}")
             return None, None
         # 客户端可先发 HELLO 身份握手（校验协议版本），再发 JOIN
         if msg_type == MsgType.HELLO:
@@ -434,11 +479,13 @@ class NetServer:
                 raw = await asyncio.wait_for(
                     connection.recv(), timeout=HANDSHAKE_TIMEOUT
                 )
-            except (TimeoutError, ConnectionClosed):
+            except (TimeoutError, ConnectionClosed) as exc:
+                print(f"[NetServer] 警告: HELLO 后的 JOIN 帧超时或对端关闭，断开: {exc!r}")
                 return None, None
             try:
                 msg_type, payload = decode(raw)
-            except ValueError:
+            except ValueError as exc:
+                print(f"[NetServer] 警告: JOIN 帧解码失败，拒绝连接: {exc}")
                 return None, None
         if msg_type != MsgType.JOIN:
             await self._reject(connection, "非法加入流程")
@@ -485,6 +532,7 @@ class NetServer:
 
     async def _reject(self, connection: ServerConnection, reason: str) -> None:
         """回 JOIN_REJECT 并关闭连接（握手失败统一出口）。"""
+        print(f"[NetServer] 拒绝入座: reason={reason!r}")
         await self._safe_send(connection, MsgType.JOIN_REJECT, {"reason": reason})
         try:
             await connection.close()
@@ -501,57 +549,68 @@ class NetServer:
         
         使用 UDP 广播地址 255.255.255.255，端口与 WebSocket 服务端口相同+1。
         客户端监听此端口即可发现局域网内的房间。
+
+        编解码统一走 protocol.encode/decode：禁绕过 protocol.py 手拼消息，
+        否则 UDP 发现链路与 WebSocket 链路会各有一套字段名/校验实现、极易漂移。
         """
         import socket
-        import json
-        
+
         broadcast_port = (self._port or DEFAULT_PORT) + 1
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         sock.setblocking(False)
-        
+
         try:
             while True:
-                # 构建房间广播信息
+                # 构建房间广播信息（协议编解码唯一入口）
                 player_count = len(self.room.players) + 1  # +1 包含主机
-                broadcast_msg = json.dumps({
-                    "type": "ROOM_BROADCAST",
-                    "payload": {
-                        "room_id": self.room.room_id,
-                        "host_name": "主机",  # 主机名可从 GameState 获取，此处简化
-                        "theme": self.room.theme,
-                        "player_count": player_count,
-                        "max_players": self.room.max_players,
-                        "port": self._port or DEFAULT_PORT,
-                    }
-                }, ensure_ascii=False)
-                
+                raw_broadcast = encode(MsgType.ROOM_BROADCAST, {
+                    "room_id": self.room.room_id,
+                    "host_name": "主机",  # 主机名可从 GameState 获取，此处简化
+                    "theme": self.room.theme,
+                    "player_count": player_count,
+                    "max_players": self.room.max_players,
+                    "port": self._port or DEFAULT_PORT,
+                })
+
                 # 发送 UDP 广播
                 try:
                     sock.sendto(
-                        broadcast_msg.encode("utf-8"),
+                        raw_broadcast.encode("utf-8"),
                         ("255.255.255.255", broadcast_port)
                     )
                 except OSError:
-                    pass  # 广播失败不阻塞服务器
-                
+                    pass  # 广播失败不阻塞服务器（每 2 秒重试，无需逐次刷屏）
+
                 # 同时监听是否有客户端的 ROOM_QUERY 请求
                 try:
                     data, addr = sock.recvfrom(1024)
                     if data:
                         try:
-                            msg = json.loads(data.decode("utf-8"))
-                            if msg.get("type") == "ROOM_QUERY":
+                            # UnicodeDecodeError 是 ValueError 子类，一并覆盖
+                            query_type, _payload = decode(data.decode("utf-8"))
+                        except ValueError as exc:
+                            # UDP 坏帧 / 未知类型：显式告警（禁静默忽略）
+                            print(
+                                f"[NetServer] 警告: 收到非法 UDP 发现包（来自 {addr}），"
+                                f"已忽略: {exc}"
+                            )
+                        else:
+                            if query_type == MsgType.ROOM_QUERY:
                                 # 收到查询请求，立即回复一次广播
-                                sock.sendto(
-                                    broadcast_msg.encode("utf-8"),
-                                    addr
-                                )
-                        except (json.JSONDecodeError, UnicodeDecodeError):
-                            pass
+                                try:
+                                    sock.sendto(
+                                        raw_broadcast.encode("utf-8"),
+                                        addr,
+                                    )
+                                except OSError as exc:
+                                    print(
+                                        f"[NetServer] 警告: 回复 ROOM_BROADCAST 失败"
+                                        f"（peer={addr}）: {exc!r}"
+                                    )
                 except BlockingIOError:
                     pass  # 无数据，继续
-                
+
                 await asyncio.sleep(2.0)  # 每 2 秒广播一次
         finally:
             sock.close()

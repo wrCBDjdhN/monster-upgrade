@@ -12,6 +12,7 @@ from game.loot import DropItem, try_pickup
 from game.evac import commit_run_to_warehouse, clear_run
 from game.effects import particle_system, floating_texts
 from game.sound_manager import sound_manager
+from game.monster_utils import lookup_weapon_range  # 射程统一查武器定义表，禁魔数回退
 from game.entity_callbacks import (
     handle_harvestable_combat, on_harvestable_destroyed,
     handle_chest_interaction, handle_well_interaction,
@@ -155,7 +156,7 @@ class PickupLootManager:
             gs.current_weapon_item_id = d.item_id   # 供渲染视觉
             gs.weapon_damage = wdef.get("damage", 8)
             gs.weapon_speed = wdef.get("attack_speed", 1.0)
-            gs.weapon_range = wdef.get("range", 40)
+            gs.weapon_range = lookup_weapon_range(gs.current_weapon_kind, d.item_id)
             # 等级系统：拾取新武器会重置 weapon_damage/weapon_speed，这里补回角色永久加成
             # （加成在 setup() 缓存到 gs.level_bonus_damage/level_bonus_atk_speed，与 setup 加载武器同口径）
             gs.weapon_damage += getattr(gs, "level_bonus_damage", 0)

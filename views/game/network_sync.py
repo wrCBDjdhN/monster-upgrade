@@ -14,6 +14,9 @@ from config import (
     NET_SNAPSHOT_HZ,  # 状态快照广播频率（怪物快照 20Hz）
     NET_HEARTBEAT_SEC,  # 心跳间隔（客户端 RTT 测量与保活）
     NET_ACTION_TIME_BCAST_SEC,  # 行动时间广播间隔（主机每秒广播剩余行动时间）
+    NET_ATTACK_SPEED_TOLERANCE,  # 主机攻速仲裁容差（倍数）：攻击间隔窗口 = (1/攻速) × 容差
+    SNAPSHOT_HEAL_JUMP_RATIO,  # 快照回血跳变上限比例（相对 max_hp）：抑制缓慢回血作弊
+    DAMAGE_RESULT_QUEUE_TIMEOUT,  # DAMAGE_RESULT 目标缺失时的排队等待上限（秒）
     PROJECTILE_SIZE,  # 标准弹丸边长（客户端远端弹丸纯表现层渲染尺寸）
     DROP_PICKUP_RADIUS,  # 掉落物拾取半径（主机拾取仲裁距离阈值，Todo 18）
     LIFESTEAL_DEFAULT, SPREAD_COUNT_DEFAULT, SPREAD_ANGLE_DEFAULT,  # 武器扩展机制默认值（吸血/散射）
@@ -26,6 +29,11 @@ from config import (
     CACTUS_THORN_DAMAGE,  # 仙人掌反伤：客户端近战攻击环境物命中时作用于攻击者（幽灵）
     ROCKET_PAD_INTERACT_RANGE,  # 火箭发射台交互距离
     CHEST_WELL_INTERACT_RANGE,  # 宝箱/水井交互距离
+    EVAC_INTERACT_RANGE,  # 撤离点激活/修复交互距离（主机校验客户端撤离请求位置同口径）
+    # 商队购买主机权威记账：单局限购上限 / 价目表 / 神器专属定价与可购池
+    # （数值与可购范围一律取自 config，禁在协议处理层硬编码价格与限购）
+    EVENT_CARAVAN_LIMITS, EVENT_CARAVAN_PRICES,
+    EVENT_CARAVAN_ARTIFACT_PRICE, EVENT_CARAVAN_ARTIFACT_POOL,
     HIT_FLASH_DURATION,  # 受击闪白时长（远端怪物受击反馈）
     EVENT_BANNER_SEC,  # 阶段4 事件横幅时长（客户端镜像横幅计时）
 )
@@ -34,7 +42,8 @@ from game.player import Player
 from game.loot import DropItem
 from game.harvestable import HarvestableEntity
 from game.chest import AirdropChest  # 阶段4 空投补给箱（客户端按 MAP_CHANGE 追加重建）
-from game.evac import commit_run_to_warehouse, clear_run
+from game.evac import (commit_run_to_warehouse, clear_run, rollback_run,
+                        _merge_authoritative)
 from game.map_events import CaravanPoint  # 阶段4 商队交互点（非 Sprite，仅坐标）
 from game.build_system import Building  # 阶段1 局内建筑实体（客户端按广播只还原视觉对象）
 from game.sound_manager import sound_manager
@@ -64,6 +73,36 @@ class NetworkSyncManager:
         # net 层铁律「禁静默丢字段」——缺字段走 .get() 默认值兜底，但必须显式告警一次，
         # 不能悄悄按本地默认值渲染出与主机不一致的表现。
         self._warned_old_monster_snapshot = False
+        # ── 主机权威仲裁状态（本次联机安全收口新增，全部按 player_id 键控）──
+        # 攻速仲裁：_last_attack_at[pid] = 上次**已受理**攻击的主机墙钟时间；
+        # 客户端可在容差窗口内略微提前/滞后，但不能按帧连发。
+        self._last_attack_at: dict = {}
+        # 攻击事件去重：_last_attack_ts[pid] = 上次受理的客户端 timestamp，
+        # 重复重发同一 timestamp 的攻击事件直接丢弃（防重放放大伤害）。
+        self._last_attack_ts: dict = {}
+        # 技能冷却：_skill_cd_until[pid] = 该玩家技能就绪的主机墙钟时间戳。
+        # 不用 ghost.skill_cd —— 幽灵不跑 Player.update，冷却永不衰减。
+        self._skill_cd_until: dict = {}
+        # 被拾取掉落身份缓存：net_id -> {item_type,item_id,level,quantity}。
+        # 供 PICKUP_RESULT(already_taken) 携带物品身份，客户端据此精确回滚携带物。
+        self._taken_drop_info: dict = {}
+        # 目标缺失的 DAMAGE_RESULT 排队（等 MONSTER_SNAPSHOT 补对象）：
+        # 元素 = {"target_id", "payload", "deadline", "x", "y"}
+        self._pending_damage_results: list = []
+        # 限频告警去重集合（幽灵缺失/坐标回退等，正常联机也会偶发，禁逐条刷屏）
+        self._warned_keys: set = set()
+        # ── 商队购买主机权威记账（本局限购镜像）────────────────────────────
+        # 键控 player_id（禁信任 payload.player_id，一律取连接 sender_id），
+        # 值 = {item_id: 本局已购件数}；限购上限取 config.EVENT_CARAVAN_LIMITS[kind]，
+        # 与单机侧 gs.caravan_bought 同口径（按 item_id 计数，非按 kind 总数）。
+        # 为什么主机要维护镜像：联机客户端的购买走 CARRIAGE_BUY 请求-回执，
+        # 主机是唯一记账方；主机的 _players_run_carried 是携带物账本，
+        # 本局限购计数没有随携带物下发的通道，故主机侧独立按 player_id 镜像一份。
+        self._carriage_bought: dict = {}
+        # 换局重置标记：记录上次记账时的地图种子（GameState.current_map_seed），
+        # 种子变化即视为新一局，惰性清空限购镜像（同一 GameView 实例会跨局复用 setup()，
+        # 禁依赖 game_view 侧额外钩子复位——本任务不改 game_view.py）。
+        self._carriage_bought_seed = None
 
     def _broadcast_damage(self, monster: "arcade.Sprite", damage: float, hit: bool = True,
                           crit: bool = False, debuffs: list = None) -> None:
@@ -97,7 +136,9 @@ class NetworkSyncManager:
         - 幽灵缺失时按出生点懒创建最小幽灵（完整玩家实体同步是 todo 23，此处保持最小实现）。
         """
         gs = self.gv.window.game_state
-        attacker_id = payload.get("attacker_id", sender_id)
+        # 身份收口：攻击者一律取连接 sender_id，禁信任 payload.attacker_id
+        # （伪造他人 id 可借别人幽灵的位置裁决攻击，并污染他人冷却/任务归属）
+        attacker_id = sender_id
         weapon_name = payload.get("weapon", "")
         angle = float(payload.get("angle", 0.0))
         # 攻击者实体：防御性支持主机本地玩家（正常路径主机本地攻击不经此入口）
@@ -118,12 +159,40 @@ class NetworkSyncManager:
         from views.game_view import _lookup_weapon_by_name
         wdef = _lookup_weapon_by_name(weapon_name)
         kind = wdef.get("kind", "melee")
+        # 射程回退统一走 lookup_weapon_range（entities/weapon_defs 单一数值来源，
+        # 近战 50 / 远程 250），禁在本层硬编码 40 之类的魔法数
+        from game.monster_utils import lookup_weapon_range
+        wrange = float(wdef.get("range") or lookup_weapon_range(kind, weapon_name))
+        # 攻速仲裁（主机权威）：客户端上报 attack_speed 仅作为**限速下界**，
+        # 防「按帧连发」无限刷伤害；窗口 = (1/attack_speed) × config.NET_ATTACK_SPEED_TOLERANCE。
+        # 缺失/非法时回退武器模板攻速（数值口径仍取主机武器表，本项不改伤害/射程）。
+        try:
+            reported_speed = float(payload.get("attack_speed") or 0)
+        except (TypeError, ValueError):
+            reported_speed = 0.0
+        if reported_speed <= 0:
+            reported_speed = float(wdef.get("attack_speed", 1.0) or 1.0)
+        now = time.time()
+        min_gap = (1.0 / max(0.05, reported_speed)) * NET_ATTACK_SPEED_TOLERANCE
+        last_at = self._last_attack_at.get(attacker_id)
+        if last_at is not None and (now - last_at) < min_gap:
+            # 超频攻击：丢弃本次事件（不扣血、不生成弹丸），显式告警一次
+            print(f"[Host] 玩家 {attacker_id} 攻击超频（间隔 {now - last_at:.3f}s < "
+                  f"窗口 {min_gap:.3f}s，攻速 {reported_speed:.2f}），已丢弃")
+            return
+        # timestamp 去重：同一 timestamp 重复重发（重放）直接丢弃
+        ts = payload.get("timestamp")
+        if ts is not None and ts == self._last_attack_ts.get(attacker_id):
+            print(f"[Host] 玩家 {attacker_id} 重放同一 timestamp={ts!r} 的攻击事件，已丢弃")
+            return
+        self._last_attack_at[attacker_id] = now
+        if ts is not None:
+            self._last_attack_ts[attacker_id] = ts
         # 伤害优先采用客户端上报的实际伤害（修复联机假伤害 8/1）：主机模板 damage 是
         # 基础值，客户端武器可能已升级（gs.weapon_damage 更高），直接按模板裁决会让
         # 升级武器在联机时伤害退回基础值；客户端是本人武器的权威源，与幽灵 HP 采纳同口径。
         damage = float(payload.get("damage") or wdef.get("damage", 8))
         speed = wdef.get("attack_speed", 1.0)
-        wrange = wdef.get("range", 40)
         # 攻击目标点：由方向角（弧度）换算（combat 用世界坐标目标点计算朝向）
         tx = attacker.center_x + math.cos(angle) * 100.0
         ty = attacker.center_y + math.sin(angle) * 100.0
@@ -240,7 +309,9 @@ class NetworkSyncManager:
           全部与客户端本地纯表现（input_handler F 键）保持一致。
         """
         gs = self.gv.window.game_state
-        caster_id = payload.get("player_id", sender_id)
+        # 身份收口：施放者一律取连接 sender_id，禁信任 payload.player_id
+        # （伪造他人 id 可用别人幽灵的名义放技能，并污染他人冷却/任务归属）
+        caster_id = sender_id
         # 施放者实体：防御性支持主机本地玩家（正常路径主机本地技能不经此入口）
         if getattr(gs, "net_player_id", None) is not None and caster_id == gs.net_player_id:
             caster = self.gv.player
@@ -254,7 +325,27 @@ class NetworkSyncManager:
             caster.center_y = float(report_y)
         # 技能伤害基数 = 客户端上报的当前武器伤害（与 ATTACK_EVENT 采纳客户端伤害同口径）
         damage = float(payload.get("damage") or 0)
-        from game.character_skills import use_skill
+        from game.character_skills import use_skill, get_skill
+        # 技能冷却（主机墙钟权威）：幽灵不跑 Player.update → ghost.skill_cd 永不衰减，
+        # 直接复用会让该玩家技能只能用一次；这里按主机墙钟记录就绪时刻，
+        # 冷却窗口取 get_skill(caster)["cooldown"]（entities/character_defs 单一来源）
+        skill_def = get_skill(caster)
+        if skill_def is None:
+            print(f"[Host] 玩家 {caster_id} 无角色技能定义，忽略 SKILL_USE")
+            return
+        cooldown = float(skill_def.get("cooldown", 0.0) or 0.0)
+        now = time.time()
+        ready_at = self._skill_cd_until.get(caster_id)
+        if ready_at is not None and now < ready_at:
+            print(f"[Host] 玩家 {caster_id} 技能冷却中（剩余 {ready_at - now:.2f}s），"
+                  f"忽略本次 SKILL_USE")
+            return
+        if getattr(caster, "_stunned", False):
+            print(f"[Host] 玩家 {caster_id} 处于眩晕，忽略本次 SKILL_USE")
+            return
+        self._skill_cd_until[caster_id] = now + cooldown
+        # 幽灵 skill_cd 交给主机墙钟接管（每次放技能前清零，避免 can_use_skill 误拦）
+        caster.skill_cd = 0.0
         use_skill(self.gv, caster,
                   float(payload.get("mouse_x") or 0),
                   float(payload.get("mouse_y") or 0),
@@ -263,15 +354,25 @@ class NetworkSyncManager:
     def _apply_damage_result(self, payload: dict) -> None:
         """客户端应用主机下发的 DAMAGE_RESULT：远端怪物按 net_id 扣血并显示命中反馈
 
-        - 目标缺失（怪物已被击杀/快照尚未到达）时静默忽略；
-        - 主机权威血量以 MONSTER_SNAPSHOT 为准，此处扣血仅做即时显示，下一帧快照校准。
+        - 目标缺失（怪物尚未进快照）时按 deadline 排队，等 MONSTER_SNAPSHOT 补到再重放；
+      超过 0.5s 仍未出现则丢弃并限频告警（怪物大概率真被击杀，丢弃是对的）；
+      丢失代价 = 客户端一次命中反馈/伤害数字缺失，下一帧 MONSTER_SNAPSHOT 会校准血量；
+    - 主机权威血量以 MONSTER_SNAPSHOT 为准，此处扣血仅做即时显示，下一帧快照校准。
         """
         target_id = payload.get("target_id")
         if target_id is None:
             return
         rm = self.gv.remote_monsters.get(target_id)
         if rm is None:
-            return  # 目标缺失（远端怪物已删除/快照未达）：忽略
+            # 目标缺失：入队等快照补对象（攻击判定先于快照到达是正常时序，不是异常）
+            self._pending_damage_results.append({
+                "target_id": target_id,
+                "payload": dict(payload),
+                "deadline": time.time() + DAMAGE_RESULT_QUEUE_TIMEOUT,
+                "x": payload.get("x"),
+                "y": payload.get("y"),
+            })
+            return
         damage = payload.get("damage", 0)
         if payload.get("hit"):
             # 扣血（不小于 0）+ 命中音效 + 漂浮伤害文字 + 受击闪白
@@ -316,6 +417,33 @@ class NetworkSyncManager:
                     rm.apply_debuff(eid, lvl)
                 except Exception:
                     pass  # 未知效果：忽略，快照校准
+
+    def _drain_pending_damage_results(self) -> None:
+        """重放排队的 DAMAGE_RESULT：MONSTER_SNAPSHOT 补到目标后即时补扣血
+
+        调用点：客户端每次应用 MONSTER_SNAPSHOT 之后（快照是「目标已存在」的信号）。
+        超时（> config.DAMAGE_RESULT_QUEUE_TIMEOUT）仍未出现的条目直接丢弃——
+        怪物多半已被击杀（死亡条目会从 remote_monsters 删除），丢弃才是正确行为；
+        丢弃时按 target_id 限频告警一次，禁静默（否则「一直不显示命中」无从排查）。
+        """
+        if not self._pending_damage_results:
+            return
+        now = time.time()
+        still_pending = []
+        for entry in self._pending_damage_results:
+            target_id = entry["target_id"]
+            if target_id in self.gv.remote_monsters:
+                # 目标已出现 → 重放（转交 _apply_damage_result 走同一扣血/反馈路径）
+                self._apply_damage_result(entry["payload"])
+            elif now > entry["deadline"]:
+                warn_key = ("damage_drop", target_id)
+                if warn_key not in self._warned_keys:
+                    self._warned_keys.add(warn_key)
+                    print(f"[Client] DAMAGE_RESULT 目标 {target_id} 超时未出现在快照中，"
+                          f"已丢弃（血量以下一帧快照为准）")
+            else:
+                still_pending.append(entry)
+        self._pending_damage_results = still_pending
 
     def _ensure_ghost(self, player_id: int) -> Player:
         """主机/客户端按需创建远端玩家幽灵（懒创建），并注册主机侧受击广播钩子
@@ -538,7 +666,15 @@ class NetworkSyncManager:
             # 采纳客户端上报的 HP/max_hp（含装备被动加成），保持幽灵与客户端本人一致，
             # 避免快照校准覆盖装备效果（详见函数 docstring）
             ghost.max_hp = max(1, int(entry.get("max_hp") or ghost.max_hp))
-            ghost.hp = min(ghost.max_hp, round(entry.get("hp", ghost.hp), 2))
+            reported_hp = min(ghost.max_hp, round(entry.get("hp", ghost.hp), 2))
+            # 回血跳变限制：单帧上报的回血量 ≤ max_hp × config.SNAPSHOT_HEAL_JUMP_RATIO，
+            # 超出部分按上限截断（扣血方向不限制：伤害本就应立即生效）。
+            # 残余风险：客户端按接近上限的恒定速率持续回血仍可缓慢作弊——
+            # 限幅只挡「一次性跳变」，彻底防作弊需主机侧独立结算回血来源。
+            max_heal_step = ghost.max_hp * SNAPSHOT_HEAL_JUMP_RATIO
+            if reported_hp > ghost.hp and (reported_hp - ghost.hp) > max_heal_step:
+                reported_hp = ghost.hp + max_heal_step
+            ghost.hp = reported_hp
             # 阶段5 祝福：套用客户端上报的「含祝福有效属性」——主机裁决该玩家承伤时
             # 走 ghost.take_damage（读 defense/shield），不同步会让主机按无祝福数值扣血。
             # 全部按绝对值覆盖（不是倍率叠乘），与客户端本地重算结果一致、不会双倍加成。
@@ -643,9 +779,8 @@ class NetworkSyncManager:
             effect = pdef.get("effect", "heal")
             value = pdef.get("value", 0)
             duration = pdef.get("duration", 0)
-            # 校验并扣减该玩家的 run 药水库存：
-            # - 本人（主机）：gs.run_potions；
-            # - 客户端：_players_run_carried[sender_id]["potion"]（主机记录的拾取清单）。
+            # 药水：同时处理 run_carried["potion"] 与 run_potions（本局携带药水两处口径）
+            # 主机本地：gs.run_potions；远程玩家：_players_run_carried[sender_id]["potion"]
             if sender_id == getattr(gs, "net_player_id", None):
                 run_potions = getattr(gs, "run_potions", None) or {}
                 if run_potions.get(item_id, 0) <= 0:
@@ -654,6 +789,12 @@ class NetworkSyncManager:
                 run_potions[item_id] -= 1
                 if run_potions[item_id] <= 0:
                     del run_potions[item_id]
+                carried = self.gv._players_run_carried.setdefault(sender_id, {})
+                pslot = carried.setdefault("potion", {})
+                if pslot.get(item_id, 0) > 0:
+                    pslot[item_id] -= 1
+                    if pslot[item_id] <= 0:
+                        del pslot[item_id]
             else:
                 carried = self.gv._players_run_carried.setdefault(sender_id, {})
                 potion_slot = carried.setdefault("potion", {})
@@ -736,6 +877,20 @@ class NetworkSyncManager:
                     run_potions[item_id] -= 1
                     if run_potions[item_id] <= 0:
                         del run_potions[item_id]
+                # 双账本口径（修复 desync）：本局药水在 run_carried["potion"] 里**另有
+                # 一份同源账本**（联机客户端商队购入药水按 game/map_events 的客户端
+                # 双写保底写这里；主机侧 POTION_USE 也校验 _players_run_carried["potion"]）。
+                # 只扣 run_potions 会让 run_carried["potion"] 残留一瓶已用掉的药水，
+                # 撤离时按权威清单入库 → 凭空多入账一瓶（客户端撤离结算对不上账）。
+                # 故此处与 run_potions 同步扣减；键缺失（该药水不来自 run_carried）时安全跳过。
+                run_carried = getattr(gs, "run_carried", None)
+                if isinstance(run_carried, dict):
+                    carried_potions = run_carried.get("potion")
+                    if isinstance(carried_potions, dict) \
+                            and carried_potions.get(item_id, 0) > 0:
+                        carried_potions[item_id] -= 1
+                        if carried_potions[item_id] <= 0:
+                            del carried_potions[item_id]
             # 浮动文字：按效果显示对应文案
             if heal_amount > 0:
                 floating_texts.add(self.gv.player.center_x, self.gv.player.center_y,
@@ -772,27 +927,47 @@ class NetworkSyncManager:
             return  # 非主机：理论不可达（inbound 仅主机消费），防御性返回
         net_id = payload.get("item_id")
         if not net_id:
-            return  # 非法请求：无掉落物网络 id
+            # 非法请求：无掉落物网络 id（禁静默——回执与日志至少要有一个）
+            print(f"[Host] 玩家 {sender_id} 的拾取请求缺 item_id，已拒绝")
+            return
         # 在主机权威掉落列表中查找目标掉落物
         target = next((d for d in self.gv.drops if d.net_id == net_id), None)
         if target is None:
             # 已不存在：被其他玩家先拾取/已过期/从未生成 → 拒绝
-            gs.net_server.broadcast(MsgType.PICKUP_RESULT, {
+            # 携带该掉落物身份（取自主机拾取成功时的缓存）：客户端被拒后据此精确
+            # 撤销乐观拾取写入的携带槽位（无 drop 时只能退化为整槽回滚）
+            result = {
                 "player_id": sender_id, "item_id": net_id,
                 "accepted": False, "reason": "already_taken",
-            })
+            }
+            taken = self._taken_drop_info.get(net_id)
+            if taken:
+                result["drop"] = dict(taken)
+            gs.net_server.broadcast(MsgType.PICKUP_RESULT, result)
             return
-        # 距离校验：优先用客户端上报的拾取瞬间坐标（与客户端本地 try_pickup 判定口径一致，
-        # 避免幽灵位置 20Hz 快照滞后导致正常范围内的拾取被误判为 too_far）；
-        # 未携带坐标（旧协议/异常）时回退幽灵位置兜底
+        # 距离校验优先用幽灵实测坐标（PLAYER_SNAPSHOT 主机权威）：直接采信上报坐标等于
+        # 「隔空捡物」，客户端可伪造 x/y 在全图任意位置拾取。
+        # 幽灵缺失（异常）→ 限频告警，并优先用本次上报坐标兜底判定；上报坐标也缺失时
+        # 才退到出生点（懒创建幽灵的初始位置），而不是 (0,0)（地图左上角会误判成「很近」）。
         req_x, req_y = payload.get("x"), payload.get("y")
-        if req_x is not None and req_y is not None:
-            dist = math.hypot(req_x - target.center_x,
-                              req_y - target.center_y)
-        else:
+        ghost = self.gv.remote_players.get(sender_id)
+        if ghost is None:
             ghost = self._ensure_ghost(sender_id)
-            dist = math.hypot(ghost.center_x - target.center_x,
-                              ghost.center_y - target.center_y)
+            warn_key = ("ghost_missing", "pickup", sender_id)
+            if warn_key not in self._warned_keys:
+                self._warned_keys.add(warn_key)
+                if req_x is not None and req_y is not None:
+                    print(f"[Host] 玩家 {sender_id} 拾取时幽灵缺失，"
+                          f"已按上报坐标 ({float(req_x)},{float(req_y)}) 兜底（限频告警一次）")
+                    check_x, check_y = float(req_x), float(req_y)
+                else:
+                    print(f"[Host] 玩家 {sender_id} 拾取时幽灵缺失且无上报坐标，"
+                          f"已按出生点 ({ghost.center_x},{ghost.center_y}) 兜底（限频告警一次）")
+                    check_x, check_y = ghost.center_x, ghost.center_y
+        else:
+            # 幽灵在位：距离判据吃实测坐标，客户端上报的 x/y 仅用于日志/告警，不参与判定
+            check_x, check_y = ghost.center_x, ghost.center_y
+        dist = math.hypot(check_x - target.center_x, check_y - target.center_y)
         if dist >= DROP_PICKUP_RADIUS:
             # 拒绝：物品仍在主机掉落列表，广播掉落物详情供客户端恢复视觉（乐观拾取回滚）
             gs.net_server.broadcast(MsgType.PICKUP_RESULT, {
@@ -808,10 +983,39 @@ class NetworkSyncManager:
         # 先到先得：从主机掉落列表移除（后续请求必失败）并记录该玩家携带物
         self.gv.drops.remove(target)
         self._record_player_pickup(sender_id, target)
+        # 缓存该掉落物身份（供后续 already_taken 拒绝时下发 drop，客户端精确回滚）
+        self._remember_taken_drop(target)
+        # 阶段6.2 任务 harvest：远程玩家拾取资源按拾取者归属补计数
+        #（主机唯一计数端；本人本地拾取走 game_view 的 solo 路径，不在此重复计）
+        if sender_id != getattr(gs, "net_player_id", None) \
+                and getattr(target, "item_type", "") == "resource":
+            from game.mission_tracker import on_event as mission_on_event
+            mission_on_event(self.gv, "harvest", 1, sender_id)
         gs.net_server.broadcast(MsgType.PICKUP_RESULT, {
             "player_id": sender_id, "item_id": net_id,
             "accepted": True, "reason": None,
         })
+
+    def _remember_taken_drop(self, drop) -> None:
+        """缓存已发放掉落物的身份（net_id → 物品描述），供 already_taken 拒绝时下发
+
+        背景：客户端乐观拾取（try_pickup 立即写 run_carried/run_potions），若主机拒绝
+        （已被他人先拿），客户端需知道「被拒的是哪个物品/槽位」才能精确回滚。主机侧
+        该掉落物已从 drops 移除，只能靠这份有界缓存还原身份。
+        """
+        net_id = getattr(drop, "net_id", None)
+        if net_id is None:
+            return
+        # 有界缓存：只保留最近若干条，按插入顺序淘汰最旧（防长局内存无上限增长）
+        if len(self._taken_drop_info) >= 64 and net_id not in self._taken_drop_info:
+            oldest = next(iter(self._taken_drop_info))
+            self._taken_drop_info.pop(oldest, None)
+        self._taken_drop_info[net_id] = {
+            "item_type": getattr(drop, "item_type", ""),
+            "item_id": getattr(drop, "item_id", ""),
+            "quantity": getattr(drop, "quantity", 1),
+            "level": getattr(drop, "level", 1),
+        }
 
     def _handle_evac_request(self, sender_id: int, payload: dict) -> None:
         """主机处理客户端撤离请求（B12）：下发主机权威携带物清单，广播 EVAC_RESULT
@@ -820,12 +1024,53 @@ class NetworkSyncManager:
           GameState.run_carried 一致，包含 tuple 键的装备类条目）；
         - 广播 EVAC_RESULT 含 "player_id" + "run_carried"，各端（含请求客户端）据此
           调用 commit_run_to_warehouse 写各自本地库（每端写自己的库）；
+        - 协议可选键 carried：客户端上报自身实际携带清单，与主机权威清单按
+          主机优先合并（仅补入主机未记到的条目），缺失时纯用主机记录；
         - run_carried 的 tuple 键先经 _serialize_evac_carried 转为 "id|level" 字符串
-          （json 序列化安全），客户端 _apply_evac_result 内 _deserialize_evac_carried 还原。
+          （json 序列化安全），客户端 _apply_evac_result 内 _deserialize_evac_carried 还原；
+        - 受理前的三重主机权威校验（防伪造撤离/凭空结算）：请求方幽灵仍在场且存活 →
+          与撤离点距离 ≤ EVAC_INTERACT_RANGE → 撤离点存在且状态允许撤离（secured）。
+          任一不满足即回 EVAC_RESULT{success:False, reason} 单播拒绝并记中文日志，
+          不计任务进度、不标记已撤离（客户端据此保持局内状态可重试）。
         """
         gs = self.gv.window.game_state
         if gs.net_server is None:
             return  # 非主机：理论不可达（inbound 仅主机消费），防御性返回
+        # ── 三重主机权威校验（拒绝时必须回执 + 记日志，禁静默丢弃）──
+        # ① 请求方幽灵缺失或已阵亡/已撤离：HOST 本地玩家（sender_id == net_player_id）
+        #    用 self.player 判活，其余用幽灵（PLAYER_SNAPSHOT 主机权威坐标）。
+        #    缺幽灵时按 _ensure_ghost 兜底出生点并在 is_alive 判据上直接判否——
+        #    「拿不出一个活着的实体」即不可受理，避免凭空结算一笔撤离。
+        my_id = getattr(gs, "net_player_id", None)
+        if my_id is not None and sender_id == my_id:
+            actor = self.gv.player
+        else:
+            actor = self.gv.remote_players.get(sender_id)
+        if actor is None:
+            self._reject_evac_request(sender_id, "ghost_not_found", "请求方幽灵不在位")
+            return
+        if not getattr(actor, "alive", False):
+            self._reject_evac_request(sender_id, "ghost_not_alive", "请求方已阵亡/不在场")
+            return
+        # ② 距离校验一律用幽灵实测坐标（禁采信上报坐标，客户端可伪造 x/y 隔空撤离）。
+        #    判定目标 = 主撤离点（阶段2 防守式撤离的权威坐标）。
+        point = getattr(self.gv, "evac_point", None)
+        if point is None:
+            self._reject_evac_request(sender_id, "no_evac_point", "撤离点尚未建立")
+            return
+        dist = math.hypot(actor.center_x - point.x, actor.center_y - point.y)
+        if dist > EVAC_INTERACT_RANGE:
+            self._reject_evac_request(
+                sender_id, "too_far",
+                f"距离撤离点 {dist:.0f}px > {EVAC_INTERACT_RANGE:.0f}px")
+            return
+        # ③ 撤离点状态必须允许读条撤离：secured（已守住）才可发起撤离结算。
+        #    defending/dormant/destroyed 一律拒绝——否则客户端可提前结算带跑战利品。
+        if getattr(point, "state", "") != "secured":
+            self._reject_evac_request(
+                sender_id, "evac_not_secured",
+                f"撤离点状态 {getattr(point, 'state', '?')} 不允许撤离")
+            return
         # 阶段6.2 防双计闸门：同一玩家本局只结算一次撤离。客户端侧有 _evac_request_sent
         # 单次标志，但重复帧/异常重发仍可能二次到达主机——若不在此拦一道，evac 进度会
         # 被重复计数（EVAC_RESULT 清单也会重复广播）。口径对齐 _handle_player_abandon
@@ -838,6 +1083,21 @@ class NetworkSyncManager:
         from game.mission_tracker import on_event as mission_on_event
         mission_on_event(self.gv, "evac", 1, sender_id)
         carried = self.gv._players_run_carried.get(sender_id, {})
+        # 协议可选键 carried：客户端上报自身实际携带清单（拾取乐观更新/事件倍率缩放
+        # 等只在客户端侧体现的部分）。反序列化（"id|level" 字符串 → tuple 键）后交
+        # _merge_authoritative：主机账本权威优先，客户端载荷**仅用于打对账日志**
+        # （不采信任何客户端独有键/条目，防凭空上报资源/武器骗结算）。
+        # 传 player_id=sender_id 供对账日志标注玩家（不传则日志显示「未知」）。
+        client_carried = self.gv._deserialize_evac_carried(payload.get("carried") or {})
+        if client_carried:
+            merged = _merge_authoritative(carried, client_carried, player_id=sender_id)
+            if merged != carried:
+                warn_key = ("evac_carried_diff", sender_id)
+                if warn_key not in self._warned_keys:
+                    self._warned_keys.add(warn_key)
+                    print(f"[Host] 玩家 {sender_id} 上报携带清单与主机账本不一致，"
+                          f"已按主机账本为准结算（明细见下方[撤离对账]日志）")
+            carried = merged
         gs.net_server.broadcast(MsgType.EVAC_RESULT, {
             "player_id": sender_id,
             "run_carried": self.gv._serialize_evac_carried(carried),
@@ -851,6 +1111,186 @@ class NetworkSyncManager:
             ghost.hp = 0
             ghost.alive = False
         print(f"[GameView] 主机响应玩家 {sender_id} 撤离请求：广播 EVAC_RESULT 结算清单")
+
+    def _reject_evac_request(self, sender_id: int, reason: str, detail: str) -> None:
+        """主机拒绝客户端撤离请求：单播 EVAC_RESULT{success:False} + 中文日志
+
+        为什么必须有回执（net 层铁律：禁静默忽略）：EVAC_REQUEST 此前只有请求没有应答，
+        客户端无法区分「被主机拒绝」与「请求在链路上丢了」，只能空等或按本地状态瞎猜
+        是否已结算。回执 success=False 让客户端 _apply_evac_result 走拒绝分支：不入库、
+        不清装、不进观战，玩家仍留在局内可重试。
+
+        载荷在既有 EVAC_RESULT schema（player_id/run_carried/stars）之外**不新增**字段
+        以外的消息类型：success/reason 属拒绝型 ACK 的附加说明（与 INTERACTION_RESULT /
+        PLAYER_ABANDON_RESULT 同一模式），net/protocol.py 本任务不改。
+        """
+        gs = self.gv.window.game_state
+        print(f"[Host] 拒绝玩家 {sender_id} 的撤离请求：{detail}（reason={reason}）")
+        if gs.net_server is None:
+            return  # 防御性：主机无服务端连接时无从回执（已记日志）
+        gs.net_server.send_to(sender_id, MsgType.EVAC_RESULT, {
+            "player_id": sender_id,
+            "success": False,
+            "reason": detail,
+        })
+
+    # ── 商队购买：客户端 CARRIAGE_BUY 请求-回执（主机权威记账）─────────────
+    def _carriage_unit_price(self, kind: str, item_id: str) -> int | None:
+        """取商队某货品的**单价**（账号金币），未知货品返回 None
+
+        价格与可购范围一律查既有定义，禁在协议层硬编码（数值调整只改 config/entities）：
+        - potion  → config.EVENT_CARAVAN_PRICES（键须是 entities.equipment_defs.POTIONS
+          的 item_id，防客户端拿资源/武器 id 冒充药水走低单价通道）；
+        - weapon  → entities.weapon_defs.ALL_WEAPONS[item_id].price（price<=0 表示非卖品，
+          与 game/map_events.caravan_stock 的可购过滤同口径）；
+        - artifact→ config.EVENT_CARAVAN_ARTIFACT_PRICE（神器 def price=0），
+          且 item_id 必须在 config.EVENT_CARAVAN_ARTIFACT_POOL 内（排除锻造坊专属配方
+          codex_monster_blade，与单机侧货单池一致）。
+        """
+        from entities.equipment_defs import POTIONS
+        from entities.weapon_defs import ALL_WEAPONS
+        if kind == "potion":
+            if item_id not in POTIONS or item_id not in EVENT_CARAVAN_PRICES:
+                return None
+            return int(EVENT_CARAVAN_PRICES[item_id])
+        if kind == "weapon":
+            wdef = ALL_WEAPONS.get(item_id)
+            if not wdef or wdef.get("artifact"):
+                return None
+            price = int(wdef.get("price", 0) or 0)
+            return price if price > 0 else None  # 非卖品：单机货单同样不入池
+        if kind == "artifact":
+            if item_id not in EVENT_CARAVAN_ARTIFACT_POOL:
+                return None
+            return int(EVENT_CARAVAN_ARTIFACT_PRICE)
+        return None  # 未知 kind
+
+    def _carriage_ledger(self, sender_id: int) -> dict:
+        """取（并按需惰性初始化）某玩家本局商队已购计数镜像
+
+        换局重置口径：地图种子变化即视为新一局，整份镜像清零。同一 GameView 实例会
+        跨局复用（setup() 重跑），本任务不改 game_view.py，故用 GameState 的
+        current_map_seed 做惰性判局，避免上一局的限购额度泄漏到下一局。
+        """
+        gs = self.gv.window.game_state
+        seed = getattr(gs, "current_map_seed", None)
+        if self._carriage_bought_seed != seed:
+            self._carriage_bought.clear()
+            self._carriage_bought_seed = seed
+        return self._carriage_bought.setdefault(sender_id, {})
+
+    def _reject_carriage_buy(self, sender_id: int, payload: dict,
+                             reason: str, detail: str) -> None:
+        """主机拒绝商队购买：单播 CARRIAGE_BUY_RESULT{ok:False} + 中文日志（禁静默）"""
+        gs = self.gv.window.game_state
+        print(f"[Host] 拒绝玩家 {sender_id} 的商队购买：{detail}"
+              f"（item={payload.get('item_id')!r} kind={payload.get('kind')!r} "
+              f"reason={reason}）")
+        if gs.net_server is None:
+            return  # 防御性：无服务端连接时无从回执（已记日志）
+        gs.net_server.send_to(sender_id, MsgType.CARRIAGE_BUY_RESULT, {
+            "player_id": sender_id,
+            "ok": False,
+            "reason": detail,
+            "kind": str(payload.get("kind") or ""),
+            "item_id": str(payload.get("item_id") or ""),
+            "qty": int(payload.get("qty", 0) or 0),
+        })
+
+    def _handle_carriage_buy(self, sender_id: int, payload: dict) -> None:
+        """主机裁决客户端 CARRIAGE_BUY：校验 → 写权威账本 → 单播 CARRIAGE_BUY_RESULT
+
+        主机权威铁律：联机客户端的商队购买**不走本地结算**，一律请求-回执由主机记账。
+        原因：客户端本地购买写入的 run_carried 从不上报（EVAC_REQUEST 只带 carried 快照，
+        而主机账本才是结算唯一权威），本地购买既进不了主机账本 → 撤离丢失，
+        又能让客户端凭空上报骗结算（旧 _merge_authoritative 漏洞的根因之一）。
+
+        校验链（任一不满足即单播拒绝，**不扣任何账**）：
+        ① 载荷合法：kind ∈ {potion, weapon, artifact}、item_id 非空、qty ≥ 1；
+        ② 货品可购且可定价（_carriage_unit_price 能查到单价，武器等级 ≥ 1）；
+        ③ 报文金币自洽：gold_before - gold_after == 单价 × qty，且 gold_after ≥ 0
+           （防客户端随手报一个「恰好够钱」的假差额空买）；
+        ④ 本局限购：按 item_id 计已购数 + 本次 qty 不超 config.EVENT_CARAVAN_LIMITS[kind]。
+
+        入账口径与 game/map_events._caravan_add_to_carried / _players_run_carried 完全一致：
+        药水 → "potion"[item_id]（item_id 键）；武器/神器 → "weapon"[(item_id, level)]（元组键）。
+        账号金币**不在主机扣**：各端账号金币由各自 SQLite 持有，主机无从也不应替客户端扣款
+        （主机只在自己端结算时用 db.spend_gold）；这里只保证「货一定进主机账本」。
+        """
+        gs = self.gv.window.game_state
+        if gs.net_server is None or gs.net_mode != "host":
+            return  # 非主机：理论不可达（inbound 仅主机消费），防御性返回
+        # 身份收口：购买者一律取连接 sender_id，禁信任 payload.player_id
+        # （否则可伪造成他人名义购买，白嫖他人限购额度）
+        kind = str(payload.get("kind") or "")
+        item_id = str(payload.get("item_id") or "")
+        qty = int(payload.get("qty", 0) or 0)
+        level = int(payload.get("level", 0) or 0)
+        # ① 载荷合法性
+        if kind not in ("potion", "weapon", "artifact"):
+            self._reject_carriage_buy(sender_id, payload, "bad_kind", "购买类型非法")
+            return
+        if not item_id:
+            self._reject_carriage_buy(sender_id, payload, "empty_item", "缺少物品 id")
+            return
+        if qty <= 0:
+            self._reject_carriage_buy(sender_id, payload, "bad_qty", "购买数量非法")
+            return
+        # ② 货品可购且可定价（价格/可购范围查 config + entities，禁硬编码）
+        unit_price = self._carriage_unit_price(kind, item_id)
+        if unit_price is None:
+            self._reject_carriage_buy(sender_id, payload, "unknown_item",
+                                      "货品不存在或不可购买")
+            return
+        if kind != "potion" and level < 1:
+            self._reject_carriage_buy(sender_id, payload, "bad_level", "武器/神器等级非法")
+            return
+        # ③ 报文金币自洽（各端金币是各端自己的账，主机只能校验「差額算得对不对」）
+        gold_before = payload.get("gold_before")
+        gold_after = payload.get("gold_after")
+        try:
+            expect_cost = unit_price * qty
+            diff = float(gold_before) - float(gold_after)
+        except (TypeError, ValueError):
+            self._reject_carriage_buy(sender_id, payload, "bad_gold", "金币字段非法")
+            return
+        if abs(diff - expect_cost) > 0.001 or float(gold_after) < 0:
+            self._reject_carriage_buy(
+                sender_id, payload, "gold_mismatch",
+                f"金币差额 {diff:.0f} 与应扣 {expect_cost} 不符")
+            return
+        # ④ 本局限购（按 item_id 计数，与 config.EVENT_CARAVAN_LIMITS[kind] 同口径）
+        limit = int(EVENT_CARAVAN_LIMITS.get(kind, 1))
+        ledger = self._carriage_ledger(sender_id)
+        already = int(ledger.get(item_id, 0) or 0)
+        if already + qty > limit:
+            self._reject_carriage_buy(
+                sender_id, payload, "purchase_limit",
+                f"本局限购（{kind} 上限 {limit} 件，已购 {already} 件）")
+            return
+        # ── 全部校验通过：写主机权威账本（原地改字典，保 _players_run_carried 引用）──
+        carried = self.gv._players_run_carried.setdefault(sender_id, {})
+        if kind == "potion":
+            slot = carried.setdefault("potion", {})
+            slot[item_id] = int(slot.get(item_id, 0) or 0) + qty
+        else:
+            slot = carried.setdefault("weapon", {})
+            key = (item_id, level)
+            slot[key] = int(slot.get(key, 0) or 0) + qty
+        ledger[item_id] = already + qty
+        gs.net_server.send_to(sender_id, MsgType.CARRIAGE_BUY_RESULT, {
+            "player_id": sender_id,
+            "ok": True,
+            "reason": None,
+            "kind": kind,
+            "item_id": item_id,
+            "qty": qty,
+        })
+        print(f"[Host] 玩家 {sender_id} 商队购入 {kind}/{item_id}×{qty} 成功"
+              f"（扣账 {expect_cost} 账号金币由本端结算），"
+              f"权威携带物={ {k: v for k, v in carried.items()} }")
+
+
 
     def _apply_map_change(self, payload: dict) -> None:
         """客户端应用主机 MAP_CHANGE：运行期地图改动（掉落生成/宝箱/环境物/水井/火箭台）
@@ -1270,6 +1710,74 @@ class NetworkSyncManager:
             "state": {"x": x, "y": y, "resource_type": resource_type}, "extra": {},
         })
 
+    @staticmethod
+    def _pickup_drop_spec(drop_info: dict) -> dict:
+        """把主机下发的掉落物身份翻译成 rollback_run 的 drop 规格 {slot: {key}}
+
+        槽结构契约（与 game/loot.py try_pickup 写入口径一致）：
+        - gold      : int（标量槽，禁进 drop → 另行按数量扣回）
+        - resource  : {item_id: qty}
+        - potion    : {item_id: qty}（同时写 run_potions，故带出 run_potions 槽）
+        - weapon/helmet/armor/backpack: {(item_id, level): qty}（tuple 键仅存内存，
+          json 往返已由 _serialize_evac_carried / _deserialize_evac_carried 处理过）
+        """
+        if not drop_info:
+            return {}
+        item_type = drop_info.get("item_type", "")
+        item_id = drop_info.get("item_id", "")
+        qty = int(drop_info.get("quantity", 1) or 1)
+        if item_type in ("resource", "potion"):
+            spec = {item_type: {item_id: qty}}
+            if item_type == "potion":
+                # 药水同时写 run_carried["potion"] 与 run_potions，两处都要撤销
+                spec["run_potions"] = {item_id: qty}
+            return spec
+        if item_type in ("weapon", "helmet", "armor", "backpack"):
+            level = int(drop_info.get("level", 1) or 1)
+            return {item_type: {(item_id, level): qty}}
+        return {}  # gold（标量槽）与未知类型：不走 drop
+
+    def _rollback_optimistic_pickup(self, snap, drop_info: dict) -> None:
+        """被主机拒绝的乐观拾取做**增量回滚**（保留回滚窗口期的合法并发写入）
+
+        旧实现是 `gs.run_carried = snap` 整体重绑，会把窗口期的合法写入一起吞掉
+        （典型：本地商队/市场购买已扣本端账号金币、只写本端 run_carried、不广播）。
+        这里改走 game.evac.rollback_run：基线键还原 + drop 精确剔除被拒物品，
+        原地改字典（保持 HUD / 背包 / BuildSystem 持有的引用）。
+        """
+        gs = self.gv.window.game_state
+        if snap is None:
+            return  # 无快照（理论上不会发生）：保持静默，不做猜测性改动
+        baseline, potions_baseline = snap if isinstance(snap, tuple) else (snap, None)
+        baseline = baseline or {}  # 基线可能为空/None：后续用 `"gold" not in baseline` 判据
+        spec = self._pickup_drop_spec(drop_info)
+        if not spec and drop_info.get("item_type") == "gold":
+            # gold 是标量槽：rollback_run 的 baseline merge 只能恢复「基线里已存在」的键。
+            # 分两种情况，禁无脑相减（否则基线已含 gold 时会二次扣减、凭空少钱）：
+            #   a) 基线含 gold → merge 已把本次乐观收入抹掉，取基线值即完成回滚；
+            #   b) 基线不含 gold（本次是新获得的金币槽）→ merge 无从撤销，按数量精确扣回。
+            rollback_run(gs.run_carried, baseline=baseline,
+                         run_potions=gs.run_potions,
+                         potions_baseline=potions_baseline)
+            if "gold" not in baseline:
+                current_gold = gs.run_carried.get("gold")
+                if isinstance(current_gold, (int, float)):
+                    gs.run_carried["gold"] = max(
+                        0, current_gold - int(drop_info.get("quantity", 0) or 0))
+            return
+        if not spec:
+            # 主机未下发物品身份（旧协议 / 异常）：无法精确剔除，退化为整槽基线还原
+            # （= 旧行为；此路径不静默，调用方已限频告警）
+            if isinstance(snap, tuple):
+                gs.run_carried, gs.run_potions = snap
+            else:
+                gs.run_carried = snap
+            return
+        rollback_run(gs.run_carried, baseline=baseline,
+                     run_potions=gs.run_potions,
+                     potions_baseline=potions_baseline,
+                     drop=spec)
+
     def _apply_pickup_result(self, payload: dict) -> None:
         """客户端应用主机 PICKUP_RESULT：成功保持乐观状态 / 被拒回滚 run_carried
 
@@ -1289,11 +1797,8 @@ class NetworkSyncManager:
         if not accepted and my_id is not None and player_id == my_id:
             if self.gv._pickup_snapshot is not None:
                 snap = self.gv._pickup_snapshot
-                # 兼容旧版单值快照（仅 run_carried）与新版 (carried, potions) 元组快照
-                if isinstance(snap, tuple):
-                    gs.run_carried, gs.run_potions = snap
-                else:
-                    gs.run_carried = snap
+                drop_info = payload.get("drop") or {}
+                self._rollback_optimistic_pickup(snap, drop_info)
             if reason == "too_far":
                 # 物品仍在主机上：重建本地视觉掉落物（带主机权威 net_id/位置）
                 self.gv._remove_drop_visual(net_id)
@@ -1335,9 +1840,22 @@ class NetworkSyncManager:
         my_id = getattr(gs, "net_player_id", None)
         if my_id is not None and player_id != my_id:
             return  # 他人撤离：本端无动作（其余玩家继续游戏）
+        # 拒绝型回执（success=False）：主机校验未通过，**不入库、不清装、不进观战**，
+        # 玩家仍留在局内可重试。必须在反序列化/入库之前拦，否则空 run_carried 会被
+        # commit_run_to_warehouse 当成「本局零战利品」清空账本（凭空丢货 desync）。
+        if payload.get("success") is False:
+            reason = payload.get("reason") or "撤离请求未被主机受理"
+            print(f"[Client] 撤离请求被主机拒绝：{reason}")
+            floating_texts.add(self.gv.player.center_x, self.gv.player.center_y + 60,
+                               f"撤离失败：{reason}", arcade.color.RED,
+                               life=2.0, font_size=16)
+            return
         # 按主机权威清单还原并入库（tuple 键还原为入参口径）
         run_carried = self.gv._deserialize_evac_carried(payload.get("run_carried") or {})
-        commit_run_to_warehouse(gs.player_id, run_carried)
+        # 仓库有容量上限 → 主机清单也可能装不下；commit_run_to_warehouse 返回未入仓报告
+        # 并自行挂到 game_state（与单机撤离同一通道），此处无需再转发
+        commit_run_to_warehouse(gs.player_id, run_carried,
+                                        client_carried=getattr(gs, "run_carried", None))
         clear_run(gs.run_carried)
         # 客户端本局药水已由主机记录进 EVAC_RESULT 载荷（run_carried 含 potion 键），
         # 本地 run_potions 不再重复入库，直接清空即可
@@ -1464,10 +1982,20 @@ class NetworkSyncManager:
             self.gv._downed_players.pop(player_id, None)
             self.gv._player_status[player_id] = "alive"
 
-    def _apply_spectate_leave(self, payload: dict) -> None:
-        """主机收到 SPECTATE_LEAVE：玩家主动退出观战 → 视为真死，清装备"""
+    def _apply_spectate_leave(self, payload: dict, sender_id=None) -> None:
+        """主机收到 SPECTATE_LEAVE：玩家主动退出观战 → 视为真死，清装备
+
+        身份收口：sender_id 传入时（连接侧已知来源）一律以它为准，禁采信
+        payload.player_id —— 否则客户端可伪造他人 id 把别人标记 dead，
+        也会伪造 player_id=0 让主机自己清装备进观战。
+        sender_id 为 None 时（历史调用方未提供来源）才回退 payload.player_id。
+        """
         gs = self.gv.window.game_state
-        player_id = payload.get("player_id")
+        # 身份收口：优先用连接 sender_id（禁信任 payload.player_id）
+        player_id = sender_id if sender_id is not None else payload.get("player_id")
+        if player_id is None:
+            print("[Host] SPECTATE_LEAVE 缺少玩家身份，忽略本次请求")
+            return
         if player_id == 0:
             # 主机自己退出观战：清装备 + 观战
             self.gv._clear_run_equipment(gs)
@@ -1482,29 +2010,145 @@ class NetworkSyncManager:
                 "killer_id": None,
             })
 
+    def handle_evac_point_result(self, payload: dict) -> None:
+        """客户端应用主机 EVAC_POINT_RESULT：撤离点激活/修复的权威回执
+
+        双扣规避（核心风险点）——依据 game_view.py 实测：
+        - views/game_view.py:1460-1489 `_client_request_evac_point`：客户端发
+          EVAC_POINT_ACTION 时，1481 消费按键后直接 send，不调用 `_pay_resource_cost`，
+          **未对 gs.run_carried 做任何扣减**（单机路径 1446 才调用 `_pay_resource_cost` 扣料）。
+        - 因此客户端**未乐观扣料**。本方法在 ok=True 时**负责按主机权威 action 扣对应资源**，
+          成本从 config.evac_activate_cost(theme) 读取（禁硬编码），避免双扣。
+        - player_id 校验：只处理发给自己的回执（他人回执本端无动作）。
+        - action 非法：显式告警并 return（net 层铁律：禁静默忽略）。
+        - ok=False：仅提示，不改任何本地账本。
+        """
+        gs = self.gv.window.game_state
+        if not isinstance(payload, dict):
+            return
+        player_id = payload.get("player_id")
+        my_id = getattr(gs, "net_player_id", None)
+        if my_id is not None and player_id != my_id:
+            return  # 他人的回执：本端无动作
+        action = str(payload.get("action") or "")
+        known_actions = ("activate", "repair")
+        if action not in known_actions:
+            print(f"[Client] EVAC_POINT_RESULT action 非法：{action!r} payload={payload!r}")
+            return  # 禁静默忽略未知载荷
+        ok = bool(payload.get("ok"))
+        reason = payload.get("reason") or "撤离点操作被拒绝"
+        if not ok:
+            print(f"[Client] 撤离点操作被主机拒绝：action={action!r} reason={reason}")
+            floating_texts.add(self.gv.player.center_x, self.gv.player.center_y + 60,
+                               f"操作失败：{reason}", arcade.color.RED,
+                               life=2.0, font_size=16)
+            return
+        # ok=True：客户端未乐观扣料（依据 game_view.py:1460-1489），按主机权威 action 扣资源
+        # 扣料走唯一口径 GameView._pay_resource_cost（资源嵌套在 carried["resource"] 子字典，
+        # 直接写顶层键会漏扣/错位——这是本次修复的 bug 根因）
+        theme = None
+        try:
+            if getattr(self, "gv", None) and getattr(self.gv, "map_data", None):
+                theme = self.gv.map_data.get("theme")
+        except Exception:
+            theme = None
+        if not theme:
+            print("[Client] EVAC_POINT_RESULT：无法获取地图主题，放弃扣料并返回")
+            floating_texts.add(self.gv.player.center_x, self.gv.player.center_y + 60,
+                               "操作失败：地图主题未知", arcade.color.RED,
+                               life=2.0, font_size=16)
+            return
+        try:
+            from config import evac_activate_cost
+            cost = evac_activate_cost(theme)
+        except Exception as exc:
+            print(f"[Client] EVAC_POINT_RESULT：evac_activate_cost 导入/调用失败：{exc}")
+            floating_texts.add(self.gv.player.center_x, self.gv.player.center_y + 60,
+                               "操作失败：配置读取失败", arcade.color.RED,
+                               life=2.0, font_size=16)
+            return
+        # 复用唯一口径 _pay_resource_cost（校验+扣减，资源结构 carried["resource"]）
+        paid = False
+        try:
+            paid = self.gv._pay_resource_cost(gs, cost)
+        except Exception as exc:
+            print(f"[Client] EVAC_POINT_RESULT：_pay_resource_cost 调用失败：{exc}")
+            paid = False
+        if not paid:
+            print(f"[Client] EVAC_POINT_RESULT：资源扣减失败（theme={theme!r} cost={cost}）")
+            floating_texts.add(self.gv.player.center_x, self.gv.player.center_y + 60,
+                               "操作失败：资源不足或账本异常", arcade.color.RED,
+                               life=2.0, font_size=16)
+            return
+        # 成功提示（按 action 区分）
+        if action == "activate":
+            tip = "撤离点已激活"
+        else:
+            tip = "撤离点已修复"
+        floating_texts.add(self.gv.player.center_x, self.gv.player.center_y + 60,
+                           tip, (140, 240, 180),
+                           life=2.0, font_size=16)
+
+    def _send_rescue_reject(self, rescuer_id: int, target_id) -> None:
+        """主机单播救援拒绝回执 RESCUE_RESULT{success:False}（禁静默拒绝）
+
+        与距离过远分支（_handle_rescue_request 内已内联同构回执）口径一致：
+        救援请求此前在「被救者非倒地 / 救援者非存活 / 倒地位置账本缺失」三条路径上
+        直接 return，请求方永远等不到任何回执——分不清是被拒还是请求丢了，
+        读条会卡在原地。此处补齐拒绝型 ACK，hp=0 表示未复活。
+        """
+        gs = self.gv.window.game_state
+        if gs.net_server is None:
+            return  # 防御性：无服务端连接时无从回执（调用方已记日志）
+        gs.net_server.send_to(rescuer_id, MsgType.RESCUE_RESULT, {
+            "target_id": target_id, "rescuer_id": rescuer_id,
+            "success": False, "hp": 0,
+        })
+
     def _handle_rescue_request(self, sender_id: int, payload: dict) -> None:
         """主机处理 RESCUE_REQUEST：裁决距离并执行救援"""
         gs = self.gv.window.game_state
-        rescuer_id = payload.get("rescuer_id")
+        # 身份收口：救援者一律取连接 sender_id，禁信任 payload.rescuer_id
+        # （否则可伪造成他人名义发起救援，白嫖他人倒地位置的救援权）
+        rescuer_id = sender_id
         target_id = payload.get("target_id")
-        # 校验：被救者必须处于倒地状态
+        # 校验：被救者必须处于倒地状态（禁静默——目标不是倒地态时对方永远等不到回执）
         if self.gv._player_status.get(target_id) != "downed":
+            reason = ("被救者不存在" if target_id is None
+                      else f"被救者 {target_id} 当前状态 "
+                           f"{self.gv._player_status.get(target_id)!r} 非倒地")
+            print(f"[Host] 拒绝玩家 {rescuer_id} 的救援请求：{reason}")
+            self._send_rescue_reject(rescuer_id, target_id)
             return
-        # 校验：救援者必须存活
+        # 校验：救援者必须存活（自身已阵亡/撤离/断线者不得发起救援）
         if self.gv._player_status.get(rescuer_id) != "alive":
+            reason = (f"救援者 {rescuer_id} 当前状态 "
+                      f"{self.gv._player_status.get(rescuer_id)!r} 非存活")
+            print(f"[Host] 拒绝玩家 {rescuer_id} 的救援请求：{reason}")
+            self._send_rescue_reject(rescuer_id, target_id)
             return
         # 获取被救者位置
         downed_info = self.gv._downed_players.get(target_id)
         if downed_info is None:
+            print(f"[Host] 拒绝玩家 {rescuer_id} 的救援请求："
+                  f"被救者 {target_id} 无倒地位置记录（状态与位置账本不一致）")
+            self._send_rescue_reject(rescuer_id, target_id)
             return
         target_x, target_y = downed_info["x"], downed_info["y"]
         # 获取救援者位置
         if rescuer_id == 0:
             rescuer_x, rescuer_y = self.gv.player.center_x, self.gv.player.center_y
         else:
+            # 救援者位置一律取幽灵实测坐标（与交互/拾取同口径，禁采信上报坐标）：
+            # 幽灵缺失时兜底懒创建（出生点为主机权威坐标，客户端无从伪造）并限频告警
             ghost = self.gv.remote_players.get(rescuer_id)
             if ghost is None:
-                return
+                ghost = self._ensure_ghost(rescuer_id)
+                warn_key = ("ghost_missing", "rescue", rescuer_id)
+                if warn_key not in self._warned_keys:
+                    self._warned_keys.add(warn_key)
+                    print(f"[Host] 玩家 {rescuer_id} 救援时幽灵缺失，"
+                          f"已按出生点 ({ghost.center_x},{ghost.center_y}) 兜底（限频告警一次）")
             rescuer_x, rescuer_y = ghost.center_x, ghost.center_y
         # 距离校验
         dist = math.hypot(rescuer_x - target_x, rescuer_y - target_y)
@@ -1538,32 +2182,48 @@ class NetworkSyncManager:
 
         安全校验：验证请求者位置与交互物距离，防止作弊。
         """
-        if self.gv.window.game_state.net_mode != "host":
+        gs = self.gv.window.game_state
+        if gs.net_mode != "host":
             return
 
-        player_id = payload.get("player_id", sender_id)
+        player_id = sender_id
         interaction_type = payload.get("interaction_type", "")
         request_x = float(payload.get("x", 0))
         request_y = float(payload.get("y", 0))
 
         print(f"[Host] 收到交互请求: player={player_id}, type={interaction_type}, pos=({request_x},{request_y})")
 
-        # 获取请求者幽灵（用于距离校验）
+        # 距离校验一律用幽灵实测坐标（PLAYER_SNAPSHOT 主机权威）：直接采信上报坐标
+        # 会让客户端隔空开箱/回血/启火箭台。幽灵缺失时优先用本次上报坐标兜底
+        # （拿不到上报坐标才退到出生点）并限频告警。
         ghost = self.gv.remote_players.get(player_id)
         if ghost is None:
-            print(f"[Host] 幽灵不存在: player={player_id}")
-            return  # 幽灵不存在，忽略
-
-        # 用客户端上报的位置校验距离（与 ATTACK_EVENT 同口径）
+            ghost = self._ensure_ghost(player_id)
+            warn_key = ("ghost_missing", "interaction", player_id)
+            if warn_key not in self._warned_keys:
+                self._warned_keys.add(warn_key)
+                print(f"[Host] 玩家 {player_id} 交互时幽灵缺失，"
+                      f"已按上报坐标 ({request_x},{request_y}) 兜底（限频告警一次）")
+            # 上报坐标缺失（None）才退到出生点：ghost 是刚懒创建的，坐标即出生点
+            if payload.get("x") is None or payload.get("y") is None:
+                request_x, request_y = ghost.center_x, ghost.center_y
+        check_x, check_y = ghost.center_x, ghost.center_y
+        # 校验完成后才用上报坐标刷新幽灵位置（交互处理器沿用请求点语义）
         ghost.center_x = request_x
         ghost.center_y = request_y
+
+        # handled 标记：是否真的受理并执行了交互。
+        # 此前各分支在「范围内无目标」（宝箱全已开/水井不存在/发射台超距/发射台状态不允许）
+        # 时直接落空 return，**无回执无日志**——客户端分不清「被主机拒绝」与「请求丢了」，
+        # 按 E 只会毫无反应。这里统一收口：未受理即显式记中文日志。
+        handled = False
 
         if interaction_type == "chest":
             # 找到最近的未开启宝箱
             for i, chest in enumerate(self.gv.chests):
                 if chest.opened:
                     continue
-                dist = math.hypot(chest.center_x - request_x, chest.center_y - request_y)
+                dist = math.hypot(chest.center_x - check_x, chest.center_y - check_y)
                 if dist < CHEST_WELL_INTERACT_RANGE:
                     # 执行开箱
                     from game.entity_callbacks import spawn_chest_loot, _award_exp
@@ -1575,12 +2235,13 @@ class NetworkSyncManager:
                     from game.mission_tracker import on_event as mission_on_event
                     mission_on_event(self.gv, "chest", 1, player_id)
                     print(f"[GameView] 客户端 {player_id} 开启宝箱 {i}")
+                    handled = True
                     break
 
         elif interaction_type == "well":
             well = self.gv.map_data.get("water_well")
             if well:
-                dist = math.hypot(well[0] - request_x, well[1] - request_y)
+                dist = math.hypot(well[0] - check_x, well[1] - check_y)
                 if dist < CHEST_WELL_INTERACT_RANGE:
                     # 执行水井交互
                     from game.entity_callbacks import handle_well_interaction
@@ -1605,10 +2266,11 @@ class NetworkSyncManager:
                             "effect": "heal", "value": heal_amount, "duration": 0,
                         })
                     print(f"[GameView] 客户端 {player_id} 使用水井，回血 {heal_amount}")
+                    handled = True
 
         elif interaction_type == "rocket_pad":
             for i, pad in enumerate(self.gv.rocket_pads):
-                dist = math.hypot(pad.center_x - request_x, pad.center_y - request_y)
+                dist = math.hypot(pad.center_x - check_x, pad.center_y - check_y)
                 if dist < ROCKET_PAD_INTERACT_RANGE:
                     if pad.state == "idle":
                         # 激活火箭台
@@ -1621,11 +2283,27 @@ class NetworkSyncManager:
                         self.gv.player = old_player
                         self.gv._chest_key_pressed = old_key
                         print(f"[GameView] 客户端 {player_id} 激活火箭台 {i}")
+                        handled = True
                     elif pad.state == "boss_defeated":
                         # 标记可选择状态（7/8键选择）
                         self.gv._rocket_pad_menu = pad
                         print(f"[GameView] 客户端 {player_id} 打开火箭台菜单 {i}")
+                        handled = True
+                    else:
+                        # 范围内但状态不允许（倒计时中/已启动/已摧毁）：显式记日志（禁静默）
+                        print(f"[Host] 玩家 {player_id} 交互火箭台被拒："
+                              f"第 {i} 个发射台当前状态 {pad.state!r} 不可交互")
                     break
+        else:
+            # 未知交互类型：显式告警而非静默忽略（net 层铁律：禁静默丢弃请求）
+            print(f"[Host] 玩家 {player_id} 请求未知交互类型 "
+                  f"interaction_type={interaction_type!r}，已忽略")
+            return
+
+        if not handled:
+            # 范围内无可交互目标：显式记日志（禁静默，让「按 E 没反应」可追因）
+            print(f"[Host] 玩家 {player_id} 的 {interaction_type} 交互未被受理："
+                  f"坐标 ({check_x:.0f},{check_y:.0f}) 范围内无合法目标")
 
     def _handle_player_abandon(self, sender_id: int, payload: dict) -> None:
         """主机处理客户端放弃行动通知：更新 _player_status → 触发全员结束判定
@@ -1637,7 +2315,9 @@ class NetworkSyncManager:
         if gs.net_mode != "host" or gs.net_server is None:
             return
 
-        player_id = payload.get("player_id", sender_id)
+        # 身份收口：放弃者一律取连接 sender_id，禁信任 payload.player_id
+        # （否则可伪造他人 id 把别人标记 dead，提前触发全员结束判定）
+        player_id = sender_id
         reason = payload.get("reason", "放弃行动")
 
         # 更新玩家状态为 dead（与死亡同待遇，触发全员结束判定）
@@ -1882,6 +2562,9 @@ class NetworkSyncManager:
         for net_id in list(self.gv.remote_monsters):
             if net_id not in snapshot_ids:
                 del self.gv.remote_monsters[net_id]
+        # 快照是「目标已存在」的信号 → 重放此前因目标缺失而排队的 DAMAGE_RESULT
+        # （放在删除之后：本快照未出现的怪物已从表里移除，重放时会被正确判为缺失）
+        self._drain_pending_damage_results()
 
     def _apply_projectile_snapshot(self, payload: dict) -> None:
         """应用主机下发的 PROJECTILE_SNAPSHOT：按 proj_id 增/改/删维护 remote_projectiles/remote_lasers
@@ -2001,6 +2684,18 @@ class NetworkSyncManager:
         # 晚期加入客户端据此补建视觉对象（否则看不到他人已建的路障/箭塔）
         buildings = [{"bid": b.bid, "kind": b.kind, "x": b.x, "y": b.y, "hp": b.hp}
                      for b in self._building_list()]
+        # ── 地图元信息：先算一次，原键与别名键共用同一份权威值 ──────────────────
+        # 主题口径：gs.map_theme 是本局地图主题（game_view.setup() 生成地图读的就是它，
+        # lobby_view 建房时由 server.room.theme 写入），**不是** chests 条目里那只
+        # 空投箱自己的 theme（后者只是单箱皮肤，两者同名易混，勿取错）。
+        map_seed = getattr(gs, "current_map_seed", None)
+        map_theme = getattr(gs, "map_theme", "")
+        roster_state = dict(getattr(gs, "net_roster", {}) or {})
+        # 出生点 tuple 不可 json 序列化 → 降为 [x, y]；json 的 object 键一律字符串
+        spawns_state = {str(pid): [float(pos[0]), float(pos[1])]
+                        for pid, pos in (getattr(gs, "net_spawns", {}) or {}).items()
+                        if isinstance(pos, (tuple, list)) and len(pos) >= 2}
+        max_players_state = getattr(gs, "net_max_players", None)
         return {
             "monsters": self._serialize_monsters(),
             "drops": drops,
@@ -2019,6 +2714,26 @@ class NetworkSyncManager:
             # MAP_EVENTS 重算，此处为显式对齐，让两端 event_flags 完全同值）
             "event_flags": dict(getattr(self.gv, "event_flags", {}) or {}),
             "action_time_left": self.gv._action_time_remaining or 0.0,
+            # 地图元信息（补齐项）：种子/主题/花名册/出生点/人数上限
+            # 晚期加入客户端据此对齐地图布局与出生位置，避免按本地默认值跑偏
+            "current_map_seed": map_seed,
+            "map_theme": map_theme,
+            # 名册/出生点均为 {player_id: ...} 映射（见 _ensure_ghost 取值口径）：
+            # 花名册值原样下发；出生点已在上方降为 [x, y] 列表，
+            # 客户端 _apply_full_state 再还原为 tuple 布局。
+            "net_roster": roster_state,
+            "net_spawns": spawns_state,
+            "net_max_players": max_players_state,
+            # 别名键：与 views/lobby_view.py FULL_STATE 消费端字段名对齐
+            # （seed/roster/spawns/max_players/theme），值与上方原键同源。
+            # 起因：两路消费端键名不一致 → 晚加入客户端 seed 缺省回落 1、theme 回落
+            # forest，用本地默认种子重建地图，与主机随机种子不同 ⇒ 全图实体/掉落/撤离点
+            # 全部不同步（P0）。追加别名而非改消费端，对已跑通的老消费端零风险。
+            "seed": map_seed,
+            "theme": map_theme,
+            "roster": dict(roster_state),
+            "spawns": dict(spawns_state),
+            "max_players": max_players_state,
         }
 
     def _apply_full_state(self, payload: dict) -> None:
@@ -2042,6 +2757,30 @@ class NetworkSyncManager:
         if t is not None:
             self.gv._action_time_remaining = t
             self.gv.window.game_state.action_time_remaining = t
+        # 地图元信息（补齐项）：种子/主题/花名册/出生点/人数上限
+        # 缺字段一律保留本地默认（不做 None 覆盖，避免旧主机把客户端清空）
+        gs = self.gv.window.game_state
+        seed = payload.get("current_map_seed")
+        if seed is not None:
+            gs.current_map_seed = seed
+        theme = payload.get("map_theme")
+        if theme:
+            gs.map_theme = theme
+        roster = payload.get("net_roster")
+        if isinstance(roster, dict) and roster:
+            # json 的 object 键一律是字符串 → 按 int 还原 player_id（_ensure_ghost 按 id 取名册）
+            gs.net_roster = {int(k): v for k, v in roster.items() if str(k).lstrip("-").isdigit()}
+        spawns = payload.get("net_spawns")
+        if isinstance(spawns, dict) and spawns:
+            # 主机下发 {player_id: [x, y]} → 还原为 {player_id: (x, y)}（与本地出生点口径一致）
+            gs.net_spawns = {
+                int(k): (float(v[0]), float(v[1]))
+                for k, v in spawns.items()
+                if str(k).lstrip("-").isdigit() and isinstance(v, (list, tuple)) and len(v) >= 2
+            }
+        max_players = payload.get("net_max_players")
+        if max_players:
+            gs.net_max_players = max_players
         # 水井状态：主机已首次开启 → 本地镜像（渲染/提示与主机一致）
         if payload.get("well_opened"):
             self.gv._well_opened = True
@@ -2098,3 +2837,209 @@ class NetworkSyncManager:
         # 保留原始列表供调试/扩展使用（后续渲染直接读本地坐标对象状态）
         self.gv._late_chests = payload.get("chests", [])
         self.gv._late_env = payload.get("env_objects", [])
+
+    # ── 建造请求-应答（阶段1 局内建造的联机接线）────────────────────────────
+    def handle_build_request(self, sender_id: int, payload: dict) -> None:
+        """主机仲裁客户端 BUILD_REQUEST：主机权威 place + 单播 BUILD_RESULT
+
+        - 联机建造铁律：资源扣减与建筑落位只由主机执行（BuildSystem.place 在
+          net_mode=="client" 直接返回 None）；客户端只发请求、看回执；
+        - 判定复用 BuildSystem.can_place（边界/距离/墙体/占用/资源同一口径，不重复实现），
+          但 can_place 读的是 view.player 与 game_state.run_carried——主机本地玩家的
+          坐标与携带物。故请求期间把 view.player 临时换成请求者幽灵、run_carried 临时
+          指向该玩家的权威清单，用 try/finally 保证异常/提前 return 也能复原；
+        - 位置校验用幽灵实测坐标（与交互/拾取同口径）：客户端可改上报坐标伪造建造点，
+          但 can_place 的距离判据吃的是临时绑定的幽灵坐标，故越界建造会被拒。
+        """
+        gs = self.gv.window.game_state
+        if gs.net_mode != "host" or gs.net_server is None:
+            return
+        from entities.build_defs import BUILDS
+        build_system = getattr(self.gv, "build_system", None)
+        if build_system is None:
+            # 无建造系统（教程局/未初始化）：显式拒绝，禁静默
+            gs.net_server.send_to(sender_id, MsgType.BUILD_RESULT, {
+                "build_id": payload.get("build_id"), "ok": False,
+                "bid": None, "reason": "build_unavailable",
+            })
+            return
+        build_id = payload.get("build_id")
+        if build_id not in BUILDS:
+            # 未知建筑类型：显式拒绝并告警（禁静默，跨版本建筑表不同步的防御）
+            print(f"[Host] 玩家 {sender_id} 请求未知建筑 {build_id!r}，已拒绝")
+            gs.net_server.send_to(sender_id, MsgType.BUILD_RESULT, {
+                "build_id": build_id, "ok": False, "bid": None, "reason": "unknown_build",
+            })
+            return
+        ghost = self._ensure_ghost(sender_id)
+        x = float(payload.get("x") or 0.0)
+        y = float(payload.get("y") or 0.0)
+        # 临时绑定请求者幽灵与该玩家的权威携带物，判据与扣减都走主机侧账本
+        real_player = self.gv.player
+        real_carried = gs.run_carried
+        building = None
+        self.gv.player = ghost
+        gs.run_carried = self.gv._players_run_carried.setdefault(sender_id, {})
+        try:
+            ok, reason = build_system.can_place(x, y, build_id)
+            if ok:
+                # 用幽灵实测坐标放置（禁采信上报坐标）：越界/隔空建造在此被 can_place 拒
+                building = build_system.place(ghost.center_x, ghost.center_y, build_id)
+                if building is None:
+                    ok, reason = False, "place_failed"
+        finally:
+            # 复原主机本地玩家与携带物（异常路径也必须复原，否则后续主机本地建造/撤离全错）
+            self.gv.player = real_player
+            gs.run_carried = real_carried
+        bid = building.bid if ok and building is not None else None
+        if ok and building is not None:
+            # 广播 build_place（含 hp，客户端据此还原视觉 + 血条）
+            self.gv._broadcasted_buildings.add(bid)
+            gs.net_server.broadcast(MsgType.MAP_CHANGE, {
+                "obj_id": bid, "change_type": "build_place",
+                "state": {"kind": building.kind, "x": building.x, "y": building.y,
+                          "hp": building.hp},
+                "extra": {},
+            })
+            # 该玩家的权威携带物已被 place 扣减（游戏背包/结算口径均读它），
+            # 故记一笔显式日志便于对账（携带清单无独立消息类型，禁改 net/protocol.py，
+            # 因此不在此发明新消息；客户端携带显示仍以本端为准，撤离时才按主机清单入库）
+            print(f"[Host] 玩家 {sender_id} 建造 {build_id} 成功：bid={bid}，"
+                  f"携带清单={self.gv._players_run_carried.get(sender_id) or {}}")
+        gs.net_server.send_to(sender_id, MsgType.BUILD_RESULT, {
+            "build_id": build_id, "ok": ok, "bid": bid, "reason": reason or None,
+        })
+
+    def apply_build_result(self, payload: dict) -> None:
+        """客户端应用主机 BUILD_RESULT：成功扣本端携带资源 / 失败时提示原因
+
+        - ok=True：建筑已由 MAP_CHANGE build_place 在本地还原，这里不再重复建；
+          但**必须按 entities/build_defs.BUILDS 的 cost 扣本端 run_carried["resource"]**。
+          修复 desync：联机建造资源扣减只发生在主机 _players_run_carried（权威账本），
+          客户端本端账本此前毫发无损 → HUD 资源数与实际不符，且玩家能反复「凭空造塔」
+          （本端看着还有料，实际主机早已扣空）。此处按同一 cost 表镜像扣减；
+        - ok=False：显示主机拒绝原因（材料不足/位置占用/越界/距离过远等），
+          让玩家知道为什么「按了没反应」——此前只有请求没有回执，只能空等；
+          失败**不扣**任何资源（主机未受理）。
+        """
+        gs = self.gv.window.game_state
+        if payload.get("ok"):
+            # 成功：资源按 BUILDS cost 镜像扣减（视觉/血条由 MAP_CHANGE build_place 还原）
+            build_id = payload.get("build_id")
+            from entities.build_defs import BUILDS
+            cost = dict((BUILDS.get(build_id) or {}).get("cost") or {})
+            carried = getattr(gs, "run_carried", None)
+            if not cost or not isinstance(carried, dict):
+                # 载荷缺 build_id / 建筑表无 cost 变更：显式告警，不静默吞掉
+                print(f"[Client] BUILD_RESULT 成功但 cost 缺失：build_id={build_id!r}")
+                return
+            resource = carried.get("resource")
+            if not isinstance(resource, dict):
+                resource = {}
+            # 先整体校验：本端资源不足说明两端账本已漂移，此时不硬扣成负数，
+            # 改按权威值对齐到 0 并限频告警（禁静默——漂移必须留痕）
+            drift = [iid for iid, need in cost.items()
+                     if int(resource.get(iid, 0) or 0) < int(need)]
+            if drift:
+                warn_key = ("build_cost_drift", tuple(sorted(drift)), build_id)
+                if warn_key not in self._warned_keys:
+                    self._warned_keys.add(warn_key)
+                    print(f"[Client] 建造 {build_id} 成功但本端资源不足于 cost"
+                          f"（缺 {drift}），已按 0 对齐并记限频告警一次")
+            for item_id, need in cost.items():
+                left = int(resource.get(item_id, 0) or 0) - int(need)
+                if left > 0:
+                    resource[item_id] = left
+                else:
+                    resource.pop(item_id, None)
+            carried["resource"] = resource
+            return
+        build_id = payload.get("build_id")
+        reason = payload.get("reason") or "无法建造"
+        # 主机拒绝原因为 BuildSystem.can_place 的中文文案（边界/距离/占用/资源不足），
+        # 直接展示即可；未知 reason 前缀（防御分支）也照原样显示，不静默吞掉
+        print(f"[Client] 建造请求被主机拒绝：build_id={build_id!r} reason={reason}")
+        from entities.build_defs import BUILDS
+        build_name = BUILDS.get(build_id, {}).get("name", str(build_id))
+        gs.build_mode = False  # 退出建造模式：拒绝后别留在原地反复按（build_mode 在 game_state 上）
+        floating_texts.add(self.gv.player.center_x, self.gv.player.center_y + 60,
+                           f"{build_name}建造失败：{reason}", arcade.color.RED,
+                           life=2.0, font_size=16)
+
+    # ── 拒绝型 ACK：交互 / 放弃 ────────────────────────────────────────────
+    def handle_interaction_result(self, payload: dict) -> None:
+        """客户端应用主机 INTERACTION_RESULT（拒绝型 ACK）：仅提示被拒原因
+
+        - ok=True：交互已生效，主机经 MAP_CHANGE 广播结果（宝箱开启/水井用过/发射台启动），
+          客户端据此镜像状态，此处不重复处理；
+        - ok=False：显示主机拒绝原因（距离太远/无资源/被占用），让玩家知道为何无响应
+          ——此前只有请求没有应答，玩家只能空等。
+        """
+        gs = self.gv.window.game_state
+        my_id = getattr(gs, "net_player_id", None)
+        player_id = payload.get("player_id")
+        if my_id is not None and player_id != my_id:
+            return  # 他人的交互结果：本端无动作（禁按他人结果改自己状态）
+        if payload.get("ok"):
+            return  # 成功：效果已由 MAP_CHANGE 广播落地
+        reason = payload.get("reason") or "无法交互"
+        print(f"[Client] 交互请求被主机拒绝：type={payload.get('interaction_type')!r} "
+              f"reason={reason}")
+        floating_texts.add(self.gv.player.center_x, self.gv.player.center_y + 60,
+                           f"交互失败：{reason}", arcade.color.RED, life=2.0, font_size=16)
+
+    def handle_player_abandon_result(self, payload: dict) -> None:
+        """客户端应用主机 PLAYER_ABANDON_RESULT（拒绝型 ACK）
+
+        - ok=True：主机已受理放弃（状态标记 dead，清装备回房由主机 ROOM_ENDED 收口），
+          本端无额外动作（此前无回执，玩家不知道主机是否受理，只会干等）；
+        - ok=False：本局已结束/状态非法等原因被拒 → 提示原因，玩家可继续游戏或返回大厅。
+        """
+        gs = self.gv.window.game_state
+        my_id = getattr(gs, "net_player_id", None)
+        player_id = payload.get("player_id")
+        if my_id is not None and player_id != my_id:
+            return  # 他人的受理结果：本端无动作
+        if payload.get("ok"):
+            return  # 已受理：清装备/回房由主机 ROOM_ENDED 统一收口
+        reason = payload.get("reason") or "放弃请求未被受理"
+        print(f"[Client] 放弃行动被主机拒绝：{reason}")
+        floating_texts.add(self.gv.player.center_x, self.gv.player.center_y + 60,
+                           f"放弃失败：{reason}", arcade.color.RED, life=2.0, font_size=16)
+
+    # ── 连接/房间级事件 ───────────────────────────────────────────────────
+    def handle_disconnect(self, payload: dict) -> None:
+        """任一端收到 DISCONNECT：清理该 peer 的幽灵并提示
+
+        - peer_id 是断线者（不是收件人，见 net/protocol.py DISCONNECT schema）；
+        - 忽略 peer_id == 本端 id（主机自己的连接关闭也会广播，若按对端处理会误清自己）；
+        - 断线玩家从 remote_players / _downed_players / _player_status 一并清理，
+          否则残留幽灵会继续被怪物 AI 追击、且卡在 _check_all_finished 的存活判定上。
+        """
+        gs = self.gv.window.game_state
+        peer_id = payload.get("peer_id")
+        my_id = getattr(gs, "net_player_id", None)
+        if peer_id is None:
+            return  # 非法载荷：缺 peer_id，显式返回（无 peer 可清）
+        if my_id is not None and peer_id == my_id:
+            return  # 本端连接关闭通知：不是「他人断线」，不做对端清理
+        if self.gv.remote_players.pop(peer_id, None) is not None:
+            self.gv._downed_players.pop(peer_id, None)
+            self.gv._player_status[peer_id] = "left"
+            reason = payload.get("reason") or "connection_closed"
+            print(f"[NetSync] 玩家 {peer_id} 断连（{reason}），已清理其幽灵与状态")
+            if peer_id != 0:
+                # 断线幽灵消失需要提示：玩家可能正与对方交战中突然对手不见了
+                floating_texts.add(self.gv.player.center_x, self.gv.player.center_y + 60,
+                                   f"玩家 {peer_id} 已断线", arcade.color.YELLOW,
+                                   life=2.0, font_size=16)
+
+    def handle_room_error(self, payload: dict) -> None:
+        """任一端收到 ROOM_ERROR：提示原因后回大厅等待（连接保留/断开由 _back_to_lobby 收口）
+
+        reason 为主机给出的错误描述（如 client_disconnect / join_validation_failed）；
+        显式走 _back_to_lobby 而不是静默停在半死的游戏视图里。
+        """
+        reason = payload.get("reason") or "房间错误"
+        print(f"[NetSync] 收到 ROOM_ERROR：{reason}")
+        self.gv._back_to_lobby(f"房间错误：{reason}")

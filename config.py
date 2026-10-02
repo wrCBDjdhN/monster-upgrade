@@ -387,10 +387,18 @@ ROCKET_TROOP_AOE_RADIUS = 60      # 火箭兵 AOE 爆炸半径
 # 索敌距离配置：
 # - MONSTER_AGGRO_RANGE_MULT：在 monster_defs.py 各怪物 aggro_range 基础上放大的倍率
 # - MONSTER_AGGRO_RANGE_BASE：索敌保底距离（≈屏幕半对角线，保证"玩家能看到怪物→怪物就能索敌"）
-# 实际索敌距离 = max(BASE, aggro_range × MULT)；配合视线检测（隔墙不索敌）与边缘视线
-# （拐角露出部分身体即可被看到），实现 360° 视野被墙遮挡的索敌模型
+# 实际索敌距离 = max(BASE, aggro_range × MULT)
+# - MONSTER_ACQUIRE_RANGE_MAX：隔墙索敌上限（像素）。索敌闸不再被视线一刀切阻断
+#   （用户缺陷：玩家隔着墙吸不走仇恨，怪贴着墙原地不动）——改为「近距离即使隔墙也索敌、
+#   超出该距离仍要求视线通畅」。留上限是为了避免封死房间/无通路的场景里，怪物在远处
+#   无路可走却永久贴墙空转。远程怪物的开火闸仍单独要求视线（禁隔墙射击），不受本值影响。
 MONSTER_AGGRO_RANGE_MULT = 2.2
 MONSTER_AGGRO_RANGE_BASE = 700
+MONSTER_ACQUIRE_RANGE_MAX = 450
+# 近战攻击距离的贴身余量（像素）：怪物半径 _size 之外再留出的判定余量。
+# 沿用原「_size + 20」口径，作为怪物攻击距离的下限（无武器/短武器时回退此值），
+# 防止「武器射程 < 自身半径」的怪永远打不到贴脸的玩家。
+MELEE_ATTACK_REACH_PAD = 20
 
 # ── 航天基地掉落表 ──
 SNIPER_LOOT_TABLE = [
@@ -441,10 +449,10 @@ ROCKET_PAD_DESTROY_NORMAL_LV_MAX = 50        # 普通武器/装备等级上限
 ROCKET_PAD_DESTROY_ARTIFACT_LV_MIN = 10      # 神器等级下限
 ROCKET_PAD_DESTROY_ARTIFACT_LV_MAX = 20      # 神器等级上限
 
-# ── 行动时间 ──
-ACTION_TIME_SPACE = 480.0          # 航天基地行动时间（8 分钟）
-ACTION_TIME_FOREST = 300.0         # 森林行动时间（5 分钟）
-ACTION_TIME_DESERT = 300.0         # 沙漠行动时间（5 分钟）
+# ── 行动时间 ──（2026-10-01 用户拍板：森林 8 分钟 / 沙漠 10 分钟 / 航天 15 分钟）
+ACTION_TIME_SPACE = 900.0          # 航天基地行动时间（15 分钟）
+ACTION_TIME_FOREST = 480.0         # 幽暗森林行动时间（8 分钟）
+ACTION_TIME_DESERT = 600.0         # 沙漠荒地行动时间（10 分钟）
 
 # ── 航天装备穿戴概率（怪物穿戴分配） ──
 MONSTER_SPACE_ARMOR_CHANCE = 0.30   # 航天怪穿戴航天护甲概率
@@ -507,6 +515,8 @@ KEY_BINDINGS = {
 
 # ── 刷新距离（怪物/环境物生成时与玩家的最小欧几里得距离）──
 MONSTER_SPAWN_MIN_DIST = 600      # 怪物刷新最小距离（超出屏幕可视范围，避免在玩家身边二次刷新）
+MONSTER_SPAWN_MAX_DIST = 1000     # 怪物刷新的环带外沿（像素）：野外刷新改为「玩家周围环带采样」时用
+                                  # 配合 MIN_DIST 构成 [600, 1000] 环带；留 0 则退回全图随机
 HARVEST_SPAWN_MIN_DIST = 400      # 环境物刷新最小距离
 
 # ── 小地图（游戏 HUD 右上角）──
@@ -521,6 +531,9 @@ NET_HEARTBEAT_SEC = 1.0             # 心跳间隔（秒）
 NET_TIMEOUT_SEC = 5.0               # 断线判定超时（秒）
 NET_SPAWN_OFFSET = 40               # 玩家出生点槽位偏移（像素）
 NET_ACTION_TIME_BCAST_SEC = 1.0     # 行动时间广播间隔（秒）
+NET_ATTACK_SPEED_TOLERANCE = 0.8     # 主机攻击事件攻速容差（倍数）：客户端攻击间隔窗口 = (1/attack_speed)*TOLERANCE
+SNAPSHOT_HEAL_JUMP_RATIO = 0.35     # 快照回血跳变上限比例（相对 max_hp）：限制单帧回血跳变，缓解缓慢回血作弊残余风险
+DAMAGE_RESULT_QUEUE_TIMEOUT = 0.5   # DAMAGE_RESULT 目标缺失时的排队等待上限（秒）：等 MONSTER_SNAPSHOT 补到对象后重放，超时丢弃并限频告警
 
 # ── 局内建造系统 ──
 BUILD_RANGE = 220.0        # 放置时玩家与目标格的最大距离（像素）
@@ -667,6 +680,17 @@ SKILL_VFX_LIFE_MULT = 1.5      # 技能粒子寿命倍率
 SKILL_CIRCLE_INNER_RATIO = 0.45  # 技能范围圈内圈半径比例（相对技能 radius）
 SKILL_CIRCLE_OUTER_ALPHA = 90    # 技能范围圈外圈 alpha（RGBA 第 4 位）
 
+# ── 狂暴「独立触发」通路（与 near/far 距离分档并行，不改分档本身）──
+# 动机：狂暴在 SKILL_PROMPT_CONFIG 里标的是 range_pref="far"，于是「攻击力 +50%」这种
+#   纯战斗向自我增益，反而只有在僵尸远离玩家时才可能放出来；近身缠斗全程放不出。
+# 做法：另开一条与距离无关的通路，每帧按 MONSTER_RAGE_CHANCE 概率尝试放狂暴。
+#   冷却与分档通路共用 monster._skill_cds["狂暴"] 同一份冷却池（不会两条通道叠加冷却），
+#   时长由本常量单独掌控，便于独立调参；两者相等故当前行为与分档通路一致。
+# 影响面：只有配了「狂暴」的怪物（当前仅 Zombie）会命中，其余怪物天然无此通路。
+MONSTER_RAGE_SKILL_NAME = "狂暴"                      # 独立通路的技能名（SKILL_PROMPT_CONFIG / SKILL_COOLDOWNS 的键）
+MONSTER_RAGE_CHANCE = 0.35                           # 每帧尝试触发狂暴的概率
+MONSTER_RAGE_COOLDOWN = SKILL_COOLDOWNS["狂暴"]      # 独立通路冷却（秒）
+
 # ── 精英「火墙」词缀：存活期周期生成燃烧区（死亡区仍用 ELITE_FIRE_ZONE_*） ──
 ELITE_FIRE_WALL_INTERVAL = 6.0   # 存活期火区生成间隔（秒）
 ELITE_FIRE_WALL_RADIUS = 70      # 存活期火区半径（像素，比死亡区 90 小）
@@ -701,7 +725,8 @@ EVENT_AIRDROP_EXTRA_GEAR = 1      # 除保底主装备外额外附带的装备�
 EVENT_RELIC_ARTIFACT_BONUS = 0.15 # 神器低语：神器掉落等级加成比例（+15% 等级）
 
 # 商队：交互点换购表（键名复用现有 item_id：药水取 POTIONS 键，资源取资源 id）
-# 值为局内金币价，购买直接写 gs.run_carried（扣 gold，加 potion/resource）
+# 值为账号金币价（db/players.players.gold，非局内金币），购买所得一律写 gs.run_carried
+# 注意：run_carried 是局内携带物，玩家死亡即全部丢失（Q1 决策）
 EVENT_CARAVAN_PRICES: dict[str, int] = {
     # 药水（entities.equipment_defs.POTIONS 的 item_id）
     "heal_potion_s": 50,     # 小回复药水
@@ -717,6 +742,39 @@ EVENT_CARAVAN_RANGE = 90.0        # 商队交互距离（像素，靠近按 E �
 EVENT_CARAVAN_SIGN_SIZE = 40      # 商队招牌实心方块边长（像素）
 EVENT_CARAVAN_PROMPT_CD = 0.6     # 「按E交易」提示节流（秒，防每帧刷屏）
 EVENT_CARAVAN_MIN_DIST = 260.0    # 商队与玩家的最小距离（像素，避免开局糊脸）
+
+# 商队货单随机盐：与地图种子组合派生本局货单（两端同种子 → 同货单）
+EVENT_CARAVAN_STOCK_SALT = 5173
+# 货单构成（按地图难度 theme）：potions=药水条数, weapons=武器条数,
+# artifact_chance=神器出现概率, weapon_level=(下限,上限)武器/神器入库等级区间。
+# 实际货单由 game/map_events.caravan_stock() 按地图种子确定性抽选（host/client 一致，不走网络同步）
+EVENT_CARAVAN_STOCK: dict[str, dict] = {
+    "forest": {"potions": 2, "weapons": 1, "artifact_chance": 0.0, "weapon_level": (1, 4)},
+    "desert": {"potions": 2, "weapons": 2, "artifact_chance": 0.2, "weapon_level": (3, 8)},
+    "space":  {"potions": 2, "weapons": 2, "artifact_chance": 0.4, "weapon_level": (6, 12)},
+}
+# 商队可购武器池（按难度分档；价格取 entities/weapon_defs.py 的 price 字段，均 >0）
+EVENT_CARAVAN_WEAPON_POOL: dict[str, list[str]] = {
+    # 森林：常规近战 + 弓，入门档
+    "forest": ["wood_sword", "iron_sword", "stone_mace", "short_bow", "long_bow"],
+    # 沙漠：法杖/枪械 + 木乃伊系弯刀，中高档
+    "desert": ["fire_staff", "rifle", "scepter", "cursed_scimitar", "sniper"],
+    # 航天：航天系高端枪械 + 火杖，高档
+    "space":  ["sniper", "laser_gun", "rocket_launcher", "rifle", "fire_staff"],
+}
+# 商队神器池（artifact=True 且非 recipe_only；神器 def price=0，故用下方专属价）
+# 已排除 codex_monster_blade（recipe_only=True，唯一来源是锻造坊「配方」页）
+EVENT_CARAVAN_ARTIFACT_POOL: list[str] = [
+    # 近战神器
+    "wado_ichimonji", "storm_hammer", "frost_blade", "flame_blade", "vampiric_blade",
+    # 远程神器
+    "meteor_cannon", "annihilation_cannon", "piercing_bow", "plague_staff",
+    "tri_shot_cannon", "frost_aura_staff",
+]
+# 神器商队换购价（def price=0 不可直接用，单列定价，事后可调平衡）
+EVENT_CARAVAN_ARTIFACT_PRICE = 600
+# 单局限购上限：EVENT_CARAVAN_LIMITS 的键是 kind（"potion"/"weapon"/"artifact"），表示各类别本局限购件数上限；本局已购计数按 item_id 存放在 GameState.caravan_bought（每局 setup 重置）
+EVENT_CARAVAN_LIMITS: dict[str, int] = {"potion": 2, "weapon": 1, "artifact": 1}
 
 # 事件横幅渲染（屏幕层，一律不透明实心矩形 + 文本，禁线框/空心）
 EVENT_BANNER_HEIGHT = 44          # 横幅底板高度（像素）
@@ -735,6 +793,16 @@ EVENT_PANEL_ROW_H = 26            # 面板行高（像素）
 EVENT_PANEL_MARGIN = 40           # 面板边距（像素）
 EVENT_PANEL_WIDTH = 260           # 商队换购弹层宽度（像素）
 EVENT_BANNER_MAX_HALF_W = 300     # 事件横幅最大半宽（像素，文案过长时截断）
+
+# 商队换购弹层右上角「✕ 关闭」按钮（v1.5.1 新增）
+# 背景：弹层是绘制函数不是 arcade.View，无天然关闭入口，原先只能「走远自动关闭」，
+# 玩家反馈无法主动关 → 改为面板右上角常驻 ✕ 按钮（绘制与鼠标命中共用同一份几何）。
+EVENT_PANEL_CLOSE_SIZE = 20          # 关闭按钮底板边长（像素）
+EVENT_PANEL_CLOSE_MARGIN = 6         # 按钮距面板右上内角的边距（像素）
+EVENT_PANEL_CLOSE_HIT_SLOP = 6       # 鼠标命中容差（像素，命中区四周外扩防手滑点不中）
+EVENT_PANEL_CLOSE_GLYPH_RATIO = 0.6  # ✕ 图形边长占按钮底板的比例
+EVENT_PANEL_CLOSE_BG = (86, 52, 52)      # 关闭按钮底板实心色
+EVENT_PANEL_CLOSE_GLYPH = (255, 236, 236)  # ✕ 图形实心色
 
 # 事件实体渲染配色（空投箱/商队招牌 + 小地图标记，全部不透明实心）
 EVENT_AIRDROP_CHEST_COLOR = (255, 150, 40)     # 空投箱箱体色（橙，区别普通宝箱金黄）
@@ -939,6 +1007,25 @@ FORGE_ARTIFACT_BONUS = {0: 0.0, 1: 0.0, 2: 0.10, 3: 0.15}  # artifact 概率加�
 FORGE_REFUND_LEVEL = 3               # Lv3 熔炉余温：锻造费返还触发等级
 FORGE_REFUND_CHANCE = 0.20           # Lv3 返还概率
 FORGE_REFUND_RATIO = 0.50            # Lv3 返还比例
+
+
+# ── 仓库等级与容量上限（db/warehouse.py 持久化 + views/warehouse_view.py 展示/升级）──
+# 背景：仓库此前**完全没有容量限制**，撤离结算可以无限入库。本组常量给仓库加上
+# 「等级 → 容量上限」的可升级成长线（与设施升级同账本：仓库材料 + 金币）。
+# 容量**计数口径与背包完全一致**：按各物品在背包里占的 capacity_cost 计，
+# 权威实现是 game/loot.py:_calc_carried_capacity（本处只提供上限数值，不重复口径逻辑）。
+WAREHOUSE_BASE_CAPACITY = 50         # Lv1 仓库容量上限（用户拍板：初始容量 50 格）
+WAREHOUSE_CAPACITY_STEP = 25         # 每升一级增加的容量（Lv.N = 50 + (N-1)×25 → 50/75/100/125/150）
+WAREHOUSE_MAX_LEVEL = 5              # 仓库最高等级（Lv5 = 50 + 4×25 = 150 格）
+# 升级费用表：键 = **目标等级**（与 MARKET_UPGRADE_COSTS / FORGE_UPGRADE_COSTS 同口径），
+# 消耗仓库材料 + 金币。**数值可调**：随仓库容量曲线与中期金币产出校准，
+# 只想改数值时改本表即可（db/warehouse.py 经 warehouse_upgrade_cost_at 读取，禁硬编码）。
+WAREHOUSE_UPGRADE_COSTS = {
+    2: {"gold": 400, "wood": 20, "stone": 15},
+    3: {"gold": 800, "wood": 30, "stone": 25, "ore": 10},
+    4: {"gold": 1500, "wood": 45, "stone": 35, "ore": 20},
+    5: {"gold": 2600, "wood": 60, "stone": 50, "ore": 30},
+}
 
 
 # ── 怪物 troop 技能冷却（game/monster_utils.py 消费）──

@@ -4,7 +4,7 @@ import math
 import time
 import random
 import arcade
-from config import WINDOW_WIDTH, WINDOW_HEIGHT
+from config import EVENT_PANEL_CLOSE_HIT_SLOP, WINDOW_WIDTH, WINDOW_HEIGHT
 from game.sound_manager import sound_manager
 from game.effects import particle_system, floating_texts
 from entities.effects_defs import DEBUFF_POOL
@@ -41,6 +41,98 @@ def _build_cost_text(cost: dict) -> str:
     )
 
 
+def current_weapon_range(gs) -> float:
+    """当前武器射程（渲染攻击范围/激光长度共用）：gs.weapon_range 优先，缺省查武器定义表
+
+    此前各调用点自带 40/250 的魔数回退，与 entities/weapon_defs 漂移（改定义射程后
+    这些路径不会跟着变，且近战 40 与定义的 50 不一致）；统一经
+    game.monster_utils.lookup_weapon_range 兜底。
+    """
+    wrange = getattr(gs, "weapon_range", None)
+    if wrange:
+        return float(wrange)
+    from game.monster_utils import lookup_weapon_range
+    return lookup_weapon_range(getattr(gs, "current_weapon_kind", "melee"),
+                               getattr(gs, "current_weapon_item_id", "fist"))
+
+
+def send_client_attack_event(view, gs, world_x: float, world_y: float) -> bool:
+    """客户端→主机上报 ATTACK_EVENT（手动点击与全自动连发共用的唯一发送函数）
+
+    - 为什么共用：此前手动点击（handle_mouse_press）与连发（GameView.on_update 持键
+      自动射击）各写一份载荷，连发路径漏报 damage/crit_chance/equip_lifesteal/
+      attack_speed，主人机按默认值裁决伤害（连发武器联机伤害偏低）。
+    - 攻速节流仍由调用方 `_net_fire_cd` 承担（客户端不再经 combat 冷却，判定已移交主机）；
+      本函数只负责「组装载荷 + 发送」，返回是否真的发出（非 client/无连接返回 False）。
+    - timestamp 用单调时钟 time.monotonic()*1000：墙钟会被 NTP 校正或玩家改表，
+      出现负向跳变时主人机按时间戳做去重/延迟测量会误杀正常攻击；
+      单调时钟不受系统时间调整影响，且毫秒量级与协议字段注释一致。
+    """
+    if getattr(gs, "net_mode", "solo") != "client" or gs.net_client is None:
+        return False
+    # 攻击方向（弧度）：由世界目标点 − 玩家世界坐标换算，主机据此重建攻击朝向
+    angle = math.atan2(world_y - view.player.center_y, world_x - view.player.center_x)
+    # 附带装备/武器附加 debuff 列表（元素为 (效果ID, 效果等级) 元组）：
+    # 主机权威裁决命中时一并施加，使客户端装备特殊效果（中毒/燃烧/冰冻等）联网生效
+    gs.net_client.send((MsgType.ATTACK_EVENT, {
+        "attacker_id": getattr(gs, "net_player_id", 0),  # 客户端联机玩家 id（大厅接入后由 gs.net_player_id 提供）
+        "weapon": view._current_weapon_name(),
+        "angle": angle,
+        # x/y = 攻击瞬间玩家世界坐标：主机据此修正幽灵位置（20Hz 快照滞后），
+        # 避免近战扇形/远程弹丸因幽灵位置滞后判定 miss（修复客户端攻击打不中怪物）
+        "x": view.player.center_x,
+        "y": view.player.center_y,
+        "damage": getattr(gs, 'weapon_damage', 0),  # 实际伤害（升级武器以客户端为准，主机据此裁决，修复联机假伤害）
+        "debuffs": list(getattr(view, "_attack_debuffs", [])),  # (效果ID, 效果等级) 元组列表
+        "crit_chance": getattr(view.player, "crit_chance", 0.0),  # 装备暴击率（幽灵无此属性，需客户端上报）
+        "equip_lifesteal": getattr(view.player, "equip_lifesteal", 0.0),  # 装备吸血（幽灵无此属性，需客户端上报）
+        "timestamp": time.monotonic() * 1000.0,  # 单调时钟毫秒，供主机去重/延迟测量
+        "attack_speed": max(0.1, float(getattr(gs, 'weapon_speed', 1.0))),  # 连发/激光武器以客户端攻速为准
+    }))
+    return True
+
+
+def _caravan_buy(view, buy_fn, index: int | None = None) -> bool:
+    """商队购买调用点（弹层 E/回车、数字键 1-N 共用）：成功后主机侧账本镜像
+
+    联机购买口径（两阶段，见 game/map_events.py caravan_panel_buy）：
+    - solo / 主机本端：预检通过后 caravan_commit_local_purchase 直接本地生效
+      （玩家就是权威方），本函数随后把本端 run_carried 覆盖回主机自己的权威携带
+      清单条目（host_id = 自己）；
+    - 联机客户端：caravan_panel_buy 只发 CARRIAGE_BUY 请求，**本地不扣账号金币、
+      不写 run_carried**（禁本地先行发货，否则主机账本不知这笔 → POTION_USE 被拒、
+      撤离按主机账本结算 → 两端 desync）；主机记账并单播 CARRIAGE_BUY_RESULT，
+      客户端收到 ok 后由 map_events.apply_carriage_buy_result 本地生效。
+      因此这里对 client 直接返回，不做任何账本镜像（主机侧另行记入
+      _players_run_carried[sender_id]）。
+
+    主机镜像的三条口径：
+    - 仅 host 需要（solo 无联机账本；client 的清单由主机记 CARRIAGE_BUY + 撤离
+      合流负责）；
+    - 覆盖而非差集累加：本端 run_carried 就是主机的权威来源，覆盖后两者必然一致，
+      重复调用也不会翻倍计数；
+    - 逐槽 dict(...) 浅拷贝，避免两侧共享同一个内层 dict 引用后互相污染。
+    """
+    ok = buy_fn(view) if index is None else buy_fn(view, index)
+    if not ok:
+        return False
+    gs = view.window.game_state
+    if getattr(gs, "net_mode", "solo") != "host":
+        return True
+    host_id = getattr(gs, "net_player_id", None) or 0
+    carried = getattr(gs, "run_carried", None)
+    if not isinstance(carried, dict):
+        return True
+    ledger = getattr(view, "_players_run_carried", None)
+    if not isinstance(ledger, dict):
+        return True
+    ledger[host_id] = {
+        slot: (dict(value) if isinstance(value, dict) else value)
+        for slot, value in carried.items()
+    }
+    return True
+
+
 def handle_key_press(view, key, modifiers):
     """处理键盘按下事件"""
     gs = view.window.game_state
@@ -73,26 +165,30 @@ def handle_key_press(view, key, modifiers):
             view._cycle_spectate_target()
         return
 
-    # ── 阶段4 商队换购弹层：↑↓ 选择、E/回车/数字键 购买 ──
+    # ── 阶段4 商队换购弹层：↑↓ 选择、E/回车/数字键 购买、鼠标点右上角 ✕ 关闭 ──
     # 放在控制器之前：弹层开启期间方向键只用于换行，不再驱动玩家移动；
     # E 只买当前高亮项，不顺带触发宝箱交互（避免一次按键既买货又开箱）。
+    # 关闭只走 ✕ 按钮（handle_mouse_press 里的命中检测），面板关闭后本段吞键随之解除。
     if getattr(view, "_caravan_panel_open", False):
         from game.map_events import caravan_panel_buy, caravan_panel_move
         if key in _action_keys(view, "interact") or key == arcade.key.ENTER:
-            caravan_panel_buy(view)
+            _caravan_buy(view, caravan_panel_buy)
             return
         if key == arcade.key.UP:
-            caravan_panel_move(view, 1)
+            # 修复方向反转：渲染层 idx 0 = 最上一行（ry = rows_top - idx*行高，
+            # 见 rendering_hud.draw_caravan_panel），idx 减小才是屏幕上移；
+            # 原 UP 传 +1 / DOWN 传 -1，与渲染方向相反（按 ↑ 反而下移）。
+            caravan_panel_move(view, -1)
             return
         if key == arcade.key.DOWN:
-            caravan_panel_move(view, -1)
+            caravan_panel_move(view, 1)
             return
         # 数字键 1-N 直购对应条目（弹层条目固定，便于快速补货）
         for idx, code in enumerate((arcade.key.KEY_1, arcade.key.KEY_2, arcade.key.KEY_3,
                                     arcade.key.KEY_4, arcade.key.KEY_5, arcade.key.KEY_6,
                                     arcade.key.KEY_7, arcade.key.KEY_8, arcade.key.KEY_9)):
             if key == code:
-                caravan_panel_buy(view, idx)
+                _caravan_buy(view, caravan_panel_buy, idx)
                 return
         # 弹层开启期间吞掉其余按键，避免误触发建造/背包等面板
         return
@@ -196,12 +292,28 @@ def handle_key_press(view, key, modifiers):
         candidates.extend(p["id"] for p in get_potions(gs.player_id))
         if potion_index < len(candidates):
             potion_id = candidates[potion_index]
-            # 联机客户端：药水使用请求交主机确认（HP 主机权威），本地不直接生效
+            # 联机客户端：按药水来源分流（各端各持自己的 SQLite，库存权威在本端）
             if gs.net_mode == "client" and gs.net_client is not None:
-                gs.net_client.send((MsgType.POTION_USE, {
-                    "player_id": getattr(gs, "net_player_id", 0),
-                    "potion_id": potion_id,
-                }))
+                # 本局药水槽（run: 前缀）：走 POTION_USE 请求，主机权威校验并扣减
+                # 它记录的 _players_run_carried[potion]，再广播 POTION_ACK。
+                # 商队购入的药水现在也在主机账本里（客户端购买走 CARRIAGE_BUY 请求-
+                # 回执，主机 ok 后才记入 _players_run_carried，再由客户端按回执本地
+                # 生效，见 map_events.apply_carriage_buy_result），故本局新买的药水
+                # 用热键 1-3 也能被主机正常校验通过——旧版客户端购买只写本地账、
+                # 主机账本无这笔，POTION_USE 必被拒。
+                if isinstance(potion_id, str) and potion_id.startswith("run:"):
+                    gs.net_client.send((MsgType.POTION_USE, {
+                        "player_id": getattr(gs, "net_player_id", 0),
+                        "potion_id": potion_id,
+                    }))
+                    return
+                # 仓库药水：本地扣自身库并生效，**不发** POTION_USE。
+                # 原因：主机库没有客户端的库存记录，network_sync._handle_potion_use
+                # 只能按玩家名在主机库 get_or_create_player —— 等于在主机库凭空建号
+                # 再扣一个查无此人的库存（库存必然为空 → 一律被拒），客户端则永远
+                # 收不到 ACK、药水按了没反应。本地生效后 HP 由 20Hz PLAYER_SNAPSHOT
+                # 校准（HP 本就是客户端上报的权威链），治疗数字只有自己看见。
+                _use_potion_local(view, gs, potion_id)
                 return
             # 单机/主机：本地权威使用（查定义 → 扣减 → 应用效果 → 浮动文字）
             _use_potion_local(view, gs, potion_id)
@@ -306,6 +418,20 @@ def handle_mouse_press(view, x, y, button, modifiers):
             else:
                 view._back_to_lobby("退出观战，等待下一局")
         return
+    # 阶段4 商队弹层右上角「✕ 关闭」按钮：换购弹层是绘制函数不是 arcade.View，
+    # 没有天然关闭入口（原先只能走远自动关闭，玩家无法主动关），故在此自己做命中：
+    # 命中即关闭并 return，本帧不进攻击/建造分支（避免点按钮同时挥出一击）。
+    # 命中区 = 按钮几何 + EVENT_PANEL_CLOSE_HIT_SLOP 外扩容差；按钮几何与绘制层同源
+    # （map_events.caravan_close_button），坐标随面板位置推导，已是 1280×720 逻辑坐标。
+    if button == arcade.MOUSE_BUTTON_LEFT and getattr(view, "_caravan_panel_open", False):
+        from game.map_events import caravan_close_button, close_caravan_panel
+        btn = caravan_close_button(view)
+        if btn is not None:
+            bx, by, bw, bh = btn
+            slop = EVENT_PANEL_CLOSE_HIT_SLOP
+            if abs(x - bx) <= bw / 2 + slop and abs(y - by) <= bh / 2 + slop:
+                close_caravan_panel(view)
+                return
     if button == arcade.MOUSE_BUTTON_LEFT:
         view._mouse_x, view._mouse_y = x, y
         view._left_mouse_held = True
@@ -327,9 +453,17 @@ def handle_mouse_press(view, x, y, button, modifiers):
         # 世界坐标已在上方换算（逻辑坐标 + 相机 − 窗口中心），直接复用
         if getattr(gs, "build_mode", False) and hasattr(view, "build_system"):
             if gs.net_mode == "client":
-                # 阶段1 不做客户端建造请求协议：客户端只预览，不在本地扣资源/创建建筑。
+                # 联机建造请求-应答（协议 BUILD_REQUEST）：客户端只发请求，
+                # 主机校验资源/占用/边界后广播 MAP_CHANGE build_place 并单播
+                # BUILD_RESULT 回执——此前客户端直接弹「联机建造由房主裁决」并 return，
+                # 建造在联机局内完全不可用。客户端仍不本地扣资源/建建筑。
+                gs.net_client.send((MsgType.BUILD_REQUEST, {
+                    "build_id": gs.build_kind,
+                    "x": world_x,
+                    "y": world_y,
+                }))
                 floating_texts.add(view.player.center_x, view.player.center_y + 60,
-                                   "联机建造由房主裁决", arcade.color.GOLD,
+                                   "已提交建造请求", arcade.color.GOLD,
                                    life=1.5, font_size=14)
                 return
             ok, reason = view.build_system.can_place(world_x, world_y, gs.build_kind)
@@ -341,7 +475,7 @@ def handle_mouse_press(view, x, y, button, modifiers):
             return
 
         kind = gs.current_weapon_kind
-        weapon_range = getattr(gs, 'weapon_range', 40)
+        weapon_range = current_weapon_range(gs)
         view._last_attack_range = weapon_range
         view._attack_kind = kind
 
@@ -355,25 +489,9 @@ def handle_mouse_press(view, x, y, button, modifiers):
             if view._net_fire_cd > 0:
                 return
             view._net_fire_cd = 1.0 / max(0.1, getattr(gs, 'weapon_speed', 1.0))
-            # 攻击方向（弧度）：由屏幕坐标 → 世界坐标目标方向换算，主机据此重建攻击朝向
-            angle = math.atan2(world_y - view.player.center_y, world_x - view.player.center_x)
-            # 附带装备/武器附加 debuff 列表（元素为 (效果ID, 效果等级) 元组）：
-            # 主机权威裁决命中时一并施加，使客户端装备特殊效果（中毒/燃烧/冰冻等）联网生效
-            debuffs = getattr(view, "_attack_debuffs", [])
-            gs.net_client.send((MsgType.ATTACK_EVENT, {
-                "attacker_id": getattr(gs, "net_player_id", 0),  # 客户端联机玩家 id（大厅接入后由 gs.net_player_id 提供）
-                "weapon": view._current_weapon_name(),
-                "angle": angle,
-                # x/y = 攻击瞬间玩家世界坐标：主机据此修正幽灵位置（20Hz 快照滞后），
-                # 避免近战扇形/远程弹丸因幽灵位置滞后判定 miss（修复客户端攻击打不中怪物）
-                "x": view.player.center_x,
-                "y": view.player.center_y,
-                "damage": getattr(gs, 'weapon_damage', 0),  # 实际伤害（升级武器以客户端为准，主机据此裁决，修复联机假伤害）
-                "debuffs": list(debuffs),  # (效果ID, 效果等级) 元组列表
-                "crit_chance": getattr(view.player, "crit_chance", 0.0),  # 装备暴击率（幽灵无此属性，需客户端上报）
-                "equip_lifesteal": getattr(view.player, "equip_lifesteal", 0.0),  # 装备吸血（幽灵无此属性，需客户端上报）
-                "timestamp": time.time() * 1000.0,  # 时间戳（毫秒），供主机去重/延迟测量
-            }))
+            # 载荷组装与发送统一走 send_client_attack_event（与全自动连发共用，
+            # 单调时钟时间戳，避免系统时间校正后被主机误判延迟/重复攻击）
+            send_client_attack_event(view, gs, world_x, world_y)
             # 本地表现：攻击闪白 + 命中反馈由主机 DAMAGE_RESULT 驱动（不本地判定）
             view._player_attack_flash = 0.1
             view._attack_this_frame = True

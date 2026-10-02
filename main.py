@@ -218,6 +218,9 @@ class GameState:
         self.player_name: str = "hero"              # 玩家名称（默认 "hero"）
         self.character_id: str = "initial"          # 当前选择角色（initial/mage/knight/assassin，单机/联机共用）
         self.run_carried: dict = {}                 # 本次携带物: {"resource": {id: qty}, "gold": int, "weapon": {id: qty}}
+        # 商队单局限购计数: {item_id: 已购数}（上限 config.EVENT_CARAVAN_LIMITS，
+        # 每局 GameView.setup 重置，Q4 口径）
+        self.caravan_bought: dict = {}
         # 局内建造系统（阶段1）：buildings=本局已放置建筑列表（BuildSystem 持有），
         # build_mode=是否处于建造模式（B 键切换），build_kind=当前选中建筑（barricade/tower/trap）
         self.buildings: list = []                   # 本局建筑列表（BuildSystem.buildings 引用）
@@ -263,6 +266,12 @@ class GameState:
                                                 # 开局前由 SET_CHARACTER 上报更新，ROOM_START 打包下发全房
         # 新手教程状态（首次启动 active=True；跳过/完成后 active=False）
         self.tutorial: TutorialState | None = None
+        # 仓库满仓时的「未入仓报告」（阶段11：撤离时仓库装不下的战利品）。
+        # 存放 dict：{"stored": int, "dropped": int, "dropped_items": [str]}；
+        # 由 game/evac.publish_warehouse_overflow 写入、evac_result_view 取用后即清空。
+        # 为什么走 game_state：撤离发生在局内，提示要显示在局外的撤离结算页（跨视图切换），
+        # 而触发撤离的 views/game_view.py 不在可改范围内，game_state 是唯一合规通道。
+        self.warehouse_overflow: dict | None = None
 
 
 def main():

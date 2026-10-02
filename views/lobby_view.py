@@ -398,7 +398,23 @@ class LobbyView(arcade.View):
             gs.net_spawn = (my.get("x", 0), my.get("y", 0))
             # 角色 id 由主机 ROOM_START 权威下发（客户端在房间内选角，见 _select_character）
             gs.character_id = my.get("character_id", "initial")
-        gs.net_max_players = len(players)
+        # FULL_STATE 序列化字段契约，防御式读取，缺失走原回退：
+        # 新版主机会把名册/出生点/人数直接塞进 payload（roster/spawns/max_players），
+        # 字段缺失（连旧主机）时完全沿用上面 players 推导出的名册/出生点/人数。
+        roster = payload.get("roster")
+        if isinstance(roster, dict) and roster:
+            gs.net_roster = roster
+        spawns = payload.get("spawns")
+        if isinstance(spawns, dict) and spawns:
+            # 出生点值形态兼容 [x, y] / {"x":..,"y":..} 两种序列化结果，统一成 (x, y)
+            gs.net_spawns = {
+                pid: ((xy.get("x", 0), xy.get("y", 0)) if isinstance(xy, dict)
+                      else (xy[0], xy[1]))
+                for pid, xy in spawns.items()
+            }
+        max_players = payload.get("max_players")
+        gs.net_max_players = (max_players if isinstance(max_players, int) and max_players > 0
+                              else len(players))
         # 地图种子/主题与主机一致（客户端确定性重建同图）
         gs.current_map_seed = payload.get("seed", 1)
         gs.map_theme = payload.get("theme", "forest")
@@ -690,10 +706,8 @@ class LobbyView(arcade.View):
         arcade.draw_rect_outline(self.close_rect, arcade.color.WHITE, border_width=2)
         self._tc.text("btn_close", "关闭房间", self.close_rect.center_x, self.close_rect.center_y,
                       arcade.color.WHITE, size=14, anchor_x="center", anchor_y="center")
-        # 返回
-        arcade.draw_rect_filled(self.back_rect, arcade.color.DARK_RED)
-        self._tc.text("back", "返回", self.back_rect.center_x, self.back_rect.center_y,
-                      arcade.color.WHITE, size=14, anchor_x="center", anchor_y="center")
+        # 房间内不再绘制左下角「返回」（2026-10-01）：与「关闭房间」功能重复
+        # （旧实现两个按钮都执行 _close_room），出口只保留「关闭房间」一个
 
     def _draw_join(self, cx):
         """join：搜索到的房间列表 / 手动输入IP / 返回"""
@@ -985,12 +999,11 @@ class LobbyView(arcade.View):
                 mark_lobby_tutorial_done()
                 self.mode = "menu"
             return
-        # 返回按钮（除 join 的输入框点击外，各模式共用；host_wait 返回=关闭房间，客户端能看到"房主已关闭房间"）
-        if self.mode != "join" and self.back_rect.point_in_rect((x, y)):
-            if self.mode == "host_wait":
-                self._close_room()
-            else:
-                self._leave()
+        # 返回按钮（2026-10-01：host_wait 已删除返回按钮，热区同步排除——
+        # 否则按钮没了点击仍触发 _close_room，变成隐形关房按钮；
+        # join 在下方独立处理，client_wait 本就无返回按钮仅保留原热区行为）
+        if self.mode not in ("join", "host_wait") and self.back_rect.point_in_rect((x, y)):
+            self._leave()
             return
         if self.mode == "menu":
             if self.host_rect.point_in_rect((x, y)):

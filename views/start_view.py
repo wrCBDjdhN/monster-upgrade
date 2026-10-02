@@ -91,7 +91,7 @@ class StartView(arcade.View):
         图鉴奖励与配方 / 任务板 / 设施建造与升级 三页（共 11 页）。页数不硬编码，
         推进逻辑只用 len(self.tut_pages) 做上界判定，追加即生效。
         """
-        from views.tutorial import TutorialPage
+        from views.tutorial import TutorialPage, build_warehouse_capacity_page
         return [
             TutorialPage("欢迎来到《打怪升级》！", [
                 "这是一款 2D 动作 RPG：",
@@ -107,6 +107,9 @@ class StartView(arcade.View):
                 "【仓库】存放局间战利品：",
                 "撤离得到的武器/装备/资源都在这里，可随时存取。",
             ], highlight=self.wh_rect),
+            # ── 阶段11：仓库容量上限与升级（页体由 views/tutorial.py 构造，
+            #    数值实查 config.WAREHOUSE_*，见 warehouse_capacity_label）──
+            build_warehouse_capacity_page(highlight=self.wh_rect),
             TutorialPage("市场", [
                 "【市场】买卖物品：",
                 "购买更强力的武器装备、出售不需要的物品换取金币。",

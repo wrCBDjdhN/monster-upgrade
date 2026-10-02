@@ -31,6 +31,8 @@ def init_db():
     6. character_unlocks: 角色解锁记录（购买过的付费角色）
     7. character_levels: 角色等级（等级/经验/待选升级次数/永久属性加成，按角色独立）
     8. codex_unlocks: 图鉴解锁记录（怪物/武器/装备/药水条目，UNIQUE(player_id, category, item_id)）
+    9. warehouse_levels: 仓库等级（阶段11；PRIMARY KEY(player_id)，level 1=初始 50 格容量，
+       无记录视为 Lv1，UPSERT 提升；容量公式与费用在 config.WAREHOUSE_*）
     """
     with _conn() as c:
         # 玩家表
@@ -235,6 +237,17 @@ def init_db():
                 FOREIGN KEY(player_id) REFERENCES players(id)
             )
         """)
+        # 仓库等级表（阶段11：db/warehouse.py 仓库容量上限与升级；
+        # 复合主键保证同玩家只有一行，level 1=初始等级（对应 config.WAREHOUSE_BASE_CAPACITY
+        # 格容量），UPSERT 提升等级；无记录即视为 Lv1，故无需迁移旧数据）
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS warehouse_levels (
+                player_id INTEGER NOT NULL,
+                level INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (player_id),
+                FOREIGN KEY(player_id) REFERENCES players(id)
+            )
+        """)
 
 
 # ── Re-exports（保持向后兼容） ──
@@ -256,6 +269,11 @@ from db.equipment import (  # noqa: F401, E402
 # 仓库管理
 from db.warehouse import (  # noqa: F401, E402
     add_warehouse_item, get_warehouse, sell_warehouse_item, spend_warehouse_item,
+    # 阶段11：仓库等级 / 容量上限 / 升级链路
+    warehouse_capacity_for, get_warehouse_level, get_warehouse_capacity,
+    warehouse_item_capacity, warehouse_used_capacity, warehouse_remaining_capacity,
+    warehouse_upgrade_cost_at, warehouse_can_afford, upgrade_warehouse,
+    add_warehouse_item_checked,
 )
 
 # 药水管理

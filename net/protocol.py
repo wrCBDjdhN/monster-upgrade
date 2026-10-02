@@ -59,8 +59,13 @@ class MsgType(Enum):
     # ── 阶段2 防守式撤离点 ──
     EVAC_POINT_STATE = "EVAC_POINT_STATE"   # 主机→全部：撤离点权威状态（状态变化时 + 1s 周期广播）
     EVAC_POINT_ACTION = "EVAC_POINT_ACTION"  # 客户端→主机：撤离点激活/修复请求（主机校验距离+资源后执行）
+    EVAC_POINT_RESULT = "EVAC_POINT_RESULT"  # 主机→请求者单播回执（撤离点激活/修复受理结果）
+    # ── 商队（Carriage） ──
+    CARRIAGE_BUY = "CARRIAGE_BUY"                # 客户端→主机：商队购买请求
+    CARRIAGE_BUY_RESULT = "CARRIAGE_BUY_RESULT"  # 主机→请求者单播回执
     # ── 交互（宝箱/水井/火箭发射台）──
     INTERACTION_REQUEST = "INTERACTION_REQUEST"  # 客户端→主机：交互请求（宝箱/水井/火箭台）
+    INTERACTION_RESULT = "INTERACTION_RESULT"    # 主机→请求者：交互结果（拒绝型 ACK，此前只有请求无应答）
     # ── 倒地 / 救援 ──
     PLAYER_DOWNED = "PLAYER_DOWNED"      # 主机→全部：广播某玩家倒地（可被救援）
     RESCUE_REQUEST = "RESCUE_REQUEST"    # 客户端→主机：请求救援倒地玩家
@@ -69,8 +74,12 @@ class MsgType(Enum):
     SPECTATE_LEAVE = "SPECTATE_LEAVE"    # 客户端→主机：主动退出观战（视为主机判定真死）
     # ── 放弃行动 ──
     PLAYER_ABANDON = "PLAYER_ABANDON"  # 客户端→主机：放弃行动通知（主机更新状态触发全员结束判定）
+    PLAYER_ABANDON_RESULT = "PLAYER_ABANDON_RESULT"  # 主机→请求者：放弃行动受理结果（拒绝型 ACK）
     # ── 运行期同步 ──
     MAP_CHANGE = "MAP_CHANGE"          # 主机→全部：运行期地图改动（宝箱/环境物/水井/火箭台/建筑/燃烧区）
+    # ── 局内建造请求-应答（阶段1 建造的联机接线，此前只有 MAP_CHANGE 广播无请求应答）──
+    BUILD_REQUEST = "BUILD_REQUEST"    # 客户端→主机：放置建筑请求（主机裁决并广播 MAP_CHANGE build_place）
+    BUILD_RESULT = "BUILD_RESULT"      # 主机→请求者：放置结果单播（成功带 bid，失败带 reason）
     ACTION_TIME = "ACTION_TIME"        # 主机→全部：剩余行动时间周期广播（客户端 HUD 显示）
     FULL_STATE = "FULL_STATE"          # 主机→晚期加入客户端：全量状态快照
     # ── 阶段4 随机地图事件 ──
@@ -162,7 +171,8 @@ MESSAGE_SCHEMAS: dict[MsgType, str] = {
         "  'damage': float}    当前武器伤害（技能伤害以武器伤害为基数，倍率按角色定义）\n"
     ),
     MsgType.ROOM_ERROR: (
-        "主机广播房间错误：各端回到大厅并展示错误。\n"
+        "房间错误通知：请求者视角为单播（服务器 send_room_error 只发给触发失败的那个 peer，\n"
+        "即「死消息实装」）；房间级故障仍可由主机 broadcast() 广播全房。各端据此回大厅并展示错误。\n"
         "payload: {\n"
         "  'reason': str,  错误描述（如：client_disconnect / join_validation_failed）\n"
         "}"
@@ -185,6 +195,9 @@ MESSAGE_SCHEMAS: dict[MsgType, str] = {
         "                  'crit_chance','lifesteal','thorns','damage_mult'}}\n"
         "             本人属性快照（客户端上报 / 主机转发幽灵）；主机按绝对值\n"
         "             套用到幽灵承伤，不做倍率叠乘（避免与 ATTACK_EVENT 重复乘伤害）\n"
+        "  'blessings': list[str], 可选（客户端→主机方向使用），本局已获得的祝福 id 列表\n"
+        "                 （主机据此同步各端玩家的祝福展示；缺省时按未获得任何祝福处理，\n"
+        "                 旧主机不下发该字段时各端退回本地祝福状态，不会崩）\n"
         "}\n"
     ),
     MsgType.MONSTER_SNAPSHOT: (
@@ -250,7 +263,8 @@ MESSAGE_SCHEMAS: dict[MsgType, str] = {
         "  'damage': float,      实际伤害（升级武器以客户端为准，主机据此裁决）\n"
         "  'debuffs': list,      客户端装备/武器附加 debuff 列表 [(效果ID, 等级), ...]\n"
         "  'timestamp': float,   客户端时间戳（毫秒，用于去重/延迟测量）\n"
-        "}"
+        "  'attack_speed': float} 可选，客户端所持武器攻速（连发/激光武器以主机时序为准时，\n"
+        "                          客户端据本地武器攻速上报；缺省时主机退回武器定义默认攻速）\n"
     ),
     MsgType.DAMAGE_RESULT: (
         "主机广播伤害判定结果，各端据此更新怪物血量显示。\n"
@@ -328,7 +342,9 @@ MESSAGE_SCHEMAS: dict[MsgType, str] = {
         "  'player_id': int,    使用药水的玩家 id\n"
         "  'potion_id': str,    药水 item_id\n"
         "  'accepted': bool,    是否生效（False = 血量已满/库存不足被拒）\n"
-        "  'heal_amount': float} 实际治疗量\n"
+        "  'heal_amount': float, 实际治疗量\n"
+        "  'for_peer': int}      可选，仅发给指定 player_id 的单播标识（走服务器 send_to 通道）；\n"
+        "                 缺省/为 None 时维持既有广播语义（全房可见治疗数字）"
         "}"
     ),
     MsgType.PICKUP_REQUEST: (
@@ -353,15 +369,29 @@ MESSAGE_SCHEMAS: dict[MsgType, str] = {
     MsgType.EVAC_REQUEST: (
         "客户端读条完成后请求撤离结算（read 条由客户端本地播放）。\n"
         "payload: {\n"
-        "  'player_id': int}  请求撤离的玩家 id\n"
+        "  'player_id': int,\n"
+        "  'carried': dict}     可选，客户端上报**本人实际携带清单**（本端视角 run_carried）。\n"
+        "                       槽结构与 EVAC_RESULT.run_carried 同口径（=\n"
+        "                       commit_run_to_warehouse 入参），逐槽：\n"
+        "                         'gold': int（标量槽）\n"
+        "                         'resource'/'potion': {item_id: qty}\n"
+        "                         'weapon'/'helmet'/'armor'/'backpack': {(item_id, level): qty}\n"
+        "                       装备槽键为 (item_id, level) **元组**，JSON 无元组，\n"
+        "                       线上传输前需 JSON 化（发送方定编码、收方同口径还原）。\n"
+        "\n"
+        "                       语义：客户端购买走 CARRIAGE_BUY 请求-回执、主机校验记账后回 CARRIAGE_BUY_RESULT。\n"
+        "                       账本随本次撤离请求一并上行，由主机裁决后经 _merge_authoritative\n"
+        "                       做键级差集合流（权威优先、不重复计入、金币不走合流）。\n"
+        "                       缺省时行为与旧版完全一致（主机只按自己的清单结算）。\n"
         "}"
     ),
     MsgType.EVAC_RESULT: (
         "主机下发撤离结算清单：各端（含主机）按清单调用 commit_run_to_warehouse 写本地库。\n"
         "payload: {\n"
         "  'player_id': int,    撤离玩家 id\n"
-        "  'run_carried': dict} 本次携带物清单（结构 = commit_run_to_warehouse 入参口径）\n"
-        "}"
+        "  'run_carried': dict, 本次携带物清单（结构 = commit_run_to_warehouse 入参口径）\n"
+        "  'stars': int}        可选，本次撤离评定的星级（星级评价仅主机权威计算，\n"
+        "                       各端据此更新地图星级进度；缺省时按 0 星处理）\n"
     ),
     MsgType.EVAC_POINT_STATE: (
         "主机广播主撤离点权威状态（阶段2 防守式撤离）。\n"
@@ -381,7 +411,35 @@ MESSAGE_SCHEMAS: dict[MsgType, str] = {
         "  'player_id': int,         请求玩家 id\n"
         "  'action': str,            'activate'/'repair'\n"
         "  'x': float, 'y': float}   请求时玩家世界坐标（主机判距防作弊）\n"
-        "}"
+    ),
+    MsgType.EVAC_POINT_RESULT: (
+        "主机→请求者单播回执（撤离点激活/修复受理结果）。\n"
+        "payload: {\n"
+        "  'player_id': int,         请求玩家 id\n"
+        "  'ok': bool,               是否受理成功\n"
+        "  'reason': str|None,       拒绝原因（ok=False 时有值）\n"
+        "  'action': str}            'activate'/'repair'\n"
+    ),
+    MsgType.CARRIAGE_BUY: (
+        "客户端→主机，商队购买请求。\n"
+        "payload: {\n"
+        "  'player_id': int,         请求玩家 id\n"
+        "  'kind': str,              'potion'|'weapon'|'artifact'\n"
+        "  'item_id': str,           物品 id\n"
+        "  'level': int,             武器/神器词条等级，药水填 0\n"
+        "  'qty': int,               购买数量\n"
+        "  'gold_before': float,     购买前金币\n"
+        "  'gold_after': float}      购买后金币（报文自洽校验用）\n"
+    ),
+    MsgType.CARRIAGE_BUY_RESULT: (
+        "主机→请求者单播回执。\n"
+        "payload: {\n"
+        "  'player_id': int,         请求玩家 id\n"
+        "  'ok': bool,               是否购买成功\n"
+        "  'reason': str|None,       拒绝原因（ok=False 时有值）\n"
+        "  'kind': str,              'potion'|'weapon'|'artifact'\n"
+        "  'item_id': str,           物品 id\n"
+        "  'qty': int}               购买数量\n"
     ),
     MsgType.INTERACTION_REQUEST: (
         "客户端请求与环境物交互（宝箱/水井/火箭发射台），主机裁决后广播 MAP_CHANGE。\n"
@@ -391,6 +449,15 @@ MESSAGE_SCHEMAS: dict[MsgType, str] = {
         "  'x': float, 'y': float}  请求交互时玩家世界坐标（主机判距防作弊）\n"
         "}"
     ),
+    MsgType.INTERACTION_RESULT: (
+        "主机单播交互结果给请求者（拒绝型 ACK：此前 INTERACTION_REQUEST 只有请求没有应答，客户端\n"
+        "分不清「被主机拒绝」与「请求在链路上丢了」，只能空等）。\n"
+        "payload: {\n"
+        "  'player_id': int,         请求交互的玩家 id\n"
+        "  'interaction_type': str,  交互类型（'chest'/'well'/'rocket_pad'）\n"
+        "  'ok': bool,               是否受理成功（False = 被主机拒绝）\n"
+        "  'reason': str|None}       拒绝原因（ok=False 时有值，如 too_far/no_resource/occupied）"
+    ),
     MsgType.PLAYER_ABANDON: (
         "客户端通知主机放弃行动（清装备回房），主机更新 _player_status 触发全员结束判定。\n"
         "payload: {\n"
@@ -398,21 +465,47 @@ MESSAGE_SCHEMAS: dict[MsgType, str] = {
         "  'reason': str}       放弃原因（如 '放弃行动'）\n"
         "}"
     ),
+    MsgType.PLAYER_ABANDON_RESULT: (
+        "主机单播放弃行动受理结果给请求者（拒绝型 ACK：此前 PLAYER_ABANDON 只有通知没有应答，\n"
+        "客户端无法确认主机是否受理）。\n"
+        "payload: {\n"
+        "  'player_id': int,     放弃行动的玩家 id\n"
+        "  'ok': bool,           是否受理（False = 被主机拒绝，如本局已结束）\n"
+        "  'reason': str|None}   拒绝原因（ok=False 时有值）"
+    ),
     MsgType.MAP_CHANGE: (
         "主机广播运行期地图改动（宝箱开启/可破坏环境物/水井/火箭台状态/建筑/燃烧区）。\n"
         "11.1 接线核查：change_type 全集为\n"
         "  chest_opened/env_destroyed/well_used/rocket_pad/env_damage/env_spawn/drop_spawn\n"
         "  + chest_spawn/caravan_point（阶段4 事件实体）\n"
-        "  + build_place/build_destroy（阶段1 局内建造）+ fire_zone（阶段3 火墙词缀区）\n"
+        "  + build_place/build_destroy/build_hp（阶段1 局内建造：build_hp = 建筑受损，载荷含 bid+hp）\n"
+        "  + fire_zone（阶段3 火墙词缀区）\n"
         "（客户端 _apply_map_change 对未列出的 change_type 显式记日志，禁静默忽略）\n"
         "payload: {\n"
         "  'obj_id': str,        地图对象网络 id（列表序号或建筑 bid/燃烧区 zid）\n"
         "  'change_type': str,   改动类型（见上全集）\n"
         "  'state': dict,        新状态数据（如宝箱内容/剩余血量/倒计时；env_damage 时含 damage 字段；\n"
+        "                        build_hp 时含 {hp}，即建筑当前血量（obj_id=建筑 bid，与 build_place 同口径）；\n"
         "                        build_place 时含 {kind,x,y,hp}；fire_zone 时含 {action,zid,x,y,r,life,\n"
         "                        dps,burn_duration}，action='add'/'remove'）\n"
         "  'extra': dict}        扩展字段（如掉落物生成列表，可为空 dict）\n"
         "}"
+    ),
+    MsgType.BUILD_REQUEST: (
+        "客户端请求放置局内建筑（阶段1 建造的联机接线：此前客户端只能收到 MAP_CHANGE 广播，\n"
+        "放置请求没有任何上行通道）。主机校验资源/占用/边界后置入建造系统，广播\n"
+        "MAP_CHANGE build_place（含新建筑 bid），再单播 BUILD_RESULT 给请求者。\n"
+        "payload: {\n"
+        "  'build_id': str,         建筑类型 id（entities/build_defs.BUILDS 的 key）\n"
+        "  'x': float, 'y': float}  放置点世界坐标（主机判占用/边界用，防越界建造）"
+    ),
+    MsgType.BUILD_RESULT: (
+        "主机单播放置结果给请求者（成功带新建筑 bid，失败带 reason）。\n"
+        "payload: {\n"
+        "  'build_id': str,     建筑类型 id（同 BUILD_REQUEST.build_id）\n"
+        "  'ok': bool,         是否放置成功\n"
+        "  'bid': str|None,    新建筑网络 id（ok=True 时有值，与 MAP_CHANGE build_place 的 obj_id 同口径）\n"
+        "  'reason': str|None} 拒绝原因（ok=False 时有值，如 no_resource/occupied/out_of_range）"
     ),
     MsgType.FULL_STATE: (
         "主机发给晚期加入客户端的全量世界状态，客户端据此初始化后只收增量快照。\n"
@@ -467,10 +560,10 @@ MESSAGE_SCHEMAS: dict[MsgType, str] = {
         "  'client_time': float} 发送方时间戳（秒，用于计算 RTT）\n"
     ),
     MsgType.DISCONNECT: (
-        "主动断线通知（退出/被踢/死亡离开房间）。\n"
+        "断线通知（服务器广播给房内其余玩家：peer_id 是断线者，不是收件人）。\n"
         "payload: {\n"
-        "  'player_id': int,   断线玩家 id\n"
-        "  'reason': str}      断线原因\n"
+        "  'peer_id': int,   断线玩家 id（对端，不是本端）\n"
+        "  'reason': str}    断线原因（如 connection_closed）\n"
         "}"
     ),
     MsgType.ROOM_BROADCAST: (

@@ -25,6 +25,9 @@ from config import (
     MAP_MAX_STARS,
     MAP_STAR_CRITERIA,
     MAP_UNLOCK_STARS,
+    WAREHOUSE_BASE_CAPACITY,
+    WAREHOUSE_CAPACITY_STEP,
+    WAREHOUSE_MAX_LEVEL,
     WINDOW_HEIGHT,
     WINDOW_WIDTH,
     evac_activate_cost,
@@ -108,6 +111,17 @@ def unlock_star_label(theme: str) -> str:
     """某图的累计星数解锁门槛文案（config.MAP_UNLOCK_STARS；0 星 = 初始解锁）"""
     need = int(MAP_UNLOCK_STARS.get(theme, 0))
     return "初始解锁" if need <= 0 else f"累计 ★{need} 解锁"
+
+
+def warehouse_capacity_label() -> str:
+    """仓库容量/等级的中文教学文案（数值全部实查 config.WAREHOUSE_*，禁硬编码）
+
+    例："初始 50 格，每级 +25 格，最高 Lv.5（150 格）"。容量公式与
+    db/warehouse.warehouse_capacity_for 完全同源（同一组 config 常量）。
+    """
+    top = WAREHOUSE_BASE_CAPACITY + (WAREHOUSE_MAX_LEVEL - 1) * WAREHOUSE_CAPACITY_STEP
+    return (f"初始 {WAREHOUSE_BASE_CAPACITY} 格，每级 +{WAREHOUSE_CAPACITY_STEP} 格，"
+            f"最高 Lv.{WAREHOUSE_MAX_LEVEL}（{top} 格）")
 
 
 class TutorialPage:
@@ -309,6 +323,27 @@ def build_boss_intro_pages():
             "祝你好运，勇者！",
         ], next_text="了解"),
     ]
+
+
+def build_warehouse_capacity_page(highlight=None) -> TutorialPage:
+    """仓库容量与升级教学页（阶段0，插在开始界面已有的「仓库」页之后）
+
+    讲清三件事：仓库有容量上限、初始容量是多少、满了怎么扩容。
+    数值全部实查 warehouse_capacity_label()（读 config.WAREHOUSE_*），禁写死。
+    highlight 传开始界面的仓库入口按钮矩形即可做镂空高亮（与其他阶段入口页同模式）。
+    """
+    return TutorialPage("仓库容量与升级", [
+        f"仓库有容量上限：{warehouse_capacity_label()}。",
+        "",
+        "物品占用容量和在背包里一样",
+        "（武器、护甲更占地方）。",
+        "",
+        "仓库满了，撤离时会有战利品存不进去，",
+        "结算页会告诉你丢了哪些。",
+        "",
+        "回大厅点【仓库】→ 底部【升级仓库】按钮，",
+        "花金币和仓库材料就能扩容。",
+    ], highlight=highlight, next_text="知道了")
 
 
 def finish_tutorial(window) -> None:

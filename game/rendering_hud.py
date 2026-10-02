@@ -16,8 +16,12 @@ from config import (
     EVENT_BANNER_HEIGHT, EVENT_BANNER_Y, EVENT_BANNER_BG, EVENT_BANNER_EDGE,
     EVENT_BANNER_TEXT_COLOR,
     EVENT_PANEL_BG, EVENT_PANEL_ROW_BG, EVENT_PANEL_ROW_HL, EVENT_PANEL_TEXT,
-    EVENT_PANEL_TEXT_HL, EVENT_PANEL_ROW_H, EVENT_PANEL_MARGIN, EVENT_PANEL_WIDTH,
+    EVENT_PANEL_TEXT_HL, EVENT_PANEL_ROW_H,
+    # ✕ 关闭按钮：几何（尺寸/边距）已上移到 game/map_events.caravan_close_button，
+    # 此处只取绘制用的配色与图形比例；EVENT_PANEL_MARGIN/WIDTH 随几何一并上移，导入已删。
+    EVENT_PANEL_CLOSE_GLYPH, EVENT_PANEL_CLOSE_GLYPH_RATIO, EVENT_PANEL_CLOSE_BG,
     EVENT_BANNER_MAX_HALF_W,
+    EVENT_CARAVAN_LIMITS,  # 商队单局限购上限: kind → 限购件数（Q4，已购计数存 GameState.caravan_bought）
     EVENT_AIRDROP_MINIMAP_COLOR, EVENT_CARAVAN_MINIMAP_COLOR, EVENT_MINIMAP_MARK_SIZE,
 )
 from game.render_helpers import (
@@ -552,60 +556,113 @@ def _event_banner_text_width(text: str) -> int:
     return width + 40
 
 
+# 商队弹层「不可买」行的暗色（非高亮时使用；高亮行仍用 EVENT_PANEL_TEXT_HL）。
+# 由旧版行内字面量上提为常量：「[售罄]」与「[金币不足]」两种状态共用同一暗色。
+_CARAVAN_TEXT_MUTED = (150, 110, 110)
+
+
 def draw_caravan_panel(view):
     """绘制商队换购弹层（阶段4，仅 view._caravan_panel_open 时绘制）
 
-    - 行内容：物品中文名 + 单价 + 当前携带金币 + 已持有数量；
-    - 买不起的行用暗色，购买成功/失败由 map_events 弹浮动文字提示；
-    - 客户端同样渲染（主机权威：客户端 E 键不生效，此处只做表现层同步）。
+    - 货单来自 map_events.caravan_stock(view)（按地图种子确定性抽选，返回 list[dict]，
+      每项含 item_id/kind/price/level），取代旧的全量 caravan_prices 价表；
+    - 行内容：物品中文名（武器/神器附 Lv 等级）+ 单价 + 本局限购进度「（已购bought/limit）」
+      （limit 取 config.EVENT_CARAVAN_LIMITS，仅 limit > 1 的类别显示，bought 读
+      GameState.caravan_bought）；已买满追加「[售罄]」（强制暗色），账号金币不够追加
+      「[金币不足]」（暗色），当前高亮行仍用高亮色；
+    - 标题金币是**账号金币**（db players.gold，Q1），由 map_events 开面板时写入
+      view._caravan_account_gold 缓存，本函数只读缓存 —— 禁在此每帧查库；
+    - 右上角常驻「✕ 关闭」按钮：换购弹层是绘制函数不是 arcade.View，无天然关闭入口，
+      故按钮在此绘制、命中判定在 game/input_handler.py，两侧读 map_events.caravan_close_button
+      的同一份几何（坐标随面板位置推导，不写死屏幕绝对坐标）；
+    - 购买成功/失败由 map_events 弹浮动文字提示；
+    - host/solo/client 三端均渲染（Q2：客户端本地开面板本地买，货单按种子确定性生成，
+      不走网络同步，故三端表现一致）。
     """
-    if not getattr(view, "_caravan_panel_open", False):
-        return
-    from game.map_events import caravan_label, caravan_prices
+    from game.map_events import (
+        caravan_close_button, caravan_label, caravan_panel_layout, caravan_stock,
+    )
 
-    items = caravan_prices()
-    if not items:
+    layout = caravan_panel_layout(view)
+    if layout is None:
         return
+    px, py, panel_w, panel_h = layout
+    items = caravan_stock(view)
+
     gs = view.window.game_state
-    carried = getattr(gs, "run_carried", None) or {}
-    gold = int(carried.get("gold", 0) or 0)
-    owned = dict(carried.get("potion") or {})
-    for rid, qty in (carried.get("resource") or {}).items():
-        owned[rid] = owned.get(rid, 0) + qty
+    # 账号金币：开面板时由 map_events 读库后缓存到 view 上，此处只读缓存（禁每帧 DB 访问）
+    gold = int(getattr(view, "_caravan_account_gold", 0))
+    bought_map = getattr(gs, "caravan_bought", None) or {}
 
-    title = f"流浪商队  持有金币 {gold}"
-    hint = "↑↓ 选择   E/回车 购买   走远自动关闭"
-    panel_w = EVENT_PANEL_WIDTH
-    panel_h = EVENT_PANEL_MARGIN * 2 + 30 + len(items) * EVENT_PANEL_ROW_H + 18
-    px = WINDOW_WIDTH // 2
-    py = WINDOW_HEIGHT // 2
+    title = f"流浪商队  金币 {gold}"
+    hint = "↑↓ 选择   E/回车 购买   点击 ✕ 关闭"
     # 面板底（实心）
     arcade.draw_rect_filled(
         arcade.XYWH(px, py, panel_w, panel_h), EVENT_PANEL_BG)
     # 标题实心条
     arcade.draw_rect_filled(
         arcade.XYWH(px, py + panel_h / 2 - 24, panel_w - 8, 30), EVENT_PANEL_ROW_BG)
-    _caravan_text(view, title, px, py + panel_h / 2 - 24, 14, EVENT_PANEL_TEXT_HL,
-                  anchor_y="center", bold=True)
+    # 标题左对齐（字号/颜色/加粗不变）：右上角新增 ✕ 关闭按钮后，居中标题在
+    # 金币数 ≥10 时右端会滑到按钮底下，故改为贴面板左边排版，给按钮留出右侧空档。
+    _caravan_text(view, title, px - panel_w / 2 + 10, py + panel_h / 2 - 24, 14,
+                   EVENT_PANEL_TEXT_HL, anchor_x="left", anchor_y="center", bold=True)
+    # 右上角 ✕ 关闭按钮（渲染铁律：全不透明实心填充，禁 draw_line/draw_*_outline 线框防闪烁）
+    btn = caravan_close_button(view)
+    if btn is not None:
+        bx, by, bw, bh = btn
+        arcade.draw_rect_filled(
+            arcade.XYWH(bx, by, bw, bh), EVENT_PANEL_CLOSE_BG)
+        _draw_solid_cross_glyph(bx, by, bw * EVENT_PANEL_CLOSE_GLYPH_RATIO,
+                                EVENT_PANEL_CLOSE_GLYPH)
     rows_top = py + panel_h / 2 - 44
     sel = getattr(view, "_caravan_index", 0)
-    for idx, (item_id, price) in enumerate(items.items()):
+    for idx, entry in enumerate(items):
         ry = rows_top - idx * EVENT_PANEL_ROW_H
         row_w = panel_w - 16
         arcade.draw_rect_filled(
             arcade.XYWH(px, ry, row_w, EVENT_PANEL_ROW_H - 4),
             EVENT_PANEL_ROW_HL if idx == sel else EVENT_PANEL_ROW_BG)
         color = EVENT_PANEL_TEXT_HL if idx == sel else EVENT_PANEL_TEXT
+        item_id = entry["item_id"]
+        kind = entry.get("kind", "")
+        price = int(entry.get("price", 0) or 0)
         name = caravan_label(item_id)
-        count = int(owned.get(item_id, 0) or 0)
-        text = f"{name}   {price}金" + (f"（持有{count}）" if count else "")
-        if price > gold:
+        # 武器/神器按货单抽中的等级显示 Lv（药水/资源无等级概念）
+        if kind in ("weapon", "artifact"):
+            name += f" Lv{int(entry.get('level', 1) or 1)}"
+        limit = int(EVENT_CARAVAN_LIMITS.get(kind, 0) or 0)
+        bought = int(bought_map.get(item_id, 0) or 0)
+        text = f"{name}   {price}金"
+        # 单限购多件才显示进度（限购 1 件的武器/神器显示进度无意义）
+        if limit > 1:
+            text += f"（已购{bought}/{limit}）"
+        # limit > 0 守卫：kind 未登记进 EVENT_CARAVAN_LIMITS 时 limit=0，
+        # 若直接判 bought >= limit 会把所有行误标「售罄」
+        if limit > 0 and bought >= limit:
+            text += "  [售罄]"
+            color = _CARAVAN_TEXT_MUTED if idx != sel else EVENT_PANEL_TEXT_HL
+        elif price > gold:
             text += "  [金币不足]"
-            color = (150, 110, 110) if idx != sel else EVENT_PANEL_TEXT_HL
+            color = _CARAVAN_TEXT_MUTED if idx != sel else EVENT_PANEL_TEXT_HL
         _caravan_text(view, text, px - row_w / 2 + 10, ry, 12, color,
                       anchor_x="left", anchor_y="center")
     _caravan_text(view, hint, px, py - panel_h / 2 + 16, 10, EVENT_PANEL_TEXT,
                   anchor_y="center")
+
+
+def _draw_solid_cross_glyph(cx, cy, size, color) -> None:
+    """在 (cx, cy) 处画实心 ✕ 形状（沿两条对角线排列的小实心方块拼成）
+
+    渲染铁律：禁 draw_line / draw_*_outline（线框层会闪烁），故 ✕ 不走线绘制，
+    改由 5×2 个不透明实心方块拼出交叉形状（size 为 ✕ 整体边长）。
+    """
+    half = size / 2
+    thick = size * 0.28
+    for i in range(5):
+        t = -half + size * i / 4
+        for sx in (1, -1):
+            arcade.draw_rect_filled(
+                arcade.XYWH(cx + sx * t, cy + t, thick, thick), color)
 
 
 def _caravan_text(view, text, x, y, size, color, anchor_x="center", anchor_y="center",

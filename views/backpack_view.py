@@ -26,6 +26,7 @@ from entities.equipment_defs import HELMETS, ARMORS, BACKPACKS
 from views.scroll_view import ScrollView
 from views.text_cache import TextCache
 from game.sound_manager import sound_manager
+from game.monster_utils import lookup_weapon_range  # 射程统一查武器定义表，禁魔数回退
 
 
 class BackpackView(ScrollView):
@@ -379,7 +380,7 @@ class BackpackView(ScrollView):
             gs.current_weapon_kind = "melee"
             gs.weapon_damage = 8
             gs.weapon_speed = 1.0
-            gs.weapon_range = 40
+            gs.weapon_range = lookup_weapon_range("melee", "拳头")
             gs.weapon_proj_speed = 0
             gs.weapon_special = ""
             gs.weapon_auto_fire = False

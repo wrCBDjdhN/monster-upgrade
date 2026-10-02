@@ -17,11 +17,13 @@ from config import (
     MARKET_RESOURCE_SHOP_LEVEL, MARKET_RESOURCE_PRICES,
 )
 from db.database import (
-    get_weapons, get_gold, upgrade_weapon,
+    get_weapons, get_gold, add_gold, upgrade_weapon,
     get_equipment, upgrade_equipment,
     get_warehouse, spend_gold, spend_warehouse_item, add_warehouse_item,
     reforge_weapon, reforge_equipment,
     get_facility_level,
+    # 阶段11：仓库容量上限（回购整笔事务，装不下就整笔拒绝）
+    warehouse_remaining_capacity, add_warehouse_item_checked,
 )
 from entities.equipment_defs import HELMETS, ARMORS, BACKPACKS, POTIONS
 from entities.weapon_defs import MELEE_WEAPONS, RANGED_WEAPONS
@@ -32,6 +34,7 @@ from views.scroll_view import ScrollView
 from views.text_cache import TextCache
 from views.market_bulk import MarketBulkOverlay
 from game.sound_manager import sound_manager
+from game.monster_utils import lookup_weapon_range  # 射程统一查武器定义表，禁魔数回退
 
 # 市场设施 id（查库/进设施页用；等级 0 = 未建造，入口守卫在 start_view._enter_facility）
 MARKET_FACILITY_ID = "market"
@@ -208,17 +211,28 @@ class MarketView(ScrollView):
         self._build_content()
 
     def _buy_resource(self, resource_id: str, name: str, unit: int):
-        """资源回购：先校验金币 → 扣金 → 入库（先校验后扣，杜绝半扣）"""
+        """资源回购：先校验金币与仓库容量 → 扣金 → 入库（先校验后扣，杜绝半扣）"""
         pid = self.window.game_state.player_id
         qty = max(1, int(self._res_qty.get(resource_id, 1)))
         total = int(unit) * qty
         if get_gold(pid) < total:
             self.show_toast(f"金币不足（需 {total} 金币），未购入")
             return
+        # 阶段11：仓库有容量上限，回购属局外整笔事务 → 装不下就整笔拒绝，
+        # 必须在扣金币**之前**拦下，否则会出现「钱扣了货没进」（资源按 1 件 = 1 格计）
+        remain = warehouse_remaining_capacity(pid)
+        if qty > remain:
+            self.show_toast(f"仓库容量不足（剩 {remain} 格，需 {qty} 格），可先升级仓库扩容")
+            return
         if not spend_gold(pid, total):
             self.show_toast("金币扣除失败，未购入")
             return
-        add_warehouse_item(pid, "resource", resource_id, qty)
+        ok, why = add_warehouse_item_checked(pid, "resource", resource_id, qty)
+        if not ok:
+            # 兜底：并发/时序导致容量被抢占时整笔回退，避免钱货两失
+            add_gold(pid, total)
+            self.show_toast(f"{why}，已退还金币")
+            return
         sound_manager.play_upgrade()
         self.show_toast(f"购入 {name}×{qty}，花费 {total} 金币")
         self._build_content()  # 刷新金币可购状态（回购不改变货架行数，仅状态变化）
@@ -351,7 +365,7 @@ class MarketView(ScrollView):
                     "item_id": wdef["item_id"], "name": wdef["name"],
                     "kind": wdef["kind"], "kind_label": kind_label,
                     "damage": wdef["damage"], "attack_speed": wdef.get("attack_speed", 1.0),
-                    "range": wdef.get("range", 40), "cost": cost,
+                    "range": lookup_weapon_range(wdef["kind"], wdef["item_id"]), "cost": cost,
                     "can_buy": gold >= cost,
                 }))
                 y -= 40

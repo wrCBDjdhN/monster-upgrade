@@ -29,11 +29,13 @@ from collections import deque
 import arcade
 from config import (
     MAP_WIDTH, MAP_HEIGHT, TILE_SIZE, PROJECTILE_SIZE, PROJECTILE_LIFETIME,
-    MONSTER_AGGRO_RANGE_MULT, MONSTER_AGGRO_RANGE_BASE, PLAYER_SIZE, DEBUFF_TICK_INTERVAL,
+    MONSTER_AGGRO_RANGE_MULT, MONSTER_AGGRO_RANGE_BASE, MONSTER_ACQUIRE_RANGE_MAX,
+    PLAYER_SIZE, DEBUFF_TICK_INTERVAL,
     HIT_FLASH_DURATION, RANGED_KEEP_MIN, RANGED_KEEP_MAX, BUILDING_ATTACK_SEARCH_RANGE,
     MONSTER_NAV_CELL_PAD, MONSTER_NAV_REFRESH_INTERVAL, MONSTER_NAV_WAYPOINT_LOOKAHEAD,
     MONSTER_NAV_WAYPOINT_ARRIVE_RATIO, MONSTER_NAV_WAYPOINT_STUCK_FRAMES,
     MONSTER_NAV_STUCK_FRAMES, MONSTER_NAV_MOVE_EPS, MONSTER_NAV_UNSTICK_SEARCH_RING,
+    MELEE_ATTACK_REACH_PAD,
 )
 
 
@@ -514,7 +516,8 @@ def _segment_intersects_rect(x0, y0, x1, y1, rx, ry, rw, rh):
 def _has_line_of_sight(x0: float, y0: float, x1: float, y1: float, walls: list, r0: float = 0, r1: float = 0) -> bool:
     """检查两点之间是否有视线（连线未被墙壁阻挡）
 
-    修复"怪物隔墙索敌"：怪物与玩家之间隔着墙时不得索敌/追击/攻击。
+    修复"怪物隔墙索敌"：隔墙时怪物不得**开火/挥砍**（索敌闸另见 update()：
+    dist <= config.MONSTER_ACQUIRE_RANGE_MAX 时允许隔墙索敌并走 BFS 绕过来）。
     修复"拐角误判卡住"：r0/r1 为起点/终点实体半径，检测改为"怪物表面→玩家表面"
     （两端各向内侧缩进半径），玩家在墙角只露出部分身体即算可见——360° 视野被墙
     遮挡后，拐角方向仍保留下来的视野部分可以看到玩家。
@@ -622,11 +625,40 @@ def _building_is_active(monster, building) -> bool:
     return any(item is building for item in buildings)
 
 
+def _melee_attack_distance(monster) -> float:
+    """近战怪物的实际攻击距离（武器射程真实生效）
+
+    = max(武器射程 _weapon_range, 贴身下限 _size + MELEE_ATTACK_REACH_PAD)
+    - _weapon_range 由 assign_monster_weapon 从 entities/weapon_defs 的 range 同步写入
+      （拳头 40 / 木剑 50 / 铁剑 55 / 石锤 45 / 弯刀 55 / 和道一文字 150 / 雷神之锤 110 …）；
+    - 贴身下限保留 _size 作为下限：携带石锤（range=45）的僵尸不会因射程小于自身体型
+      而永远打不到贴脸的玩家；
+    - 未装备武器（_weapon_range is None，如 Camel 武器池为空）时退回原「_size + 20」
+      默认值，行为与修复前一致。
+    """
+    reach = getattr(monster, "_weapon_range", None)
+    floor = monster._size + MELEE_ATTACK_REACH_PAD
+    return max(reach, floor) if reach is not None else floor
+
+
+def _ranged_attack_distance(monster) -> float:
+    """远程怪物的实际开火距离（武器射程真实生效）
+
+    = 武器射程 _weapon_range（与近战同一同步口径）
+    - 未装备武器时退回原 _aggro_range（索敌距离）默认值，行为与修复前一致；
+    - 远程怪武器池只含 ranged 武器（最小 220 ≥ RANGED_KEEP_MIN=120），因此不会出现
+      「射程短于风筝距离 → 永远不开火」的退化；该下界由武器池保证，不在此处兜底。
+    """
+    reach = getattr(monster, "_weapon_range", None)
+    return reach if reach is not None else monster._aggro_range
+
+
 def _building_attack_distance(monster, building) -> float:
-    """计算怪物与建筑边缘接触所需的攻击距离。"""
+    """计算怪物与建筑边缘接触所需的攻击距离（与近战武器射程同口径）。"""
     sprite = getattr(building, "sprite", None)
     building_size = float(getattr(sprite, "width", 0) or 0)
-    return monster._size + building_size * 0.5
+    # 与近战统一口径：长柄/神器武器可站在更远处挥砍建筑，短武器仍贴到建筑表面打
+    return max(_melee_attack_distance(monster), monster._size + building_size * 0.5)
 
 
 def _move_toward_building(monster, building, delta_time: float) -> None:
@@ -677,12 +709,35 @@ def _try_attack_building(monster, building) -> bool | None:
 
 
 def _evac_aggro_attack_distance(monster, point) -> float:
-    """怪物接触撤离点并发起攻击所需的距离（沿用近战 try_attack 的 _size + 20 口径）。"""
+    """怪物接触撤离点并发起攻击所需的距离（与近战攻击距离同口径 = 武器射程）。"""
     del point  # 撤离点尺寸由渲染层决定，攻击距离与近战攻击距离保持同一口径
-    return monster._size + 20
+    return _melee_attack_distance(monster)
 
 
-def _update_evac_aggro(monster, delta_time: float) -> bool:
+def _player_intercepts_evac_aggro(monster, player_x, player_y, players) -> bool:
+    """玩家是否能把进攻波的怪从撤离点目标上抢走（防守期插队索敌）
+
+    判定：玩家在怪物索敌范围 `_aggro_range` 内且有视线（边缘视线，拐角露身即可见）
+    → 怪物立刻放弃撤离点、回头打玩家。
+    联机多目标模式取最近存活玩家（与 update() 的目标选择同口径）；无存活玩家不插队。
+    """
+    if players is not None:
+        target = _select_target(players, monster.center_x, monster.center_y)
+        if target is None:
+            return False
+        tx, ty = target.center_x, target.center_y
+    else:
+        if player_x is None or player_y is None:
+            return False
+        tx, ty = player_x, player_y
+    if math.hypot(tx - monster.center_x, ty - monster.center_y) > monster._aggro_range:
+        return False
+    return _has_line_of_sight(monster.center_x, monster.center_y, tx, ty,
+                              monster._walls, monster._size, PLAYER_SIZE)
+
+
+def _update_evac_aggro(monster, delta_time: float,
+                       player_x=None, player_y=None, players=None) -> bool:
     """阶段 2 防守撤离：怪物朝撤离点推进并攻击（进攻波专用）。
 
     - 撤离点引用经 set_evac_point_provider 注入（怪物不持有 GameView），因此撤离点
@@ -693,11 +748,23 @@ def _update_evac_aggro(monster, delta_time: float) -> bool:
     - 缺陷⑦修复 2026-09-26：房间只有一个门洞，"直线 + 分轴滑动"会让贴墙怪切向分量≈0
       而永久死锁（永远进不了攻击距离、撤离点不掉血）；推进改为先走 BFS 航点（_nav_follow），
       无路径/航点耗尽才回退原直线逻辑。本段依旧不接入任何视线判定。
+    - 防守期插队修复：防守期间玩家走进该怪索敌范围且视线通畅时，怪物改为攻击玩家
+      （清空 aggro_point 并返回 False 交回普通索敌 AI）；玩家远离或被墙挡住则继续打撤离点。
+
+    Args:
+        monster: 怪物实例
+        delta_time: 帧时长（秒）
+        player_x / player_y: 单机模式的玩家坐标（None = 本帧不做插队判定）
+        players: 联机多目标模式的玩家列表（None 时回退 player_x/player_y）
 
     Returns:
         bool: True 表示本帧已由撤离点目标接管，调用方应直接 return，不再走玩家索敌逻辑。
     """
     if monster.aggro_point is None:
+        return False
+    # 防守期插队索敌：玩家走到怪的索敌范围内且视线通畅 → 放弃撤离点，改为攻击玩家
+    if _player_intercepts_evac_aggro(monster, player_x, player_y, players):
+        monster.aggro_point = None
         return False
     provider = getattr(monster, "_evac_point_provider", None)
     point = provider() if provider is not None else None
@@ -755,17 +822,22 @@ class Projectile(arcade.SpriteSolidColor):
     """远程弹丸
 
     持续向目标方向直线飞行，碰墙或超时后消失；特殊弹丸（explosive）碰墙触发爆炸。
+    max_range 不为 None 时额外受射程上限约束（飞出武器射程即消散）。
     """
     def __init__(self, center_x: float, center_y: float, target_x: float, target_y: float,
                  speed: float, damage: float, color: tuple = (255, 100, 50),
                  debuff_id: str | None = None, size: int = PROJECTILE_SIZE,
-                 special: str | None = None, debuffs: list | None = None):
+                 special: str | None = None, debuffs: list | None = None,
+                 max_range: float | None = None):
         """初始化弹丸精灵并计算飞行方向向量
 
         center_x/y：起始坐标；target_x/y：目标坐标（方向向量由此计算，不追踪）
         speed：每秒像素速度；damage：命中伤害；color：弹丸颜色
         debuff_id：命中附加的 debuff（怪物弹丸用）；special：特殊属性（"explosive"=爆炸）
         debuffs：武器附加效果列表 [((效果ID, 效果等级), ...]，怪物装备武器带来的额外效果
+        max_range：射程上限（像素，等于开火时武器射程）。弹丸按固定速度直线飞行，
+            累计飞行距离（等价于出生点到当前位置的直线距离）超过该值即消散，
+            避免远程怪在玩家躲到射程外后弹丸仍横穿整张图。None = 不限射程（保持旧行为）。
         """
         super().__init__(size, size, color=color)
         self.center_x = center_x
@@ -775,6 +847,8 @@ class Projectile(arcade.SpriteSolidColor):
         self.debuff_id = debuff_id  # 命中时附加的 debuff（木乃伊远程毒弹/骷髅BOSS冰冻弹）
         self.debuffs = debuffs or []  # 武器附加效果列表 [(效果ID, 效果等级), ...]（怪物装备武器带来的额外效果）
         self.special = special  # 弹丸特殊属性（火箭兵弹丸 special="explosive" 爆炸）
+        self._max_range = max_range  # 射程上限（None=不限）
+        self._traveled = 0.0  # 累计飞行距离
         dx = target_x - center_x
         dy = target_y - center_y
         dist = math.hypot(dx, dy)
@@ -786,14 +860,23 @@ class Projectile(arcade.SpriteSolidColor):
             self.change_y = 0
 
     def update(self, delta_time: float) -> None:
-        """按帧递进弹丸位置并递减生命周期"""
-        self.center_x += self.change_x * delta_time
-        self.center_y += self.change_y * delta_time
+        """按帧递进弹丸位置、累计飞行距离并递减生命周期"""
+        step_x = self.change_x * delta_time
+        step_y = self.change_y * delta_time
+        self.center_x += step_x
+        self.center_y += step_y
+        # 固定速度直线飞行 → 累计步长长度 == 出生点到当前位置的直线距离
+        self._traveled += math.hypot(step_x, step_y)
         self._lifetime -= delta_time
 
     @property
     def expired(self) -> bool:
-        return self._lifetime <= 0
+        """生命周期耗尽或飞出射程上限即视为过期（调用方据此移除精灵）"""
+        if self._lifetime <= 0:
+            return True
+        if self._max_range is not None and self._traveled > self._max_range:
+            return True
+        return False
 
 
 class _MeleeMonsterBase(arcade.SpriteSolidColor):
@@ -860,6 +943,10 @@ class _MeleeMonsterBase(arcade.SpriteSolidColor):
         self.helmet_drop_id = None
         # 武器系统：怪物携带武器，击败后掉落自身武器（等级由分配时决定）
         self.weapon = None          # {"item_id": str, "name": str, "color": tuple, "level": int}
+        # 武器射程（像素）：由 assign_monster_weapon 从 entities/weapon_defs 的 range 同步写入，
+        # 近战取 _melee_attack_distance()、远程取 _ranged_attack_distance()；
+        # None = 未装备武器（如 Camel 武器池为空），此时按基类默认值回退
+        self._weapon_range: float | None = None
         # 最后攻击者网络 id（默认 0=单机/本端；等级经验按此归属判断击杀者）
         self.last_attacker_id = 0
         # debuff 系统
@@ -938,7 +1025,7 @@ class _MeleeMonsterBase(arcade.SpriteSolidColor):
         # 技能 buff 计时器递减（狂暴/骨盾/战术撤退等临时效果到期恢复）
         # 技能冷却递减：按距离分档 + 冷却取代原 50% 概率随机（用户需求 2026-09-26）后，
         # 冷却表 monster._skill_cds 必须逐帧推进，否则技能永不再放
-        from game.monster_utils import update_skill_buffs, update_skill_cooldowns
+        from game.monster_utils import try_trigger_rage, update_skill_buffs, update_skill_cooldowns
         update_skill_buffs(self, delta_time)
         update_skill_cooldowns(self, delta_time)
         # 附加效果结算（中毒/燃烧掉血、冰冻/减速、眩晕）
@@ -957,7 +1044,8 @@ class _MeleeMonsterBase(arcade.SpriteSolidColor):
             self._attack_timer = max(0, self._attack_timer - delta_time)
             return
         # 阶段 2 防守撤离：进攻波目标为撤离点时接管本帧 AI
-        if _update_evac_aggro(self, delta_time):
+        # 传入玩家坐标/列表：玩家进入索敌范围且视线通畅时，怪改为攻击玩家（防守期插队）
+        if _update_evac_aggro(self, delta_time, player_x, player_y, players):
             return
         if players is not None:
             # 多目标模式：选取最近存活玩家作为当前目标，无存活玩家则待机
@@ -974,9 +1062,31 @@ class _MeleeMonsterBase(arcade.SpriteSolidColor):
         if dist > self._aggro_range or dist == 0:
             self._attack_timer = max(0, self._attack_timer - delta_time)
             return
-        # 隔墙（无视线）不索敌：边缘视线（怪物表面→玩家表面），拐角露出部分身体即可看到
-        if not _has_line_of_sight(self.center_x, self.center_y, player_x, player_y, self._walls,
-                                  self._size, PLAYER_SIZE):
+        # 索敌闸不再被视线一刀切阻断（用户缺陷：玩家隔着墙吸不走仇恨，怪贴墙原地不动）：
+        # - dist <= MONSTER_ACQUIRE_RANGE_MAX（config）：近距离即使隔墙也索敌，随后走 BFS 绕墙过来；
+        # - dist >  该上限：仍要求视线通畅（边缘视线，拐角露出部分身体即可见），
+        #   避免封死房间/无通路的场景里怪物在远处无路可走、却永久贴墙空转。
+        # 注：开火闸仍单独要求视线（禁隔墙攻击），见 try_attack。
+        if dist > MONSTER_ACQUIRE_RANGE_MAX and not _has_line_of_sight(
+                self.center_x, self.center_y, player_x, player_y, self._walls,
+                self._size, PLAYER_SIZE):
+            self._attack_timer = max(0, self._attack_timer - delta_time)
+            return
+        # 狂暴独立触发通路：已锁定玩家（过了上面的索敌/视线闸）后每帧按概率尝试放狂暴，
+        # 与 near/far 距离分档并行，不改动 pick_skill_index。详见 monster_utils.try_trigger_rage
+        try_trigger_rage(self)
+        # 近战站定（用户需求 2026-10-01）：进入武器射程后停止贴近玩家，由 try_attack
+        # 按武器攻速原地输出；玩家拉开距离则下一帧 dist 超射程自动恢复追击，
+        # 实现"随玩家移动控制距离"（BOSS/精英走同一基类，自动生效）。
+        # 站定条件（全部满足）：
+        # - attack_building/aggro_point 为空：拆建筑/攻撤离点两种接管目标时不插队
+        # - dist < 武器射程（严格小于，与 try_attack 判定对齐，防卡在射程边界永不攻击）
+        # - 视线通畅：射程可长于墙厚，隔墙不站定而继续绕墙/BFS，防"射程内隔墙发呆"
+        if (self.attack_building is None and self.aggro_point is None
+                and dist < _melee_attack_distance(self)
+                and _has_line_of_sight(self.center_x, self.center_y, player_x, player_y,
+                                       self._walls, self._size, PLAYER_SIZE)):
+            # 冷却计时器必须照常递减：本分支提前 return，不递减则挥砍冷却永久冻结
             self._attack_timer = max(0, self._attack_timer - delta_time)
             return
         # 直接冲向玩家；撞墙时沿轴滑动（分轴尝试），避免卡在门口墙角
@@ -1011,11 +1121,19 @@ class _MeleeMonsterBase(arcade.SpriteSolidColor):
                 self.attack_building = target
                 _move_toward_building(self, target, delta_time)
             else:
-                # 整体移动被挡：分轴尝试，允许怪物沿墙滑行绕过墙角进入门洞
-                if _can_move_to(new_x, self.center_y, self._size, self._walls):
-                    self.center_x = new_x
-                if _can_move_to(self.center_x, new_y, self._size, self._walls):
-                    self.center_y = new_y
+                # 直线被挡且附近无建筑可拆：立即转 BFS 航点绕开，不再只靠分轴滑动硬顶。
+                # 与 _nav_chase_step 用的是同一套 BFS（_nav_follow），区别是不等
+                # MONSTER_NAV_STUCK_FRAMES 的卡死计数——被建筑/墙角挡住时整步与两次单轴
+                # 探测往往同帧全失败，靠分轴滑动要卡满阈值才转 BFS，玩家会看到怪原地不动。
+                self._nav_mode = True
+                if not _nav_follow(self, player_x, player_y, delta_time):
+                    # 无路径/航点耗尽 → 退出航点模式并回退分轴滑动（行为不劣化）
+                    _nav_reset(self)
+                    # 整体移动被挡：分轴尝试，允许怪物沿墙滑行绕过墙角进入门洞
+                    if _can_move_to(new_x, self.center_y, self._size, self._walls):
+                        self.center_x = new_x
+                    if _can_move_to(self.center_x, new_y, self._size, self._walls):
+                        self.center_y = new_y
         self._attack_timer = max(0, self._attack_timer - delta_time)
 
     def try_attack(self, player=None, players=None) -> bool:
@@ -1033,6 +1151,10 @@ class _MeleeMonsterBase(arcade.SpriteSolidColor):
             # 眩晕状态下无法攻击
             return False
         # 阶段 2：进攻撤离点期间不在这里攻击玩家（伤害已在 _update_evac_aggro 结算）
+        # 放行口径：aggro_point 非空 = 该怪本帧仍以撤离点为目标 → 不打玩家；
+        # 防守期插队（玩家进索敌范围且视线通畅）已在 _update_evac_aggro 清空 aggro_point，
+        # 此处自然落到下面的玩家攻击分支（views/game_view.py 每帧先 update 后 try_attack，
+        # 故插队当帧即可开打，无需等下一帧）
         if self.aggro_point is not None:
             return False
         if self.attack_building is not None:
@@ -1046,7 +1168,13 @@ class _MeleeMonsterBase(arcade.SpriteSolidColor):
             # 无目标（多目标模式下无存活玩家，或单目标未传入玩家）无法攻击
             return False
         dist = math.hypot(player.center_x - self.center_x, player.center_y - self.center_y)
-        if dist < self._size + 20 and self._attack_timer <= 0:
+        # 攻击距离 = 武器射程真实生效（_melee_attack_distance：max(武器射程, _size + 20)）
+        # 视线闸：武器射程最长 150px > 墙厚，不加此闸会出现「隔墙挥砍打到玩家」。
+        # 修复前攻击距离仅 _size+20 ≈ 44px，够不到墙后玩家，故此前近战无需视线判定。
+        if (dist < _melee_attack_distance(self) and self._attack_timer <= 0
+                and _has_line_of_sight(
+                    self.center_x, self.center_y, player.center_x, player.center_y,
+                    self._walls, self._size, PLAYER_SIZE)):
             self._attack_timer = self._attack_delay
             # 攻击时触发技能提示 + 实际效果
             # 按距离分档 + 冷却取代原 50% 概率随机（用户需求 2026-09-26）：
@@ -1288,6 +1416,10 @@ class _RangedMonsterBase(arcade.SpriteSolidColor):
         self.helmet_drop_id = None
         # 武器系统：怪物携带武器，击败后掉落自身武器（等级由分配时决定）
         self.weapon = None          # {"item_id": str, "name": str, "color": tuple, "level": int}
+        # 武器射程（像素）：由 assign_monster_weapon 从 entities/weapon_defs 的 range 同步写入，
+        # 近战取 _melee_attack_distance()、远程取 _ranged_attack_distance()；
+        # None = 未装备武器（如 Camel 武器池为空），此时按基类默认值回退
+        self._weapon_range: float | None = None
         # 最后攻击者网络 id（默认 0=单机/本端；等级经验按此归属判断击杀者）
         self.last_attacker_id = 0
         # debuff 系统
@@ -1369,7 +1501,7 @@ class _RangedMonsterBase(arcade.SpriteSolidColor):
         # 技能 buff 计时器递减（狂暴/骨盾/战术撤退等临时效果到期恢复）
         # 技能冷却递减：按距离分档 + 冷却取代原 50% 概率随机（用户需求 2026-09-26）后，
         # 冷却表 monster._skill_cds 必须逐帧推进，否则技能永不再放
-        from game.monster_utils import update_skill_buffs, update_skill_cooldowns
+        from game.monster_utils import try_trigger_rage, update_skill_buffs, update_skill_cooldowns
         update_skill_buffs(self, delta_time)
         update_skill_cooldowns(self, delta_time)
         # 附加效果结算
@@ -1387,7 +1519,8 @@ class _RangedMonsterBase(arcade.SpriteSolidColor):
             self._attack_timer = max(0, self._attack_timer - delta_time)
             return
         # 阶段 2 防守撤离：进攻波目标为撤离点时接管本帧 AI
-        if _update_evac_aggro(self, delta_time):
+        # 传入玩家坐标/列表：玩家进入索敌范围且视线通畅时，怪改为攻击玩家（防守期插队）
+        if _update_evac_aggro(self, delta_time, player_x, player_y, players):
             return
         if players is not None:
             # 多目标模式：选取最近存活玩家作为当前目标，无存活玩家则待机
@@ -1404,11 +1537,19 @@ class _RangedMonsterBase(arcade.SpriteSolidColor):
         if dist > self._aggro_range or dist == 0:
             self._attack_timer = max(0, self._attack_timer - delta_time)
             return
-        # 隔墙（无视线）不索敌：边缘视线（怪物表面→玩家表面），拐角露出部分身体即可看到
-        if not _has_line_of_sight(self.center_x, self.center_y, player_x, player_y, self._walls,
-                                  self._size, PLAYER_SIZE):
+        # 索敌闸不再被视线一刀切阻断（用户缺陷：玩家隔着墙吸不走仇恨，怪贴墙原地不动）：
+        # - dist <= MONSTER_ACQUIRE_RANGE_MAX（config）：近距离即使隔墙也索敌，随后走 BFS 绕墙过来；
+        # - dist >  该上限：仍要求视线通畅（边缘视线，拐角露出部分身体即可见），
+        #   避免封死房间/无通路的场景里怪物在远处无路可走、却永久贴墙空转。
+        # 注：开火闸仍单独要求视线（禁隔墙攻击），见 try_attack。
+        if dist > MONSTER_ACQUIRE_RANGE_MAX and not _has_line_of_sight(
+                self.center_x, self.center_y, player_x, player_y, self._walls,
+                self._size, PLAYER_SIZE):
             self._attack_timer = max(0, self._attack_timer - delta_time)
             return
+        # 狂暴独立触发通路：已锁定玩家（过了上面的索敌/视线闸）后每帧按概率尝试放狂暴，
+        # 与 near/far 距离分档并行，不改动 pick_skill_index。详见 monster_utils.try_trigger_rage
+        try_trigger_rage(self)
         # 保持距离 120~200；撞墙时沿轴滑动（分轴尝试），避免卡在门口墙角
         move_x, move_y = 0, 0
         if dist > RANGED_KEEP_MAX:
@@ -1472,6 +1613,8 @@ class _RangedMonsterBase(arcade.SpriteSolidColor):
             # 眩晕状态下无法攻击
             return None
         # 阶段 2：进攻撤离点期间不在这里攻击玩家（伤害已在 _update_evac_aggro 结算）
+        # 放行口径同近战：aggro_point 非空 = 本帧仍以撤离点为目标；防守期插队已在
+        # _update_evac_aggro 清空 aggro_point → 自然落到下面的玩家开火分支
         if self.aggro_point is not None:
             return None
         if self.attack_building is not None:
@@ -1486,8 +1629,9 @@ class _RangedMonsterBase(arcade.SpriteSolidColor):
             # 无目标（多目标模式下无存活玩家，或单目标未传入玩家）无法攻击
             return None
         dist = math.hypot(player.center_x - self.center_x, player.center_y - self.center_y)
+        # 开火距离 = 武器射程真实生效（_ranged_attack_distance：武器射程，无武器回退 _aggro_range）
         # 隔墙（无视线）不开火：与索敌规则一致（边缘视线），防止远程怪隔着墙射击
-        if dist < self._aggro_range and self._attack_timer <= 0 and _has_line_of_sight(
+        if dist < _ranged_attack_distance(self) and self._attack_timer <= 0 and _has_line_of_sight(
                 self.center_x, self.center_y, player.center_x, player.center_y, self._walls,
                 self._size, PLAYER_SIZE):
             self._attack_timer = self._attack_delay
@@ -1523,6 +1667,8 @@ class _RangedMonsterBase(arcade.SpriteSolidColor):
                 self._proj_speed, self.damage,
                 color=self._proj_color, debuff_id=self.debuff_id, size=self._proj_size,
                 debuffs=combined_debuffs,
+                # 射程上限 = 本次开火所用的武器射程：玩家退到射程外后弹丸不再横穿地图
+                max_range=_ranged_attack_distance(self),
             )
         return None
 

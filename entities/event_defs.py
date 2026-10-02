@@ -5,7 +5,7 @@
 
 - tide（尸潮）：怪物上限 ×cap_mult、击杀掉落 ×reward_mult（怪更多、奖励更高）
 - airdrop（空投）：开局 delay 秒后在地图上落地 crate_count 个高级补给箱
-- caravan（商队）：地图上生成一个交互点，按 E 用局内金币按 price_table 换购
+- caravan（商队）：地图上生成一个交互点，按 E 用账号金币按 price_table 换购
 - relic（神器低语）：本局神器掉落等级 +artifact_bonus 比例
 
 本表只放数据，数值一律从 config 导入（禁在本层硬编码）；banner 为开局横幅文案。
@@ -37,7 +37,7 @@ MAP_EVENTS: dict[str, dict] = {
     "caravan": {
         "name": "商队",
         "banner": "流浪商队已抵达：靠近招牌按 E 用金币换购补给",
-        "price_table": EVENT_CARAVAN_PRICES,    # 换购价表：item_id → 局内金币价
+        "price_table": EVENT_CARAVAN_PRICES,    # 换购价表：item_id → 账号金币价
     },
     "relic": {
         "name": "神器低语",

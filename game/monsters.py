@@ -28,7 +28,7 @@ from config import MAP_WIDTH, MAP_HEIGHT, PLAYER_SIZE
 from entities.monster_defs import (
     BOSS_SKILLS, MONSTER_CONFIGS, get_boss_skill, get_boss_skill_cooldowns,
 )
-from game.monster_base import _WallGrid, Projectile, _MeleeMonsterBase, _RangedMonsterBase, _select_target, _has_line_of_sight
+from game.monster_base import _WallGrid, Projectile, _MeleeMonsterBase, _RangedMonsterBase, _select_target, _has_line_of_sight, _ranged_attack_distance
 
 # Re-export for backward compatibility
 from game.monster_base import _WallGrid, Projectile, _MeleeMonsterBase, _RangedMonsterBase
@@ -611,6 +611,8 @@ class RocketTroop(_RangedMonsterBase):
             # 眩晕状态下无法攻击
             return None
         # 阶段 2：进攻撤离点期间不在这里攻击玩家（伤害已在 _update_evac_aggro 结算）
+        # 放行口径同基类：aggro_point 非空 = 本帧仍以撤离点为目标；防守期插队已在
+        # _update_evac_aggro 清空 aggro_point → 自然落到下面的玩家开火分支
         if self.aggro_point is not None:
             return None
         if players is not None:
@@ -620,8 +622,9 @@ class RocketTroop(_RangedMonsterBase):
             # 无目标（多目标模式下无存活玩家，或单目标未传入玩家）无法攻击
             return None
         dist = math.hypot(player.center_x - self.center_x, player.center_y - self.center_y)
+        # 开火距离 = 武器射程真实生效（_ranged_attack_distance：武器射程，无武器回退 _aggro_range）
         # 隔墙（无视线）不开火：与索敌规则一致（边缘视线），防止火箭兵隔着墙射击
-        if dist < self._aggro_range and self._attack_timer <= 0 and _has_line_of_sight(
+        if dist < _ranged_attack_distance(self) and self._attack_timer <= 0 and _has_line_of_sight(
                 self.center_x, self.center_y, player.center_x, player.center_y, self._walls,
                 self._size, PLAYER_SIZE):
             self._attack_timer = self._attack_delay
@@ -642,6 +645,9 @@ class RocketTroop(_RangedMonsterBase):
                 color=self._proj_color, debuff_id=self.debuff_id, size=self._proj_size,
                 special="explosive",  # 火箭弹丸爆炸属性
                 debuffs=combined_debuffs,
+                # 射程上限 = 本次开火所用的武器射程（爆炸属性与射程上限互不影响：
+                # 仍先碰墙触发 AOE，飞满射程才消散）
+                max_range=_ranged_attack_distance(self),
             )
         return None
 
@@ -744,7 +750,8 @@ class BossSpace(_RangedMonsterBase):
         if self._try_use_skill(player, 0.0, players):
             return None
         dist = math.hypot(player.center_x - self.center_x, player.center_y - self.center_y)
-        if dist < self._aggro_range and self._attack_timer <= 0 and _has_line_of_sight(
+        # 开火距离 = 武器射程真实生效（_ranged_attack_distance：武器射程，无武器回退 _aggro_range）
+        if dist < _ranged_attack_distance(self) and self._attack_timer <= 0 and _has_line_of_sight(
                 self.center_x, self.center_y, player.center_x, player.center_y, self._walls,
                 self._size, PLAYER_SIZE):
             self._attack_timer = self._attack_delay
@@ -763,5 +770,7 @@ class BossSpace(_RangedMonsterBase):
                 self._proj_speed, self.damage,
                 color=self._proj_color, debuff_id=self.debuff_id, size=self._proj_size,
                 debuffs=combined_debuffs,
+                # 射程上限 = 本次开火所用的武器射程
+                max_range=_ranged_attack_distance(self),
             )
         return None

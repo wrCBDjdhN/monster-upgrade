@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import socket
 import threading
+import time
 from collections.abc import Callable
 
 from websockets.asyncio.client import ClientConnection, connect as _ws_connect
@@ -41,6 +42,20 @@ except ImportError:
     # 此时以顶层模块方式导入（与 _selftest_threadbridge.py 相同模式）
     from protocol import MsgType, decode, encode  # pyright: ignore[reportMissingImports]
     from thread_bridge import NetBridge  # pyright: ignore[reportMissingImports]
+
+# 心跳看门狗阈值兜底值（秒）：仅在 config 不可导入时使用（见下方常量定义）
+NET_TIMEOUT_FALLBACK_SEC = 5.0
+
+# 心跳看门狗阈值（秒）：客户端发出 HEARTBEAT 后，若超过这么久没收到任何帧，
+# 即判定链路已死并走既有断线清理（置 disconnected + 触发 on_disconnect）。
+# 数值统一取自 config（禁在本层硬编码）；直接以脚本方式运行 net/_selftest*.py 时
+# 项目根目录不在 sys.path、config 导入不了，此时回退到与 config 同值的兜底常量。
+try:
+    from config import NET_TIMEOUT_SEC as _CONFIG_NET_TIMEOUT_SEC  # pyright: ignore[reportMissingImports]
+
+    HEARTBEAT_TIMEOUT_SEC = float(_CONFIG_NET_TIMEOUT_SEC)
+except Exception:  # noqa: BLE001 —— config 不可导入时必须降级，绝不能让模块导入失败
+    HEARTBEAT_TIMEOUT_SEC = NET_TIMEOUT_FALLBACK_SEC
 
 __all__ = ["NetClient", "RoomDiscovery"]
 
@@ -95,6 +110,14 @@ class NetClient:
         self._host: str | None = None
         self._port: int | None = None
 
+        # 心跳看门狗状态（仅网络线程内读写）：
+        # - _heartbeat_armed：客户端发出首个 HEARTBEAT 后置位（见 send()）。
+        #   大厅阶段上层还没发心跳、主机此时本就不发任何帧，所以必须发过心跳
+        #   才布防，否则会把正常的「等玩家开局」误判成掉线。
+        # - _last_recv_ts：最后一次成功收包的单调时钟时间，_recv_loop 每次收包刷新。
+        self._heartbeat_armed = False
+        self._last_recv_ts = time.monotonic()
+
     # ─────────────────────────── 对外接口 ───────────────────────────
 
     def connect(self, host: str, port: int) -> bool:
@@ -141,6 +164,9 @@ class NetClient:
         self._port = port
         self._connect_event.clear()
         self._connect_result = False
+        # 每次发起新连接都重置看门狗：上一条链路的布防状态/基准时间不可复用
+        self._heartbeat_armed = False
+        self._last_recv_ts = time.monotonic()
         self._set_state("connecting")
         self._thread = threading.Thread(
             target=self._network_worker,
@@ -162,8 +188,16 @@ class NetClient:
         if self.state != "connected":
             return False  # 未连接 / 已断线 / 已停止：安全失败
         frame: str
+        is_heartbeat = False
         if isinstance(msg, str):
+            # 上层已用 protocol.encode 编码好的帧：原样发送。仅探测是否为心跳，
+            # 以便与元组入参保持同一套看门狗布防口径（decode 是协议层唯一入口）。
+            # 解不出（非法帧）也不阻断发送：字符串入参的合法性由上层负责。
             frame = msg
+            try:
+                is_heartbeat = decode(frame)[0] == MsgType.HEARTBEAT
+            except ValueError:
+                is_heartbeat = False
         elif (
             isinstance(msg, tuple)
             and len(msg) == 2
@@ -172,10 +206,23 @@ class NetClient:
         ):
             try:
                 frame = encode(msg[0], msg[1])
-            except ValueError:
+            except ValueError as exc:
+                # 编码失败：显式告警（禁静默忽略，否则上层永远不知道为什么发不出去）
+                print(f"[NetClient] 消息编码失败，已丢弃 type={msg[0].name}: {exc}")
                 return False
+            is_heartbeat = msg[0] == MsgType.HEARTBEAT
         else:
             return False
+        # 心跳看门狗布防：客户端发出首个 HEARTBEAT 说明上层已进入对局心跳阶段，
+        # 此后 _recv_loop 才按 config.NET_TIMEOUT_SEC 判定链路存活。
+        # （大厅阶段上层还没发心跳、主机此时本就不发任何帧，无条件布防会误断）
+        if is_heartbeat and not self._heartbeat_armed:
+            print(
+                f"[NetClient] 心跳看门狗已布防"
+                f"（阈值 {HEARTBEAT_TIMEOUT_SEC}s 未收包即判定掉线）"
+            )
+        if is_heartbeat:
+            self._heartbeat_armed = True
         # 入队后由网络线程异步发送
         self._bridge.send(frame)
         return True
@@ -239,6 +286,16 @@ class NetClient:
     def port(self) -> int | None:
         """最近一次 connect() 的目标端口。"""
         return self._port
+
+    @property
+    def watchdog_armed(self) -> bool:
+        """心跳看门狗是否已布防（发过首个 HEARTBEAT 后为 True，供自检断言）。"""
+        return self._heartbeat_armed
+
+    @property
+    def last_recv_age(self) -> float:
+        """距最后一次成功收包的秒数（自检观察看门狗计时用）。"""
+        return time.monotonic() - self._last_recv_ts
 
     # ─────────────────────────── 内部实现 ───────────────────────────
 
@@ -370,6 +427,9 @@ class NetClient:
                 pass
 
         # 断线感知：置 disconnected 并触发回调（不崩溃）
+        # 解除看门狗布防：链路已死后再谈超时判定已无意义，留着会误导
+        # watchdog_armed 的观测值（重连时 connect_async 也会再置 False）
+        self._heartbeat_armed = False
         self._set_state("disconnected")
         self._trigger_disconnect_callback()
 
@@ -395,16 +455,54 @@ class NetClient:
                 break
 
     async def _recv_loop(self) -> None:
-        """接收循环：持续 recv，decode 后放入 inbound 桥（网络线程内运行）。"""
+        """接收循环：持续 recv，decode 后放入 inbound 桥（网络线程内运行）。
+
+        心跳看门狗：仅在本客户端发出过 HEARTBEAT 后才布防（见 send()），
+        布防期间若超过 HEARTBEAT_TIMEOUT_SEC（config.NET_TIMEOUT_SEC）
+        没收到任何帧，则判定链路已死并退出租收循环，交 _client_main 走既有
+        断线清理（置 disconnected + 触发 on_disconnect 回调）。
+
+        为何用 monotonic 而非 time.time()：单调钟不受系统时间调整（NTP 校时/
+        夏令时）影响，不会出现负数间隔或瞬间跳变导致的误判。
+
+        为何不用 websockets 的内置 ping（ping_timeout）：本项目协议层已定义
+        HEARTBEAT 负责保活（ping_interval=None 已关闭），若同时开内置 ping 会
+        出现双保活互相干扰；且内置 ping 超时抛的是 OSError 系异常、与本层
+        断线语义混在一起难以区分来源，故在此显式做超时判定。
+        """
         ws = self._ws
         if ws is None:
             return
         while True:
+            timeout: float | None = None
+            if self._heartbeat_armed:
+                # 剩余容忍时间 = 阈值 - 距上次收包的间隔；<=0 表示已超时
+                timeout = HEARTBEAT_TIMEOUT_SEC - self.last_recv_age
+                if timeout <= 0:
+                    print(
+                        f"[NetClient] 心跳看门狗超时: 已 {self.last_recv_age:.1f}s "
+                        f"未收到主机任何消息（阈值 {HEARTBEAT_TIMEOUT_SEC}s），"
+                        f"判定链路已死并断开"
+                    )
+                    break  # 退出租收循环 -> _client_main 统一走断线清理
             try:
-                raw = await ws.recv()
+                if timeout is None:
+                    raw = await ws.recv()
+                else:
+                    # 注意：asyncio.wait_for 超时抛 TimeoutError，而 TimeoutError
+                    # 是 OSError 的子类，故此处必须在下面的 OSError 分支之前捕获
+                    raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
+            except TimeoutError:
+                print(
+                    f"[NetClient] 心跳看门狗超时: 等待主机消息超过 "
+                    f"{HEARTBEAT_TIMEOUT_SEC}s 未收到，判定链路已死并断开"
+                )
+                break
             except (ConnectionClosed, OSError, RuntimeError):
                 # 连接断开/被关闭：退出接收循环（断线感知的触发点）
                 break
+            # 收到任意帧都刷新看门狗基准时间（含非法帧：能收到数据即链路存活）
+            self._last_recv_ts = time.monotonic()
             if not isinstance(raw, str):
                 continue
             try:
@@ -489,34 +587,32 @@ class RoomDiscovery:
             return list(self._rooms.values())
     
     def send_query(self) -> None:
-        """发送一次 ROOM_QUERY 广播（触发主机回复）。"""
-        import socket
-        import json
-        
+        """发送一次 ROOM_QUERY 广播（触发主机回复）。
+
+        编解码走 protocol.encode（禁绕过 protocol.py 手拼 JSON：否则 UDP
+        发现链路与 WebSocket 链路各有一套字段名/校验实现，极易漂移）。
+        """
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             sock.settimeout(0.5)
-            
-            query_msg = json.dumps({
-                "type": "ROOM_QUERY",
-                "payload": {"query": "discover"}
-            }, ensure_ascii=False)
-            
+
+            query_raw = encode(MsgType.ROOM_QUERY, {"query": "discover"})
+
             sock.sendto(
-                query_msg.encode("utf-8"),
+                query_raw.encode("utf-8"),
                 ("255.255.255.255", self._broadcast_port)
             )
             sock.close()
-        except OSError:
-            pass
+        except OSError as exc:
+            # 广播发送失败：显式告警（禁静默忽略，否则房间列表空着却无从排查）
+            print(f"[RoomDiscovery] 发送 ROOM_QUERY 失败: {exc!r}")
     
     def _discovery_worker(self) -> None:
-        """后台搜索线程：监听 UDP 广播，收集房间信息。"""
-        import socket
-        import json
-        import time
-        
+        """后台搜索线程：监听 UDP 广播，收集房间信息。
+
+        编解码走 protocol.decode（与 send_query 的 encode 对称，禁绕过协议层）。
+        """
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -537,9 +633,12 @@ class RoomDiscovery:
                 data, addr = sock.recvfrom(4096)
                 if data:
                     try:
-                        msg = json.loads(data.decode("utf-8"))
-                        if msg.get("type") == "ROOM_BROADCAST":
-                            payload = msg.get("payload", {})
+                        msg_type, payload = decode(data.decode("utf-8"))
+                    except ValueError as exc:
+                        # UDP 坏帧 / 未知类型：显式告警（禁静默忽略）
+                        print(f"[RoomDiscovery] 收到非法 UDP 发现包（来自 {addr}），已忽略: {exc}")
+                    else:
+                        if msg_type == MsgType.ROOM_BROADCAST:
                             room_id = payload.get("room_id", "")
                             if room_id:
                                 with self._lock:
@@ -553,8 +652,6 @@ class RoomDiscovery:
                                         "host_ip": addr[0],
                                         "last_seen": time.time(),
                                     }
-                    except (json.JSONDecodeError, UnicodeDecodeError):
-                        pass
             except BlockingIOError:
                 pass  # 无数据
             
