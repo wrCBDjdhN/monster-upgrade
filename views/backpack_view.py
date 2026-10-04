@@ -147,13 +147,42 @@ class BackpackView(ScrollView):
                 return
 
     def _show_discard_dialog(self, item_type: str, item_id: str, level: int):
-        """显示丢弃对话框，获取该物品的当前数量"""
+        """显示丢弃对话框，获取该物品的当前数量
+
+        取数口径必须与 _discard_item 内部实际消费的数据源严格一致，否则 max_qty
+        恒为 0 会直接 return，导致丢弃按钮"点了完全没反应"（2026-10-04 修复）：
+        - run_potion → gs.run_potions[item_id]（本局药水槽，对应 _discard_item 同名分支）
+        - db_potion  → DB potions 表该行的 quantity（level 复用为 potion row id，
+                       对应 _discard_item 中 remove_potion(pid, level) 消费的同一条记录）
+        - 其余类型   → gs.run_carried[item_type][key]（资源按 item_id、
+                       武器/头盔/护甲/背包按 (item_id, level)，与 _discard_item 同规则）
+        """
         gs = self.window_ref.game_state
-        carried = getattr(gs, 'run_carried', {})
-        slot = carried.get(item_type, {})
-        key = (item_id, level) if item_type in ("weapon", "helmet", "armor", "backpack") else item_id
-        max_qty = slot.get(key, 0) if slot else 0
+        if item_type == "run_potion":
+            # 本局药水槽：与 _discard_item 的 run_potion 分支同源
+            max_qty = getattr(gs, 'run_potions', {}).get(item_id, 0)
+        elif item_type == "db_potion":
+            # 仓库药水：level 复用为 potion DB row id，数量从 potions 表该行读取
+            max_qty = 0
+            pid = gs.player_id
+            if pid:
+                from db.database import get_potions
+                for p in get_potions(pid):
+                    if p["id"] == level:
+                        max_qty = p["quantity"]
+                        break
+        else:
+            carried = getattr(gs, 'run_carried', {})
+            slot = carried.get(item_type, {})
+            key = (item_id, level) if item_type in ("weapon", "helmet", "armor", "backpack") else item_id
+            max_qty = slot.get(key, 0) if slot else 0
         if max_qty <= 0:
+            return
+        # 单件物品直接丢弃、不弹数量面板（2026-10-04）
+        if max_qty == 1:
+            self._discard_item(item_type, item_id, level, qty=1)
+            # 与 _execute_discard 同口径：丢弃后必须重算套装加成
+            self._sync_set_bonuses()
             return
         self._discard_dialog_active = True
         self._discard_dialog_item = (item_type, item_id, level, max_qty)

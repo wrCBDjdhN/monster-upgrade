@@ -23,6 +23,10 @@ from config import (
     EVENT_BANNER_MAX_HALF_W,
     EVENT_CARAVAN_LIMITS,  # 商队单局限购上限: kind → 限购件数（Q4，已购计数存 GameState.caravan_bought）
     EVENT_AIRDROP_MINIMAP_COLOR, EVENT_CARAVAN_MINIMAP_COLOR, EVENT_MINIMAP_MARK_SIZE,
+    # 怪物自身增益（狂暴/骨盾/战术撤退）跨端可视化：配色/中文名/光晕几何
+    MONSTER_SKILL_BUFF_COLORS, MONSTER_SKILL_BUFF_NAMES,
+    MONSTER_SKILL_BUFF_GLOW_RATIO, MONSTER_SKILL_BUFF_GLOW_ALPHA,
+    MONSTER_SKILL_BUFF_RING_RATIO, MONSTER_SKILL_BUFF_RING_WIDTH,
 )
 from game.render_helpers import (
     draw_monster_base, draw_monster_armor, draw_monster_face, draw_monster_weapon,
@@ -68,6 +72,30 @@ def _draw_monster(view, m, wb):
     """
     # 怪物尺寸：所有怪物继承基类，_size 属性已统一设置
     m_size = getattr(m, '_size', 20)
+    # 怪物自身增益光晕 + 名称（狂暴/骨盾/战术撤退）：
+    # 直接读 _skill_buff_type / _skill_buff_timer（**无 net_ 前缀**）：远端幽灵的这两个
+    # 字段由 MONSTER_SNAPSHOT 的 skill_buff_type/skill_buff_timer 写入同名属性，
+    # 渲染层一套代码同时服务本地怪物与远端幽灵（禁再开一套并行字段）。
+    # 客户端幽灵不跑 update_skill_buffs（update 提前 return），计时器由 game_view
+    # 客户端块逐帧递减，不读快照则增益在客户端完全不可见。
+    # 渲染铁律：一律实心填充（脚下光晕盘），禁 draw_circle_outline / draw_line
+    # 等线框画法（会闪烁，见 game/AGENTS.md）。
+    buff_type = getattr(m, '_skill_buff_type', None)
+    buff_timer = getattr(m, '_skill_buff_timer', 0)
+    if buff_type and buff_timer and buff_timer > 0:
+        buff_color = MONSTER_SKILL_BUFF_COLORS.get(buff_type)
+        if buff_color:
+            br, bg, bb = buff_color
+            # 脚下光晕盘：画在怪物本体之前（下方），远看像一层增益光池
+            arcade.draw_circle_filled(
+                m.center_x, m.center_y + m_size * 0.35,
+                (m_size / 2.0) * MONSTER_SKILL_BUFF_GLOW_RATIO,
+                (br, bg, bb, MONSTER_SKILL_BUFF_GLOW_ALPHA))
+            # 头顶增益名：颜色取同一张表，保证「看到的颜色 = 名字对应的增益」
+            view._world_labels.append((
+                m.center_x, m.center_y - m_size - 16,
+                MONSTER_SKILL_BUFF_NAMES.get(buff_type, buff_type),
+                buff_color, 10))
     # 护甲颜色：远端怪物优先取主机广播的 net_armor_color（修复远端怪物无护甲），
     # 本地怪物回退读携带护甲 dict
     if getattr(m, 'net_armor_color', None):

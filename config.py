@@ -586,7 +586,7 @@ def evac_activate_cost(theme: str) -> dict[str, int]:
     return dict(EVAC_COST_BY_THEME.get(theme, EVAC_COST_BY_THEME[EVAC_DEFAULT_THEME]))
 EVAC_DEFEND_TIME = {"forest": 45.0, "desert": 60.0, "space": 75.0}  # 防守倒计时
 EVAC_WAVE_INTERVAL = 10.0          # 防守期间进攻波次间隔（秒）
-EVAC_WAVE_SIZE = 4                 # 每波基础进攻怪数量
+EVAC_WAVE_SIZE = 3                 # 每波基础进攻怪数量（降负载：减少驻守刷怪量，2026-10-04）
 EVAC_WAVE_GROWTH = 1               # 每波额外数量（递增）
 EVAC_INTERACT_RANGE = 90.0         # 激活/修复交互距离（E 键）
 EVAC_WAVE_HP_GROWTH = 0.15         # 每波血量加成比例（按已打波数线性累加）
@@ -1033,6 +1033,28 @@ WAREHOUSE_UPGRADE_COSTS = {
 # 无冷却导致近身对拼时几乎每 2~3 秒回满一次，等于不死；此处给该技能独立冷却。
 # 该计时器逐帧在 update_skill_buffs 内递减（与 _skill_buff_timer 同一 tick 点）。
 MUMMY_HEAL_SKILL_CD = 6.0
+
+
+# ── 怪物自身增益（狂暴/骨盾/战术撤退）的跨端可视化 ──
+# 键 = buff 类型标识（与 game/monster_utils.py 的 _SELF_BUFF_SKILL_TYPES 取值一致，
+# 由 MONSTER_SNAPSHOT 的 skill_buff_type 字段跨端同步）。改配色/文案只改本表。
+MONSTER_SKILL_BUFF_COLORS = {
+    "berserk": (255, 60, 60),        # 狂暴：血红
+    "bone_shield": (235, 235, 200),  # 骨盾：骨白
+    "tactical_retreat": (120, 220, 255),  # 战术撤退：青蓝（加速）
+}
+MONSTER_SKILL_BUFF_NAMES = {
+    "berserk": "狂暴",
+    "bone_shield": "骨盾",
+    "tactical_retreat": "战术撤退",
+}
+# 增益光晕：实心圆（**禁线框/空心**，见 game/AGENTS.md 渲染铁律）画在怪物脚下，
+# 半径 = 怪物半径 × 系数；alpha 固定，透明度变化靠 _skill_buff_timer 收敛由绘制侧处理。
+MONSTER_SKILL_BUFF_GLOW_RATIO = 1.6
+MONSTER_SKILL_BUFF_GLOW_ALPHA = 70
+# 增益计时环半径系数（外圈实心细环的半径 = 怪物半径 × 系数）
+MONSTER_SKILL_BUFF_RING_RATIO = 1.25
+MONSTER_SKILL_BUFF_RING_WIDTH = 3.0
 
 
 # ── 怪物 BFS 寻路（game/monster_base.py 消费）──

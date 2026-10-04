@@ -47,7 +47,7 @@ from game.rendering_hud import (
 )
 
 
-def draw_skill_vfx(monster):
+def draw_skill_vfx(monster, cx=None, cy=None):
     """绘制怪物技能范围圈（双层实心圆，随 _skill_vfx_timer 消退）。
 
     数据源 = SKILL_PROMPT_CONFIG 每技能的 radius/color/duration 三个字段
@@ -55,6 +55,12 @@ def draw_skill_vfx(monster):
     四个字段由 game/monster_utils.py 写入、monster_base 的 update 逐帧递减计时器，
     本函数只读不写；全部 getattr 带默认值，字段缺失时静默跳过不报错。
     渲染铁律：一律实心填充，禁 draw_circle_outline / draw_arc_outline 线框（会闪烁）。
+
+    cx/cy：可选的**绘制坐标覆盖**。远端怪物（客户端幽灵）由 MONSTER_SNAPSHOT
+    20Hz 下发坐标，直接用 center_x/center_y 画会随快照「瞬移」；渲染管线
+    （render_game 的 remote_monsters 分支）已在 lerp 出 render_x/render_y，
+    经本参数传入即可让范围圈与怪物本体落在同一插值位置，**无需**像怪物本体
+    那样临时改写 center_x/center_y（那是命中判定读的权威坐标，只读更安全）。
     """
     t = getattr(monster, "_skill_vfx_timer", 0)
     if not t or t <= 0:
@@ -75,12 +81,12 @@ def draw_skill_vfx(monster):
     ratio = max(0.0, min(1.0, t / duration))
     # 外圈：alpha 随计时器线性消退（刚释放最亮，末期近乎透明）
     alpha = max(0, min(255, int(SKILL_CIRCLE_OUTER_ALPHA * ratio)))
-    # 世界坐标（与怪物同处世界层，怪物同帧已做视口裁剪）
-    cx = monster.center_x
-    cy = monster.center_y
-    arcade.draw_circle_filled(cx, cy, radius, (r, g, b, alpha))
+    # 世界坐标（与怪物同处世界层，怪物同帧已做视口裁剪）；cx/cy 为远端插值坐标
+    dx = monster.center_x if cx is None else cx
+    dy = monster.center_y if cy is None else cy
+    arcade.draw_circle_filled(dx, dy, radius, (r, g, b, alpha))
     # 内圈：同色实心，半径按 config 比例收窄（对照火墙燃烧区 :159-160 的双层画法）
-    arcade.draw_circle_filled(cx, cy, radius * SKILL_CIRCLE_INNER_RATIO, (r, g, b, 255))
+    arcade.draw_circle_filled(dx, dy, radius * SKILL_CIRCLE_INNER_RATIO, (r, g, b, 255))
 
 
 def render_game(view):
@@ -377,6 +383,9 @@ def render_game(view):
                 continue
             _draw_monster(view, m, wb)
             _draw_skill_prompt(view, m)
+            # 技能范围圈：远端怪物同样要画（修复「客户端看不到怪物技能范围圈」——
+            # 之前只遍历 view.monsters，主机放的 AoE 提示在客户端完全不显示）
+            draw_skill_vfx(m)
             continue
         alpha = max(0.0, min(1.0, alpha))
         # 插值起点缺失时退回 center_x（最新快照），保证字段缺失也不崩不跳位
@@ -393,6 +402,9 @@ def render_game(view):
         try:
             _draw_monster(view, m, wb)
             _draw_skill_prompt(view, m)
+            # 技能范围圈：传 render_x/render_y 走 cx/cy 覆盖参数，与怪物本体
+            # 落在同一插值位置（不用 center_x 也不必再临时改写坐标）
+            draw_skill_vfx(m, render_x, render_y)
         finally:
             # 还原逻辑坐标（命中判定/快照逻辑读它，插值仅限绘制）
             m.center_x, m.center_y = logic_x, logic_y
@@ -917,8 +929,8 @@ def _build_panel_cache():
 def _build_affordable(cost: dict, resources: dict) -> bool:
     """造价资源是否齐备（只读判定，资源口径同 BuildSystem.can_place 的资源段）
 
-    故意不复用 can_place：它连带做边界/距离/压墙/占位校验、且对 net_mode=="client"
-    直接拒绝，而面板只需要「与落点无关的材料够不够」这一个维度。
+    故意不复用 can_place：它连带做边界/距离/压墙/占位校验，而面板只需要
+    「与落点无关的材料够不够」这一个维度。
     禁在此改写 run_carried —— 扣资源唯一入口是 BuildSystem.place（渲染层禁写业务状态）。
     """
     return all(int(resources.get(rid, 0) or 0) >= int(qty) for rid, qty in cost.items())
@@ -929,16 +941,15 @@ def draw_build_panel(view):
 
     - **为何只在 build_mode 绘制**：本函数是纯表现层，不在建造模式时屏幕不该出现建造清单；
       新增建筑后行数随 BUILDS 自动增长，禁硬编码行数与建筑顺序。
-    - **为何 client 不画**：联机建造由房主裁决（BuildSystem.can_place/place 对
-      net_mode=="client" 直接拒绝，见 game/AGENTS.md），客户端画出来是一份永远建不了的清单。
+    - **三端一致绘制**：本面板纯只读，主机/客户端画的是同一份清单。客户端的建造走
+      BUILD_REQUEST 请求-应答（由房主仲裁并回执扣资源），本面板只负责显示造价与
+      「材料是否够建」，**不落位、不扣资源**，故无需按 net_mode 区别渲染。
     - **纯只读**：只读 BUILDS 定义与 gs.run_carried["resource"]，禁在此扣资源/放置建筑。
     - 行序 = BUILDS 插入序，与 input_handler 的 1-N 热键位序一一对应（序号即键位）。
     - 一律不透明实心填充，禁 draw_*_outline / draw_arc_outline / draw_line（渲染铁律）。
     """
     gs = view.window.game_state
     if not getattr(gs, "build_mode", False):
-        return
-    if getattr(gs, "net_mode", "solo") == "client":
         return
     from entities.build_defs import BUILDS
     # 造价文案唯一口径：复用建造模式浮动文字的 _build_cost_text（禁在此另写一套格式）

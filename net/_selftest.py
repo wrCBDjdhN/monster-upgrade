@@ -178,6 +178,13 @@ _ROUNDTRIP_CASES: tuple[tuple[str, MsgType, dict], ...] = (
     ("EVAC_POINT_RESULT/成功", MsgType.EVAC_POINT_RESULT, {
         "player_id": 1, "ok": True, "reason": None, "action": "activate",
     }),
+    # 怪物范围技能 debuff 单播：载荷为「效果ID + 等级」二元组列表（协议层不透明透传）
+    ("SKILL_DEBUFF/沙尘暴减速", MsgType.SKILL_DEBUFF, {
+        "player_id": 2, "debuffs": [["slow", 2]],
+    }),
+    ("SKILL_DEBUFF/多效果", MsgType.SKILL_DEBUFF, {
+        "player_id": 1, "debuffs": [["slow", 2], ["burn", 1]],
+    }),
     # 阶段1/3 MAP_CHANGE 新 change_type：协议层按不透明字符串透传（枚举由 game 层校验）
     ("MAP_CHANGE/build_place", MsgType.MAP_CHANGE, {
         "obj_id": "b1", "change_type": "build_place",
@@ -301,6 +308,8 @@ _SCHEMA_KEY_EXPECT: tuple[tuple[MsgType, tuple[str, ...]], ...] = (
     (MsgType.CARRIAGE_BUY, ("player_id", "kind", "item_id", "level", "qty", "gold_before", "gold_after")),
     (MsgType.CARRIAGE_BUY_RESULT, ("player_id", "ok", "reason", "kind", "item_id", "qty")),
     (MsgType.EVAC_POINT_RESULT, ("player_id", "ok", "reason", "action")),
+    # 怪物范围技能 debuff 送达（单播归属端）：键名必须写进 schema，否则接线无从查
+    (MsgType.SKILL_DEBUFF, ("player_id", "debuffs")),
 )
 
 # 非法帧样本：(说明, 原始 JSON 帧) —— decode 必须一律抛 ValueError，禁止静默忽略

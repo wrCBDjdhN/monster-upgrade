@@ -150,6 +150,144 @@ def _can_move_to(new_x: float, new_y: float, size: float, walls: list) -> bool:
     return True
 
 
+# ══ 怪物软推开（修复「怪物无碰撞箱，可与怪物/玩家完全重合」）══════════════════
+# 背景：怪物的移动只查墙（_can_move_to），彼此之间、以及对玩家都没有任何碰撞体积。
+# 于是刷怪点相邻、多只怪同时扑向玩家、或 BOSS 召唤小怪落地时，会出现好几只怪
+# 叠在同一个像素上：攻击判定/伤害数字/血条全糊在一起，玩家看到的怪数还少于实际数量。
+#
+# 为何是「软推开」而不是「硬碰撞」（硬分离 = 一次把重叠量抵消到刚好不重叠）：
+# - 硬分离在两只怪同向追同一个目标时会互相顶回，每帧位移符号翻转 → 原地抽搐/抖动；
+# - 硬分离处理「三只以上叠一起」需要单帧多轮迭代收敛，修正量随重叠数线性放大，
+#   玩家会看到怪被「弹射」出去，而不是被挤开；
+# - 软推开每帧只吃掉一部分剩余重叠（几何收敛），互相挤开一点点：既能分开、
+#   又保留推进手感，且对「推不过去」天然容忍 —— 目标位置由 _can_move_to 校验，
+#   失败就只推可动的那根轴（与 AI 分轴滑动同一口径），绝不把怪推进墙里。
+
+# 分桶边长（px）：必须 ≥ 任意两只怪的半径和，否则 3x3 邻域扫不到跨桶的重叠对（漏分离）。
+# 现有最大 size=30（entities/monster_defs.py），半径和 ≤ 60；取 2*TILE_SIZE=128 留足余量，
+# 同时桶数只有 64px 网格的 1/4，扫 9 桶的成本仍远低于全量两两比较。
+SEPARATION_CELL = TILE_SIZE * 2
+# 每帧吃掉的重叠比例（0~1）：剩余重叠逐帧 ×0.4 收敛 —— 分得开又不会弹射；
+# 乘 dt 归一化后单帧最多也只吃掉 40% 重叠，天然不会过冲振荡。
+SEPARATION_STIFFNESS = 0.4
+# 单帧位移上限（px）：深重叠（刷怪点重合/召唤落点重叠）时兜底，防止一次修正量过大。
+SEPARATION_MAX_PUSH = 10.0
+# 完全同点（距离≈0）时方向未定义，用黄金角散列出确定性方向：
+# 同一对怪物每帧同向 → 不抖动；下标不同 → 方向差异大 → 一堆怪不会叠成一条直线。
+_SEPARATION_GOLDEN_ANGLE = 2.39996323
+
+
+def _separation_axis(dx: float, dy: float, seed: int) -> tuple[float, float]:
+    """(dx, dy) 的单位向量；完全同点时按 seed 返回确定性方向（禁除零，也禁方向抖动）"""
+    dist_sq = dx * dx + dy * dy
+    if dist_sq > 1e-9:
+        dist = math.sqrt(dist_sq)
+        return dx / dist, dy / dist
+    angle = (seed * _SEPARATION_GOLDEN_ANGLE) % (math.pi * 2)
+    return math.cos(angle), math.sin(angle)
+
+
+def _accumulate_separation(acc: dict, index: int, ux: float, uy: float,
+                           length: float) -> None:
+    """把一次分离位移累加到 acc[index]（先全部累加再统一应用 → 与遍历顺序无关）"""
+    vec = acc.get(index)
+    if vec is None:
+        acc[index] = [ux * length, uy * length]
+    else:
+        vec[0] += ux * length
+        vec[1] += uy * length
+
+
+def separate_monsters(monsters: list, player=None, dt: float = 1 / 60) -> None:
+    """怪物软推开：重叠的怪物互相挤开（怪-怪对推、怪-玩家只推怪）
+
+    - 玩家视为固定点：绝不位移玩家。玩家的碰撞由 PhysicsEngineSimple 独占，
+      在这里动它既会与之打架（位置被两次写回），也可能把玩家顶进墙里。
+    - 观战模式 / 玩家不存在：传 player=None，只做怪-怪分离。
+    - 不触碰任何 AI 状态（aggro_point / attack_building / 导航航点 / 攻击冷却）：
+      只改坐标，下一帧 AI 会按现有逻辑重新裁决目标与站定，近战「进射程站定」不受影响。
+    - 联机安全：本函数只在 host/solo 的世界模拟里调用（客户端怪物在 remote_monsters，
+      由快照渲染、位置不由本地裁决），即便传入联机幽灵实例也会被跳过。
+    """
+    # 暂停/零步长帧直接跳过：既不位移也不累积，避免同一状态下反复调用产生抖动。
+    if dt <= 0:
+        return
+    # dt 归一化（以 60fps 为基准）：低帧率机器上分离不至于慢到看不出；
+    # 上限 1.0 是防抖动的关键 —— 推力不能随 dt 无限放大，否则单帧就吃掉全部重叠量。
+    scale = min(1.0, dt * 60.0)
+
+    # 收集参与分离的怪物（跳过死亡实例与联机快照幽灵），同时按网格建桶
+    buckets: dict[tuple[int, int], list[tuple[int, object]]] = {}
+    active: list = []
+    for m in monsters:
+        if not getattr(m, "alive", True) or getattr(m, "net_ghost", False):
+            continue
+        active.append(m)
+        cell = (int(m.center_x // SEPARATION_CELL), int(m.center_y // SEPARATION_CELL))
+        buckets.setdefault(cell, []).append((len(active) - 1, m))
+
+    acc: dict[int, list[float]] = {}
+    # 怪-怪：只查本桶 + 8 邻域（桶边长 ≥ 半径和 ⇒ 不会漏掉任何重叠对）
+    for (gx, gy), items in buckets.items():
+        for ox in (-1, 0, 1):
+            for oy in (-1, 0, 1):
+                others = buckets.get((gx + ox, gy + oy))
+                if not others:
+                    continue
+                for i, a in items:
+                    for j, b in others:
+                        # 每对只算一次（同一对会被两个桶各扫到），并跳过同实例
+                        if j <= i or a is b:
+                            continue
+                        dx = b.center_x - a.center_x
+                        dy = b.center_y - a.center_y
+                        min_dist = a._size + b._size
+                        dist_sq = dx * dx + dy * dy
+                        if dist_sq >= min_dist * min_dist:
+                            continue
+                        ux, uy = _separation_axis(dx, dy, i + j)
+                        push = (min_dist - math.sqrt(dist_sq)) * SEPARATION_STIFFNESS * scale
+                        # 各自沿连线朝外推开（对推，位置修正不乘 dt）
+                        _accumulate_separation(acc, i, -ux, -uy, push)
+                        _accumulate_separation(acc, j, ux, uy, push)
+
+    # 怪-玩家：只推怪，玩家不动。玩家半径沿用 PLAYER_SIZE（与 _has_line_of_sight 同一口径）
+    if player is not None:
+        for i, m in enumerate(active):
+            dx = m.center_x - player.center_x
+            dy = m.center_y - player.center_y
+            min_dist = m._size + PLAYER_SIZE
+            dist_sq = dx * dx + dy * dy
+            if dist_sq >= min_dist * min_dist:
+                continue
+            ux, uy = _separation_axis(dx, dy, i)
+            push = (min_dist - math.sqrt(dist_sq)) * SEPARATION_STIFFNESS * scale
+            _accumulate_separation(acc, i, ux, uy, push)
+
+    # 统一应用：按累计位移做 _can_move_to 校验（与 AI 移动同一碰撞口径），
+    # 推不过去就退化为分轴各推一点（沿墙滑动），两轴都推不过去就原地不动。
+    for i, m in enumerate(active):
+        vec = acc.get(i)
+        if vec is None:
+            continue
+        dx, dy = vec[0], vec[1]
+        mag = math.hypot(dx, dy)
+        if mag > SEPARATION_MAX_PUSH:
+            k = SEPARATION_MAX_PUSH / mag
+            dx *= k
+            dy *= k
+        new_x = m.center_x + dx
+        new_y = m.center_y + dy
+        if _can_move_to(new_x, new_y, m._size, m._walls):
+            m.center_x = new_x
+            m.center_y = new_y
+            continue
+        if dx != 0.0 and _can_move_to(new_x, m.center_y, m._size, m._walls):
+            m.center_x = new_x
+        if dy != 0.0 and _can_move_to(m.center_x, new_y, m._size, m._walls):
+            m.center_y = new_y
+
+
 # ══ BFS 寻路（用户缺陷⑦⑧修复 2026-09-26）═════════════════════════════════════
 # 背景：怪物 AI 原本只有「直线逼近 + 分轴滑动」，完全没有路径概念。房间四面墙只开一个门洞，
 # 贴墙行进时切向分量≈0 → 永久死锁（缺陷⑦：防守波怪永远打不到撤离点）；
@@ -993,6 +1131,18 @@ class _MeleeMonsterBase(arcade.SpriteSolidColor):
         """
         self._affix_view_provider = provider
 
+    def set_skill_debuff_sink(self, sink) -> None:
+        """注入「范围技能 debuff 送达」回调（联机主机用，单机/客户端传 None）
+
+        签名：sink(affected) → affected = [(玩家对象, (效果ID, 等级)), ...]。
+        范围技能（沙尘暴/手雷投掷）对半径内全部玩家生效，被影响的玩家未必收到
+        PLAYER_HURT（可能完全没被弹丸打着），主机需按玩家单播 SKILL_DEBUFF
+        才能让客户端玩家真正吃到 debuff——本回调就是这条通道的注入点。
+        与 _evac_point_provider / _affix_view_provider 同模式：怪物只保存回调、
+        不持有 GameView / 网络对象（分层铁律）。
+        """
+        self._skill_debuff_sink = sink
+
     def update(self, player_x: float = 0.0, player_y: float = 0.0,
                delta_time: float = 0.0, players=None):
         """更新怪物 AI（单目标或多目标模式）
@@ -1180,10 +1330,11 @@ class _MeleeMonsterBase(arcade.SpriteSolidColor):
             # 按距离分档 + 冷却取代原 50% 概率随机（用户需求 2026-09-26）：
             # pick_skill_index 按 dist 选距离档位技能，返回 None 表示该档技能冷却中，本次不放
             from game.monster_utils import (
-                apply_skill_prompt_and_effect, collect_skill_nearby_players,
-                pick_skill_index,
+                _take_pending_skill_debuffs, apply_skill_prompt_and_effect,
+                collect_skill_nearby_players, pick_skill_index,
             )
             skill_idx = pick_skill_index(self, dist)
+            skill_debuffs: list = []
             if skill_idx is not None:
                 # 范围技能（沙尘暴/手雷投掷）需要附近玩家列表：联机传 players 全量，
                 # 单机路径只有 player（由 fallback 兜底）；单目标技能不读该参数
@@ -1191,9 +1342,19 @@ class _MeleeMonsterBase(arcade.SpriteSolidColor):
                     self, skill_idx, target=player,
                     nearby_players=collect_skill_nearby_players(
                         self, skill_idx, players, player),
+                    # 近战是「挥砍命中即生效」，不做弹丸式延迟（用户决策 2026-10-04：
+                    # 延迟只用于远程单目标技能）
+                    defer_debuffs=False,
                 )
-            # 汇总本次攻击的全部附带效果：怪物自带 debuff + 武器携带效果
-            combined_debuffs = []
+                # 取走本次施法产生的技能 debuff（同类 buff 已生效被挡下时为空列表）
+                skill_debuffs = _take_pending_skill_debuffs(self)
+            # 汇总本次攻击的全部附带效果：技能 debuff + 怪物自带 debuff + 武器携带效果。
+            # 技能 debuff 排在**最前**：下游 _pending_debuff（单值兼容字段）只取
+            # combined_debuffs[0]，若技能效果排在怪物/武器 debuff 之后就会被该覆盖
+            # （修复 bug #4：技能 debuff 在联机端从未下发）。
+            # 范围技能（沙尘暴/手雷投掷）的 debuff 不进本列表——它们由
+            # monster_utils._apply_aoe_debuffs 经 sink 单播 SKILL_DEBUFF，两通道互斥。
+            combined_debuffs = list(skill_debuffs)
             if self.debuff_id:
                 combined_debuffs.append((self.debuff_id, 1))
             # 武器效果（assign_monster_weapon 已复制 effects/debuff 到 weapon 字典）
@@ -1469,6 +1630,18 @@ class _RangedMonsterBase(arcade.SpriteSolidColor):
         """
         self._affix_view_provider = provider
 
+    def set_skill_debuff_sink(self, sink) -> None:
+        """注入「范围技能 debuff 送达」回调（联机主机用，单机/客户端传 None）
+
+        签名：sink(affected) → affected = [(玩家对象, (效果ID, 等级)), ...]。
+        范围技能（沙尘暴/手雷投掷）对半径内全部玩家生效，被影响的玩家未必收到
+        PLAYER_HURT（可能完全没被弹丸打着），主机需按玩家单播 SKILL_DEBUFF
+        才能让客户端玩家真正吃到 debuff——本回调就是这条通道的注入点。
+        与 _evac_point_provider / _affix_view_provider 同模式：怪物只保存回调、
+        不持有 GameView / 网络对象（分层铁律）。
+        """
+        self._skill_debuff_sink = sink
+
     def update(self, player_x: float = 0.0, player_y: float = 0.0,
                delta_time: float = 0.0, players=None):
         """更新怪物 AI（单目标或多目标模式）
@@ -1639,10 +1812,11 @@ class _RangedMonsterBase(arcade.SpriteSolidColor):
             # 按距离分档 + 冷却取代原 50% 概率随机（用户需求 2026-09-26）：
             # pick_skill_index 按 dist 选距离档位技能，返回 None 表示该档技能冷却中，本次不放
             from game.monster_utils import (
-                apply_skill_prompt_and_effect, collect_skill_nearby_players,
-                pick_skill_index,
+                _take_pending_skill_debuffs, apply_skill_prompt_and_effect,
+                collect_skill_nearby_players, pick_skill_index,
             )
             skill_idx = pick_skill_index(self, dist)
+            skill_debuffs: list = []
             if skill_idx is not None:
                 # 范围技能（沙尘暴/手雷投掷）需要附近玩家列表：联机传 players 全量，
                 # 单机路径只有 player（由 fallback 兜底）；单目标技能不读该参数
@@ -1650,9 +1824,17 @@ class _RangedMonsterBase(arcade.SpriteSolidColor):
                     self, skill_idx, target=player,
                     nearby_players=collect_skill_nearby_players(
                         self, skill_idx, players, player),
+                    # 远程单目标技能 debuff 改为「仅弹丸命中时生效」（用户决策
+                    # 2026-10-04）：施法时只显示提示与范围圈特效，效果挂到弹丸上，
+                    # 修复「弹丸打偏也算中」。范围技能语义是半径内全部生效，
+                    # 不受此开关影响（monster_utils._apply_aoe_debuffs 立即施加）。
+                    defer_debuffs=True,
                 )
-            # 汇总弹丸附带效果：怪物自带 debuff + 武器携带效果
-            combined_debuffs = []
+                # 取走本次施法产生的技能 debuff（同类 buff 已生效被挡下时为空列表）
+                skill_debuffs = _take_pending_skill_debuffs(self)
+            # 汇总弹丸附带效果：技能 debuff + 怪物自带 debuff + 武器携带效果
+            # 技能 debuff 一并挂到弹丸上 → 只有真的命中才结算（与近战即时生效不同口径）
+            combined_debuffs = list(skill_debuffs)
             if self.debuff_id:
                 combined_debuffs.append((self.debuff_id, 1))
             wdebuff = (self.weapon or {}).get("debuff")

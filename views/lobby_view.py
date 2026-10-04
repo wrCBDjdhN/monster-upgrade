@@ -845,24 +845,31 @@ class LobbyView(arcade.View):
     def _draw_client_wait(self, cx):
         """client_wait：连接状态 / 准备按钮 / 全员准备状态 / 市场仓库 / 取消"""
         gs = self.window.game_state
-        self._tc.text("cw_status", self._status, cx, WINDOW_HEIGHT // 2 + 60,
+        # 竖向布局（WINDOW_HEIGHT=720，以下文本 anchor_y 默认 baseline，字形自基线向上延伸）：
+        #   状态行   基线 //2+70=430（size18 → 字形约 412-430）
+        #   提示行   基线 //2+48=408（size13 → 字形约 395-408，与状态行净空 4px）
+        #   战备行   基线 //2+30=390（size12 → 字形约 378-390，与提示行净空 5px）
+        #   准备列表 基线 //2+4 起、每行 -18 → 4 人时 364/346/328/310（末行字形约 296-310，
+        #            与战备行净空 40px；末行底 310 与准备按钮上沿 292 净空 4px，互不重叠）
+        #   角色选择区中心 H-240=480（rect 460-500）与标题 H-215=505，远低于列表末行，不受影响
+        self._tc.text("cw_status", self._status, cx, WINDOW_HEIGHT // 2 + 70,
                       arcade.color.CYAN, size=18, anchor_x="center")
         # 连接尚未建立（handshake 未发）→ 显示"连接中"；已连上 → 显示等待房主
         tip = "正在连接主机，请稍候…" if not self._handshake_sent else "已加入房间，准备开始游戏…"
-        self._tc.text("cw_tip", tip, cx, WINDOW_HEIGHT // 2 + 32,
+        self._tc.text("cw_tip", tip, cx, WINDOW_HEIGHT // 2 + 48,
                       arcade.color.LIGHT_GRAY, size=13, anchor_x="center")
         # 客户端战备状态显示（连接建立后显示）
         if self._handshake_sent:
             client_ready, client_status = self._get_battle_readiness_status(self._client_theme)
             status_color = arcade.color.GREEN if client_ready else arcade.color.ORANGE_RED
-            self._tc.text("client_readiness", client_status, cx, WINDOW_HEIGHT // 2 + 15,
+            self._tc.text("client_readiness", client_status, cx, WINDOW_HEIGHT // 2 + 30,
                           status_color, size=12, anchor_x="center")
         # 角色选择区（连接建立后可用，点击上报 SET_CHARACTER 给主机权威映射）
         if self._handshake_sent:
             self._draw_char_select(cx)
         # 全员准备状态（READY_STATE 广播驱动）
         if self._ready_display:
-            y = WINDOW_HEIGHT // 2 + 8
+            y = WINDOW_HEIGHT // 2 + 4
             for p in self._ready_display:
                 name = p.get("name", f"玩家{p.get('player_id')}")
                 ready = p.get("ready", False)
@@ -872,7 +879,7 @@ class LobbyView(arcade.View):
                               ("✔ 已准备" if ready else "✘ 未准备"),
                               cx + 40, y, arcade.color.GREEN if ready else arcade.color.ORANGE_RED,
                               size=14, anchor_x="center")
-                y -= 22
+                y -= 18
         # 准备 / 取消准备按钮（已连接后可用）
         if self._handshake_sent:
             rcolor = arcade.color.GREEN if self.ready_hover else (40, 110, 60)

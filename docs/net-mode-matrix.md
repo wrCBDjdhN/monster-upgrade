@@ -210,11 +210,13 @@
 | `EVAC_POINT_ACTION` | 客户端 → 主机 | 主机 | — | 客户端请求激活/修复（载荷 `player_id/action∈{activate,repair}/x/y`）；主机判距（防作弊）并校验资源后执行，再广播 `EVAC_POINT_STATE`。⛔ 客户端禁本地推进状态机 |
 | `EVENT_START` | 主机 → 全部 | 主机 | ⛔ | 阶段4 本局随机事件 id 广播（`''`=无事件）。数据流：`主机 pick_event 一次→广播 event_id+flags→客户端 apply_event 写 view.event_flags 并显示 3 秒横幅`（纯表现层，⛔ 客户端禁本地抽选；晚加入客户端靠 `FULL_STATE.event_id`/`event_flags` 补看横幅） |
 | `MISSION_PROGRESS` | 主机 → **归属客户端单播** | 主机 | — | 阶段6 任务/成就进度下发（`player_id` + `event` + `amount`，`event` 取自 `MISSION_EVENT_KEYS` 七键之一）。单播归属端而非广播，避免其他端重复计数 |
+| `SKILL_DEBUFF` | 主机 → **归属客户端单播** | 主机 | — | 怪物**范围技能**（沙尘暴/手雷投掷）debuff 送达（载荷 `player_id` + `debuffs=[[效果ID, 等级], ...]`）。数据流：`主机对半径内每个玩家本地施加→经怪物注入的 _skill_debuff_sink 单播本消息→客户端仅 player_id==自己时施加`。与 `PLAYER_HURT.debuffs` **互斥**（命中类技能只走 `PLAYER_HURT`），保证同一效果两端各恰好施加一次 |
 
 ### 5.2 既有消息的载荷扩展
 
 | 消息 | 扩展字段 | 方向 | 归属 | 备注 |
 |------|---------|------|------|------|
+| `MONSTER_SNAPSHOT` | `skill_prompt_text`/`skill_prompt_color`/`skill_prompt_timer` + `skill_vfx_timer`/`skill_vfx_duration`/`skill_vfx_radius`/`skill_vfx_color` + `skill_buff_type`/`skill_buff_timer` | 主机 → 全部 | 主机 | 怪物技能提示（头顶文字）、技能范围圈（双层实心圆）与自身增益（狂暴/骨盾/战术撤退）的**表现字段下发**：⛔ 客户端不跑怪物 AI（`update` 提前 return），三个计时器由客户端块逐帧递减，全部 `getattr`/`.get` 带默认值，旧主机缺字段时按本地 `MONSTER_CONFIGS` 兜底。⚠️ `PLAYER_HURT` 的技能 debuff 单目标走 `debuffs` 列表全量下发（不再只取首个），远程单目标技能**仅弹丸命中才施加**（用户决策 2026-10-04） |
 | `PLAYER_SNAPSHOT` | `stats: dict\|None` | 主机 → 全部 | 主机 | 阶段5 祝福生效后的**有效属性**（含套装加成），由 `BlessingState.stats_payload()` 产出；客户端只应用到本地玩家，不本地重算 |
 | `MAP_CHANGE` | 新 `change_type`：`build_place` / `build_destroy` / `fire_zone` | 主机 → 全部 | 主机 | 阶段1 建造放置/拆除、阶段3 火墙词缀区。协议层按不透明字符串透传（枚举由 game 层 `client._apply_map_change` 校验，未列出者显式记日志禁静默）。数据流：`主机 place/remove/生成火墙→广播→客户端只渲染（⛔ 禁本地建造/禁 update）`。载荷：`build_place` 的 `state={kind,x,y,hp}`；`fire_zone` 的 `state={action,zid,x,y,r,life,dps,burn_duration}`（`action`='add'/'remove'） |
 | `MAP_CHANGE` | `env_damage`（`state.hp` + `extra.damage`） | 主机 → 全部 | 主机 | 阶段2 环境物/撤离点受损同步；⛔ 客户端禁本地扣血 |

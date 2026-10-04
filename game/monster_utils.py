@@ -240,7 +240,80 @@ def update_skill_cooldowns(monster, delta_time: float) -> None:
         cds[skill_name] = max(0.0, remain - delta_time)
 
 
-def apply_skill_prompt_and_effect(monster, skill_index=0, target=None, nearby_players=None):
+def _reset_pending_skill_debuffs(monster) -> None:
+    """清空「本次施法产生的技能 debuff」记录
+
+    每次施法前调用，保证 monster._pending_skill_debuffs 只含当前这一发的效果，
+    杜绝上一次施法的残留被下一次攻击的附带效果列表误取（重复施加）。
+    """
+    monster._pending_skill_debuffs = []
+
+
+def _take_pending_skill_debuffs(monster) -> list:
+    """取出并清空本次施法产生的技能 debuff（调用方 = 攻击路径）
+
+    近战取走后合并进 combined_debuffs（随 PLAYER_HURT.debuffs 下发）；
+    远程取走后并入 Projectile.debuffs（命中才结算）。取完即清空，
+    保证同一批效果只被消费一次。
+    """
+    pending = getattr(monster, "_pending_skill_debuffs", None) or []
+    monster._pending_skill_debuffs = []
+    return list(pending)
+
+
+def _apply_single_target_debuff(monster, target, effect_id: str, level: int,
+                                defer_debuffs: bool) -> bool:
+    """单目标技能 debuff 统一入口（近战/远程/单机三端共用）
+
+    两件事：
+    1) **记录**：写入 monster._pending_skill_debuffs，由本次攻击路径取走并并入
+       攻击附带效果（近战→PLAYER_HURT.debuffs，远程→弹丸 debuffs），
+       这是联机端能收到怪物技能 debuff 的唯一来源（修复客户端技能效果丢失）；
+    2) **立即施加**：近战/单机口径——命中即生效。
+
+    defer_debuffs=True（远程怪物，用户决策 2026-10-04）：只记录、**不立即施加**，
+    效果随弹丸命中才结算，修复「远程技能 debuff 在施法瞬间就生效、弹丸打偏也算中」。
+    """
+    pending = getattr(monster, "_pending_skill_debuffs", None)
+    if pending is None:
+        pending = []
+        monster._pending_skill_debuffs = pending
+    pending.append((effect_id, level))
+    if defer_debuffs:
+        return True  # 已挂弹丸，命中时由 Projectile 结算
+    if target is not None and hasattr(target, "apply_debuff"):
+        target.apply_debuff(effect_id, level)
+        return True
+    return False
+
+
+def _apply_aoe_debuffs(monster, players, fallback, effect_id: str, level: int) -> bool:
+    """范围技能 debuff 统一入口（沙尘暴/手雷投掷）
+
+    范围技能的语义就是「半径内全部生效」，与弹丸是否命中无关，因此**不做**延迟
+    （延迟只用于单目标远程技能，见 _apply_single_target_debuff）。范围内玩家若
+    没被弹丸命中就不会有 PLAYER_HURT，主机经 set_skill_debuff_sink 注入的回调
+    逐玩家单播 SKILL_DEBUFF 送达（views/game/network_sync.py
+    _broadcast_skill_debuff）；这些效果**不进** PLAYER_HURT.debuffs，
+    两通道互斥 → 客户端同一效果恰好施加一次。
+    """
+    targets = list(players) if players else ([fallback] if fallback is not None else [])
+    affected = []
+    for p in targets:
+        if p is None or not hasattr(p, "apply_debuff"):
+            continue
+        p.apply_debuff(effect_id, level)
+        affected.append((p, (effect_id, level)))
+    if not affected:
+        return False
+    sink = getattr(monster, "_skill_debuff_sink", None)
+    if sink is not None:
+        sink(affected)
+    return True
+
+
+def apply_skill_prompt_and_effect(monster, skill_index=0, target=None, nearby_players=None,
+                                  defer_debuffs: bool = False):
     """显示技能提示 + 应用实际战斗效果 + 粒子特效（攻击时调用的统一入口）
     
     结合视觉提示与实际 debuff/buff 效果，一次调用完成三件事。
@@ -250,7 +323,12 @@ def apply_skill_prompt_and_effect(monster, skill_index=0, target=None, nearby_pl
         skill_index: 技能索引（0=第一个技能，1=第二个技能）
         target: 目标玩家对象
         nearby_players: 附近玩家列表（范围技能用，可选）
+        defer_debuffs: 是否把单目标技能 debuff 延迟到弹丸命中（远程怪物传 True，
+            用户决策 2026-10-04；近战/单机传 False 保持命中即生效）
     """
+    # 本次施法的技能 debuff 记录先清空：_pending_skill_debuffs 只描述「当前这一发」，
+    # 由本次攻击路径（近战 combined_debuffs / 远程 Projectile.debuffs）取走消费。
+    _reset_pending_skill_debuffs(monster)
     # 接住提示信息：把 duration/radius/color 转存成渲染层可直接读取的
     # _skill_vfx_* 字段（渲染层据此画技能范围圈，timer 由 monster_base 逐帧递减），
     # 并在同一处启动该技能冷却（键 = 技能中文名，时长查 config.SKILL_COOLDOWNS）。
@@ -267,7 +345,8 @@ def apply_skill_prompt_and_effect(monster, skill_index=0, target=None, nearby_pl
             cds = {}
             monster._skill_cds = cds
         cds[skill_name] = SKILL_COOLDOWNS.get(skill_name, SKILL_CD_DEFAULT)
-    apply_skill_effect(monster, skill_index, target=target, nearby_players=nearby_players)
+    apply_skill_effect(monster, skill_index, target=target, nearby_players=nearby_players,
+                       defer_debuffs=defer_debuffs)
     _emit_skill_vfx(monster, skill_index, target, nearby_players)
 
 
@@ -477,7 +556,8 @@ _SELF_BUFF_SKILL_TYPES = {
 }
 
 
-def apply_skill_effect(monster, skill_index: int, target=None, nearby_players=None):
+def apply_skill_effect(monster, skill_index: int, target=None, nearby_players=None,
+                       defer_debuffs: bool = False):
     """应用怪物技能的实际战斗效果
     
     根据怪物类型和技能索引，对目标玩家施加 debuff 或对怪物自身施加 buff。
@@ -487,6 +567,10 @@ def apply_skill_effect(monster, skill_index: int, target=None, nearby_players=No
         skill_index: 技能索引（0=第一个技能，1=第二个技能）
         target: 目标玩家对象（近战/远程攻击的目标）
         nearby_players: 附近玩家列表（范围技能用，可选）
+        defer_debuffs: 单目标技能 debuff 是否延迟到弹丸命中（远程怪物传 True，
+            用户决策 2026-10-04）。True 时只记录到 monster._pending_skill_debuffs，
+            由远程攻击路径并入 Projectile.debuffs，命中才结算；
+            范围技能（沙尘暴/手雷投掷）语义是半径内全部生效，**不受**此参数影响。
     
     Returns:
         bool: 是否成功应用了技能效果
@@ -513,9 +597,7 @@ def apply_skill_effect(monster, skill_index: int, target=None, nearby_players=No
     if class_name == "Zombie":
         if skill_name == "腐烂光环":
             # 对目标施加中毒效果（2秒，每秒3点伤害）
-            if target and hasattr(target, "apply_debuff"):
-                target.apply_debuff("poison", 1)
-                return True
+            return _apply_single_target_debuff(monster, target, "poison", 1, defer_debuffs)
         elif skill_name == "狂暴":
             # 怪物自身攻击力+50%，持续3秒（临时 buff）
             original_damage = monster.damage
@@ -539,22 +621,16 @@ def apply_skill_effect(monster, skill_index: int, target=None, nearby_players=No
             return True
         elif skill_name == "骨矛投掷":
             # 对目标施加减速效果（2秒，减速30%）
-            if target and hasattr(target, "apply_debuff"):
-                target.apply_debuff("slow", 1)
-                return True
+            return _apply_single_target_debuff(monster, target, "slow", 1, defer_debuffs)
     
     # ── 近战木乃伊技能 ──
     elif class_name == "MummyMelee":
         if skill_name == "毒雾释放":
             # 对目标施加中毒（3秒，每秒4点伤害）
-            if target and hasattr(target, "apply_debuff"):
-                target.apply_debuff("poison", 2)
-                return True
+            return _apply_single_target_debuff(monster, target, "poison", 2, defer_debuffs)
         elif skill_name == "木乃伊缠绕":
             # 对目标施加眩晕（1.5秒）
-            if target and hasattr(target, "apply_debuff"):
-                target.apply_debuff("stun", 1)
-                return True
+            return _apply_single_target_debuff(monster, target, "stun", 1, defer_debuffs)
     
     # ── 远程木乃伊技能 ──
     elif class_name == "MummyRanged":
@@ -570,22 +646,14 @@ def apply_skill_effect(monster, skill_index: int, target=None, nearby_players=No
             return True
         elif skill_name == "诅咒标记":
             # 对目标施加易伤（3秒，受到伤害+20%）
-            if target and hasattr(target, "apply_debuff"):
-                target.apply_debuff("vulnerable", 2)
-                return True
+            return _apply_single_target_debuff(monster, target, "vulnerable", 2, defer_debuffs)
     
     # ── 骆驼技能 ──
     elif class_name == "Camel":
         if skill_name == "沙尘暴":
-            # 对附近所有玩家施加减速（2秒，减速40%）
-            if nearby_players:
-                for p in nearby_players:
-                    if hasattr(p, "apply_debuff"):
-                        p.apply_debuff("slow", 2)
-                return True
-            elif target and hasattr(target, "apply_debuff"):
-                target.apply_debuff("slow", 2)
-                return True
+            # 对附近所有玩家施加减速（2秒，减速40%）：范围技能立即生效，
+            # 并经 sink 逐玩家单播 SKILL_DEBUFF 同步给远端客户端
+            return _apply_aoe_debuffs(monster, nearby_players, target, "slow", 2)
         elif skill_name == "储水":
             # 怪物自身回血（回复最大生命的15%）
             heal_amount = round(monster.max_hp * 0.15)
@@ -596,9 +664,7 @@ def apply_skill_effect(monster, skill_index: int, target=None, nearby_players=No
     elif class_name == "Sniper":
         if skill_name == "激光瞄准":
             # 对目标施加破甲（3秒，防御-5）
-            if target and hasattr(target, "apply_debuff"):
-                target.apply_debuff("armor_break", 2)
-                return True
+            return _apply_single_target_debuff(monster, target, "armor_break", 2, defer_debuffs)
         elif skill_name == "战术撤退":
             # 怪物自身移速+50%，持续2秒
             original_speed = monster.speed
@@ -612,45 +678,29 @@ def apply_skill_effect(monster, skill_index: int, target=None, nearby_players=No
     elif class_name == "Bandit":
         if skill_name == "投掷匕首":
             # 对目标施加流血（3秒，每秒3点伤害，可叠加）
-            if target and hasattr(target, "apply_debuff"):
-                target.apply_debuff("bleed", 1)
-                return True
+            return _apply_single_target_debuff(monster, target, "bleed", 1, defer_debuffs)
         elif skill_name == "群体呼叫":
             # 对目标施加易伤（2秒，受到伤害+15%）
-            if target and hasattr(target, "apply_debuff"):
-                target.apply_debuff("vulnerable", 1)
-                return True
+            return _apply_single_target_debuff(monster, target, "vulnerable", 1, defer_debuffs)
     
     # ── 火箭兵技能 ──
     elif class_name == "RocketTroop":
         if skill_name == "追踪导弹":
             # 对目标施加燃烧（3秒，每秒5点伤害）
-            if target and hasattr(target, "apply_debuff"):
-                target.apply_debuff("burn", 1)
-                return True
+            return _apply_single_target_debuff(monster, target, "burn", 1, defer_debuffs)
         elif skill_name == "弹幕射击":
             # 对目标施加易伤（2秒，受到伤害+25%）
-            if target and hasattr(target, "apply_debuff"):
-                target.apply_debuff("vulnerable", 2)
-                return True
+            return _apply_single_target_debuff(monster, target, "vulnerable", 2, defer_debuffs)
     
     # ── 突击兵技能 ──
     elif class_name == "Assault":
         if skill_name == "冲锋":
             # 对目标施加眩晕（1秒）
-            if target and hasattr(target, "apply_debuff"):
-                target.apply_debuff("stun", 1)
-                return True
+            return _apply_single_target_debuff(monster, target, "stun", 1, defer_debuffs)
         elif skill_name == "手雷投掷":
-            # 对附近所有玩家施加燃烧（2秒，每秒4点伤害）
-            if nearby_players:
-                for p in nearby_players:
-                    if hasattr(p, "apply_debuff"):
-                        p.apply_debuff("burn", 1)
-                return True
-            elif target and hasattr(target, "apply_debuff"):
-                target.apply_debuff("burn", 1)
-                return True
+            # 对附近所有玩家施加燃烧（2秒，每秒4点伤害）：范围技能立即生效，
+            # 并经 sink 逐玩家单播 SKILL_DEBUFF 同步给远端客户端
+            return _apply_aoe_debuffs(monster, nearby_players, target, "burn", 1)
     
     return False
 

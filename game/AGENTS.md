@@ -41,7 +41,7 @@
 - 数值一律从 `config.py` 导入，模块内不硬编码
 - 渲染辅助函数（render_helpers/batch_shapes）供 `views/game_view.py` 调用
 - 依赖层级：叶子层(batch_shapes/map_gen/player/effects/sound_manager/harvestable/chest/rocket_pad) → 中间层(monster_utils/loot/evac) → 聚合层(monsters/combat/respawn/render_helpers/rendering) → 回调汇聚层(entity_callbacks) → 输入层(input_handler)
-- **建造系统**：`Building` 不进玩家 `PhysicsEngineSimple.obstacle_list`（可自由穿过）；仅阻挡型（barricade）注册**怪物**碰撞网格，trap 为地面触发物须保持可踩；`can_place`/`place` 在 `net_mode=="client"` 直接拒绝（"联机建造由房主裁决"），`update()` 在 client 提前 return（只由 host/solo 驱动）
+- **建造系统**：`Building` 不进玩家 `PhysicsEngineSimple.obstacle_list`（可自由穿过）；仅阻挡型（barricade）注册**怪物**碰撞网格，trap 为地面触发物须保持可踩；`can_place` 三端可用、仅 `place` 在 `net_mode=="client"` 直接拒绝（"联机建造由房主裁决"），`update()` 在 client 提前 return（只由 host/solo 驱动）
 - **撤离点状态机**：`EvacPoint` dormant→defending→secured / destroyed；血量归零进 `destroyed`，按 E 修复后重新开始防守；`secured` 后由 GameView 把本点坐标交给 `EvacState` 复用 3 秒读条与结算链
 - **精英词缀**：`ELITE_AFFIXES` 只放 name/desc/倍率，数值一律 `config.ELITE_*`；行为（apply_affix/燃烧区/召唤/护盾）实现在 monster_affixes.py
 - **随机事件**：`pick_event(rng)` 签名只收 rng，**教程局守卫在调用侧**（`map_events.tutorial_active()` 看 `gs.tutorial.active`），禁在 pick_event 内做教程判定

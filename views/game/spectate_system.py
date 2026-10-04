@@ -11,7 +11,7 @@ import math
 import arcade
 from net.protocol import MsgType
 from game.effects import floating_texts
-from config import DOWNED_TIMEOUT, RESCUE_DISTANCE, RESCUE_DURATION, WINDOW_WIDTH
+from config import DOWNED_TIMEOUT, PLAYER_SIZE, RESCUE_DISTANCE, RESCUE_DURATION, WINDOW_WIDTH
 
 
 class SpectateManager:
@@ -114,6 +114,11 @@ class SpectateManager:
         - 满足条件时广播 ROOM_ENDED(all_finished)（房间保留，回房等待再次开局）；
         - 断线客户端：server.player_ids 不再包含 → 标记 left（此处按在线玩家判定）；
         - 注意：downed 玩家不视为"已结束"——游戏继续等待其被救或超时真死。
+          但"等待"不会无限持续：主机每帧在本判定**之前**先跑 `_settle_no_rescuer`
+          （口径 A：场上无可救援者 → 倒地者立即真死、status 转 dead），
+          60 秒超时真死由 `_update_downed_timers` 负责，两条路径共用
+          `_settle_downed_true_death`。故走到这里的 downed 只可能是"确实还有队友
+          可救"的正常等待态。
         """
         gs = self.gv.window.game_state
         if not self.gv._spectating or gs.net_mode != "host" or gs.net_server is None:
@@ -170,25 +175,140 @@ class SpectateManager:
                            f"你已倒地！等待队友救援（{DOWNED_TIMEOUT}秒超时）",
                            arcade.color.ORANGE, life=3.0, font_size=16)
 
-    def _update_downed_timers(self, dt: float) -> None:
-        """更新倒地玩家计时器（远程玩家倒地超时，每帧调用）
+    # ── 倒地真死结算（口径 A：场上无可救援者 → 不等 60 秒，立即按正常死亡结算）──
 
-        从 GameView.on_update 的倒地/救援系统更新段抽取：逐倒地玩家递减超时计时器，
-        超时未获救 → 真死（标记 dead，主机单播 PLAYER_DEATH 通知该玩家）。
+    def _has_rescuer_for(self, pid: int) -> bool:
+        """场上是否存在能救 pid 的玩家（"无可救援者"判定的唯一口径）
+
+        可救援者 = 非 pid 本人、且本局状态为 "alive"（未倒地/未撤离/未阵亡/未离开）。
+        候选全集 = 主机自己(0) + 房间内在线连接玩家（net_server.player_ids）；
+        未登记进 `_player_status` 的玩家按 "alive" 默认口径计算（与 `_check_all_finished`
+        的 `.get(pid, "alive")` 同口径）——在线但状态未登记者仍视为可实施救援。
+
+        关键推论（决定了本检查放在主机 on_update 的哪个位置）：
+        主机自己存活时恒是任意客户端的救援者，故「主机活着 + 队友倒地」永远判为
+        有救援者（不会误杀队友）；只有主机自己也结束/倒地，或其他人全部撤离/阵亡/
+        离开时，才会判为无救援者。
         """
         gs = self.gv.window.game_state
+        candidates: set[int] = {0}
+        server = gs.net_server
+        if server is not None:
+            candidates.update(server.player_ids)
+        for other in candidates:
+            if other == pid:
+                continue
+            if self.gv._player_status.get(other, "alive") == "alive":
+                return True
+        return False
+
+    def _settle_downed_true_death(self, pid: int, reason: str) -> None:
+        """倒地真死统一结算：60 秒超时 / 无可救援者 两条路径共用（消除重复实现）
+
+        结算口径（三段，各端等价）：
+        - 清倒地账本 `_downed_players[pid]` + 置 `_player_status[pid] = "dead"`
+          （"dead" 即 `_check_all_finished` 认定的"已结束"，主机据此收口广播 ROOM_ENDED）；
+        - pid != 0 且当前为主机 → 单播 PLAYER_DEATH，客户端走 `_apply_player_death`
+          落地（清本局携带物 + 进观战）；
+        - pid == 0（主机自己）→ **不依赖 send_to(0)**：net/server.py `_enqueue_send_to`
+          对 player_id 0 恒丢弃（主机不在 room.players 内），该调用恒无效。改为直接
+          执行本地等效结算：清本局携带物 + 清倒地标志 + `_enter_spectate("dead")`
+          （与 `_fail_run` 主机分支同一落地口径），随后由 `_check_all_finished` 收口。
+        """
+        gs = self.gv.window.game_state
+        self.gv._downed_players.pop(pid, None)
+        self.gv._player_status[pid] = "dead"
+        if pid == 0:
+            # 主机自己真死：本地等效结算（send_to(0) 恒无效，见 docstring）
+            if self.gv.player is not None:
+                self.gv.player.downed = False
+                self.gv.player.downed_timer = 0.0
+            self.gv._clear_run_equipment(gs)
+            self.gv._enter_spectate("dead")
+            print(f"[GameView] 玩家 {pid} 倒地真死（{reason}），已本地结算进观战")
+            return
+        if gs.net_mode == "host" and gs.net_server is not None:
+            gs.net_server.send_to(pid, MsgType.PLAYER_DEATH, {
+                "player_id": pid, "killer_id": None,
+            })
+        print(f"[GameView] 玩家 {pid} 倒地真死（{reason}）")
+
+    def _settle_no_rescuer(self) -> None:
+        """无可救援者立即结算（用户口径 A 方案）：不等 60 秒超时，按正常死亡收口
+
+        主机每帧调用（on_update 紧邻 `_check_all_finished` 之前）：任一倒地玩家若场上
+        已不存在任何"非本人且存活"的玩家（他人全部撤离/阵亡/离开，或**倒地瞬间场上
+        就没人**，如主机单人开局）→ 立即走与 60 秒超时真死完全相同的结算路径，
+        丢失本局携带物并进观战；随后由既有 `_check_all_finished` 判定全员结束 →
+        广播 ROOM_ENDED 回房。已撤离玩家 status 保持 "evac"，不受影响。
+
+        结算后本方法的剩余循环项由 `_has_rescuer_for` 重新判定（该倒地者已转 dead，
+        不再是任何人的救援者），故同一帧内可连续收口多名倒地者。
+        """
+        if not self.gv._downed_players:
+            return
+        for pid in list(self.gv._downed_players.keys()):
+            # 账本残留兜底：账本与状态不一致时（断线感知把玩家标 left 但未清账本等）
+            # 只清账本、不走真死结算——避免向已离线玩家单播 PLAYER_DEATH（server 会告警
+            # 丢弃）、避免把 left 覆写成 dead、避免残留一条永不超时的"需要救援"渲染标记。
+            if self.gv._player_status.get(pid) != "downed":
+                self.gv._downed_players.pop(pid, None)
+                continue
+            if self._has_rescuer_for(pid):
+                continue
+            self._settle_downed_true_death(pid, reason="场上无可救援者")
+
+    def _update_downed_timers(self, dt: float) -> None:
+        """倒地倒计时推进（联机模式每帧调用）：逐倒地玩家递减，超时真死
+
+        **倒计时的唯一实现处**（原 GameView.on_update 内联循环 + 主机幽灵轮询内联
+        循环 + 本方法三处重复，现全部收口到本方法）：
+        - 主机：账本 `_downed_players` 即权威倒计时（含主机自己 pid 0），超时即真死；
+        - 客户端：账本只有远端幽灵，仅供本端表现层递减（渲染的倒计时/透明度）；
+          客户端本地玩家不在账本内（`_player_downed` 的 client 分支不建本地账本），
+          其倒计时完全由主机裁决——主机结算后单播 PLAYER_DEATH 落地；
+        - 真死结算统一走 `_settle_downed_true_death`（与"无可救援者立即结算"共用）。
+        """
         for pid in list(self.gv._downed_players.keys()):
             dp = self.gv._downed_players[pid]
             dp["timer"] -= dt
             if dp["timer"] <= 0:
-                # 超时真死
-                del self.gv._downed_players[pid]
-                self.gv._player_status[pid] = "dead"
-                if gs.net_mode == "host":
-                    gs.net_server.send_to(pid, MsgType.PLAYER_DEATH, {
-                        "player_id": pid, "killer_id": None,
-                    })
-                print(f"[GameView] 玩家 {pid} 倒地超时，已阵亡")
+                self._settle_downed_true_death(pid, reason=f"倒地超时（{int(DOWNED_TIMEOUT)}秒）")
+        self._sync_local_downed_timer(dt)
+
+    def _sync_local_downed_timer(self, dt: float) -> None:
+        """把本机倒地倒计时同步到 `player.downed_timer`（该字段的表现层唯一读点）
+
+        `player.downed_timer` 此前只写不读（写点在 `_player_downed` 与两个复活回执），
+        本方法给它接上唯一的读出口——本机头顶倒计时标签：
+        - 主机：自身倒地账本 `_downed_players[0]` 存在 → 直接取权威值（**不再二次递减**，
+          避免双计时）；且此时 rendering 的倒地渲染已在同一坐标画了倒计时，故不重复画；
+        - 客户端：自身不在倒地账本内 → 按同一 dt 递减本地镜像（仅表现，真死以主机为准），
+          并补一条头顶倒计时标签——此前客户端本机倒地完全没有倒计时显示
+          （账本内无自身条目，rendering 画不到自己）。
+        标签复用既有 `_world_labels` 世界坐标→屏幕坐标通道（rendering.py 末尾统一
+        绘制并做屏幕裁剪），不新增 HUD 布局。
+        """
+        player = self.gv.player
+        if player is None or not player.downed:
+            return
+        gs = self.gv.window.game_state
+        # 本机在倒地账本内的键：主机恒为 0（大厅约定），客户端为自己 id
+        own_pid = 0 if gs.net_mode != "client" else getattr(gs, "net_player_id", 0)
+        dp = self.gv._downed_players.get(own_pid)
+        if dp is not None:
+            # 主机：账本为权威值，同步过来（账本已在 _update_downed_timers 递减）
+            player.downed_timer = max(0.0, float(dp["timer"]))
+            return
+        # 客户端：本地镜像递减 + 头顶倒计时标签
+        player.downed_timer = max(0.0, player.downed_timer - dt)
+        timer = player.downed_timer
+        timer_color = (arcade.color.GREEN if timer > 20
+                       else (arcade.color.ORANGE if timer > 10 else arcade.color.RED))
+        self.gv._world_labels.append((
+            player.center_x, player.center_y + PLAYER_SIZE + 18,
+            f"救援 {int(timer)}s", timer_color, 10,
+        ))
 
     def _update_rescue(self, dt: float) -> None:
         """更新救援读条（每帧调用）"""

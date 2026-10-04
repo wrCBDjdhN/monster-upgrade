@@ -46,7 +46,7 @@ from game.evac import EvacPoint, EvacState, commit_run_to_warehouse, clear_run
 from game.respawn import spawn_wave  # 阶段2 防守撤离：进攻波次生成
 from entities.resource_defs import RESOURCES  # 激活/修复消耗提示的资源中文名
 from game.build_system import BuildSystem  # 局内建造系统（阶段1）
-from game.monster_base import _get_wall_grid  # 怪物碰撞网格索引（建筑注册用）
+from game.monster_base import _get_wall_grid, separate_monsters  # 怪物碰撞网格索引（建筑注册用）+ 怪物软推开
 from game.harvestable import HarvestableEntity, spawn_harvestables
 from game.chest import Chest, spawn_chests
 from db.database import get_weapons, get_gold, get_equipment
@@ -985,6 +985,27 @@ class GameView(arcade.View):
         """委托 → net_sync._apply_player_hurt"""
         return self.net_sync._apply_player_hurt(payload)
 
+    def _apply_skill_debuff(self, payload: dict) -> None:
+        """委托 → net_sync._apply_skill_debuff（范围技能 debuff 单播，仅本人施加）"""
+        return self.net_sync._apply_skill_debuff(payload)
+
+    def _broadcast_skill_debuff(self, player, debuffs: list) -> None:
+        """委托 → net_sync._broadcast_skill_debuff（主机按玩家单播范围技能 debuff）"""
+        return self.net_sync._broadcast_skill_debuff(player, debuffs)
+
+    def monster_skill_debuff_sink(self, affected: list) -> None:
+        """范围技能 debuff 送达回调（注入给怪物，签名见 game/monster_utils.apply_skill_effect）
+
+        怪物不持有 GameView / 网络对象（分层铁律），因此由 game/respawn.py 在生成点
+        经 set_skill_debuff_sink 注入本方法。affected 元素为 (玩家对象, (效果ID, 等级))，
+        这里逐玩家转交 net_sync 单播；主机本地玩家在 net_sync 内被自动跳过
+        （本地已由 apply_skill_effect 直接施加，无需发消息）。
+        """
+        for player, debuff in affected or []:
+            if not debuff:
+                continue
+            self.net_sync._broadcast_skill_debuff(player, [debuff])
+
     def _apply_player_snapshot(self, payload) -> None:
         """委托 → net_sync._apply_player_snapshot"""
         return self.net_sync._apply_player_snapshot(payload)
@@ -1885,6 +1906,10 @@ class GameView(arcade.View):
                 elif msg_type == MsgType.PLAYER_HURT:
                     # 主机权威玩家受伤事件：本地扣血 + 受击反馈 / 远端幽灵同步 HP
                     self._apply_player_hurt(payload)
+                elif msg_type == MsgType.SKILL_DEBUFF:
+                    # 主机单播：本人被怪物**范围技能**的 debuff 命中（无伤害命中时的
+                    # 唯一送达通道；命中类技能走 PLAYER_HURT.debuffs，两通道互斥）
+                    self._apply_skill_debuff(payload)
                 elif msg_type == MsgType.PLAYER_SNAPSHOT:
                     # 主机玩家快照：校准本地与幽灵 HP（防漂移，权威值）
                     self._apply_player_snapshot(payload)
@@ -2010,6 +2035,18 @@ class GameView(arcade.View):
                         rm.net_attack_cd = max(0.0, cd - dt / delay)
                 # debuff 时长推进（只递减，HP 由主机快照权威，禁本地 DoT 结算）
                 _tick_ghost_debuffs(rm, dt)
+                # 技能表现计时器本地递减：幽灵不进 monster_base.update()（net_ghost
+                # 提前 return），若不在这里递减，主机快照里 _skill_prompt_timer /
+                # _skill_vfx_timer / _skill_buff_timer 会一直停在施法瞬间的初值，
+                # 表现为「客户端技能提示文字、范围圈特效、狂暴/骨盾标记永不消失」
+                # （修复联机端技能表现不消失）。数值语义与主机 monster_base.update()
+                # 的递减同源：剩余秒数 -= dt，归零后渲染层自动不画。
+                if getattr(rm, "_skill_prompt_timer", 0) > 0:
+                    rm._skill_prompt_timer = max(0.0, rm._skill_prompt_timer - dt)
+                if getattr(rm, "_skill_vfx_timer", 0) > 0:
+                    rm._skill_vfx_timer = max(0.0, rm._skill_vfx_timer - dt)
+                if getattr(rm, "_skill_buff_timer", 0) > 0:
+                    rm._skill_buff_timer = max(0.0, rm._skill_buff_timer - dt)
             # 阶段4 客户端：仅推进事件横幅计时（表现层）。
             # 空投落地仍由主机裁决并广播，update_event 内部已按 net_mode 守卫禁掉客户端
             # 本地落地，避免两端各自生成一批空投箱。
@@ -2150,19 +2187,10 @@ class GameView(arcade.View):
                             "x": ghost.center_x, "y": ghost.center_y,
                         }, exclude=pid)
                         print(f"[GameView] 玩家 {pid} 倒地，等待救援（{DOWNED_TIMEOUT}秒超时）")
-                    # 已倒地：递减超时计时器，超时则真死
-                    elif pid in self._downed_players:
-                        dp = self._downed_players[pid]
-                        dp["timer"] -= dt
-                        if dp["timer"] <= 0:
-                            # 超时真死：发 PLAYER_DEATH 给该玩家
-                            del self._downed_players[pid]
-                            self._player_status[pid] = "dead"
-                            gs.net_server.send_to(pid, MsgType.PLAYER_DEATH, {
-                                "player_id": pid,
-                                "killer_id": None,
-                            })
-                            print(f"[GameView] 玩家 {pid} 倒地超时，已阵亡")
+                    # 已倒地（_downed_notified 已置位）：倒计时推进与超时真死统一由
+                    # spectate._update_downed_timers 负责（倒计时唯一实现处）。此前
+                    # 此处与 on_update 的倒地循环各减一次，导致主机侧远端幽灵的倒计时
+                    # 被双倍速消耗（约 30 秒就超时真死）。
 
             # 断线感知：服务器房间内已不在线的玩家标记 left（全员结束判定视为已结束）
             online_ids = set(gs.net_server.player_ids)
@@ -2170,6 +2198,15 @@ class GameView(arcade.View):
                 if pid != 0 and pid not in online_ids and self._player_status.get(pid) not in ("evac", "dead", "left"):
                     self._player_status[pid] = "left"
                     print(f"[GameView] 玩家 {pid} 已离开房间，标记 left")
+
+            # 倒地真死收口（口径 A）：场上已不存在任何"非本人且存活"的玩家时，倒地者
+            # 不再等 60 秒超时，立即按正常死亡结算（丢失本局携带物 + 进观战/失败口径）。
+            # 必须排在 _check_all_finished 之前同帧执行：结算把 status 置 "dead" 后，
+            # 全员结束判定才能在同一帧收口并广播 ROOM_ENDED 回房（否则要多等一帧，
+            # 极端情况下还会被"host 观战期不再裁决"的分支拖到下一帧）。
+            # 覆盖两种时机：倒地瞬间场上就无可救援者（如主机单人开局）、
+            # 以及倒地后其他所有人撤离/阵亡/离开后的下一帧。
+            self._settle_no_rescuer()
 
             # 观战期间全员结束检测：主机已结束（evac/dead）+ 全部客户端结束/离开 →
             # 广播 ROOM_ENDED(all_finished)（房间保留，主机回 host_wait 等待再次开局）
@@ -2232,19 +2269,10 @@ class GameView(arcade.View):
 
         # 倒地/救援系统更新（联机模式）
         if gs.net_mode in ("host", "client"):
-            # 更新倒地玩家计时器（远程玩家倒地超时）
-            for pid in list(self._downed_players.keys()):
-                dp = self._downed_players[pid]
-                dp["timer"] -= dt
-                if dp["timer"] <= 0:
-                    # 超时真死
-                    del self._downed_players[pid]
-                    self._player_status[pid] = "dead"
-                    if gs.net_mode == "host":
-                        gs.net_server.send_to(pid, MsgType.PLAYER_DEATH, {
-                            "player_id": pid, "killer_id": None,
-                        })
-                    print(f"[GameView] 玩家 {pid} 倒地超时，已阵亡")
+            # 倒地倒计时推进（倒计时唯一实现处 → spectate._update_downed_timers）：
+            # 超时真死与"无可救援者立即结算"共用 _settle_downed_true_death 同一段结算。
+            # 主机权威倒计时只在主机裁决；客户端此处仅递减远端幽灵账本供表现层显示。
+            self._update_downed_timers(dt)
             # 更新救援读条
             self._update_rescue(dt)
 
@@ -2395,6 +2423,10 @@ class GameView(arcade.View):
                         # 记录发射者怪物 net_id（弹丸快照 owner_id 用；solo 模式怪物无 net_id 时为 0）
                         proj.owner_net_id = getattr(m, "net_id", 0)
                         self.skeleton_projectiles.append(proj)
+
+            # 怪物软推开（修复怪物/玩家重合）：AI 更新后每帧调用一次，只改坐标、不动 AI 状态。
+            # 观战模式（主机玩家已撤离/死亡）传 None —— 不做怪-玩家分离，只做怪-怪分离。
+            separate_monsters(self.monsters, None if self._spectating else self.player, dt)
 
             # 骷髅弹丸更新 + 命中检测
             for p in list(self.skeleton_projectiles):
@@ -3073,6 +3105,14 @@ class GameView(arcade.View):
     def _check_all_finished(self) -> bool:
         """委托 → spectate._check_all_finished"""
         return self.spectate._check_all_finished()
+
+    def _update_downed_timers(self, dt: float) -> None:
+        """委托 → spectate._update_downed_timers"""
+        return self.spectate._update_downed_timers(dt)
+
+    def _settle_no_rescuer(self) -> None:
+        """委托 → spectate._settle_no_rescuer（无可救援者立即结算，主机每帧调用）"""
+        return self.spectate._settle_no_rescuer()
 
     def on_key_press(self, key, modifiers):
         handle_key_press(self, key, modifiers)

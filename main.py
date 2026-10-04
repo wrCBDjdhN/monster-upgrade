@@ -283,9 +283,12 @@ def main():
     window.game_state = GameState()
 
     # 首次启动教程：读取 DB 教程完成标记（tutorial_done），未完成则启用教程
-    from db.database import init_db
+    from db.database import init_db, get_or_create_player
     from db.settings import is_tutorial_done
     init_db()
+    # 修复：启动时不设 player_id（原为 None），StartView._refresh_facilities 读到
+    # None 会把设施等级缓存置空 → 市场/锻造坊建成后重启仍显示"未建造"（2026-10-04）
+    window.game_state.player_id = get_or_create_player(window.game_state.player_name)
     window.game_state.tutorial = TutorialState(active=not is_tutorial_done())
 
     # 延迟导入避免循环依赖（start_view 会导入其他视图）

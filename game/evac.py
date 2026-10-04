@@ -112,7 +112,9 @@ class EvacPoint:
     def _reset_defense(self) -> None:
         """开始新的防守周期。"""
         self.defend_left = self._defend_duration
-        self.wave_timer = EVAC_WAVE_INTERVAL
+        # 修复：原为 EVAC_WAVE_INTERVAL（10 秒），激活后首波延迟 10 秒才刷、
+        # 玩家体感"第一波不刷怪"；改为 0 → 首个 update 帧即触发第 1 波（2026-10-04）
+        self.wave_timer = 0.0
         self.wave_no = 0
         self._wave_pending = False
 

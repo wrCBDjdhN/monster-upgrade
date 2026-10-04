@@ -276,6 +276,9 @@ def _spawn_monster_group(view, composition, theme, walls, rooms, map_w, map_h):
             m._walls = walls
             # 注入建筑查询/伤害回调（怪物不持有 GameView 引用）
             view.build_system.attach_monster(m)
+            # 注入范围技能 debuff 送达回调（联机主机把受影响的远端玩家经
+            # SKILL_DEBUFF 送达客户端；单机/客户端为 None，本地施加即可）
+            m.set_skill_debuff_sink(getattr(view, "monster_skill_debuff_sink", None))
             
             # 分配装备
             assign_monster_armor(m, level=random.randint(*MONSTER_GEAR_LEVEL_RANGE), theme=theme)
@@ -394,6 +397,9 @@ def spawn_wave(view, theme, origin_xy, count, aggro_xy=None):
         m._walls = walls
         # 注入建筑查询/伤害回调（怪物不持有 GameView 引用）
         view.build_system.attach_monster(m)
+        # 注入范围技能 debuff 送达回调（进攻波怪物同样要能把 AoE debuff
+        # 经 SKILL_DEBUFF 送达远端客户端，见 _spawn_monster_group）
+        m.set_skill_debuff_sink(getattr(view, "monster_skill_debuff_sink", None))
 
         # 分配装备（沿用野外刷新口径）
         assign_monster_armor(m, level=random.randint(*MONSTER_GEAR_LEVEL_RANGE), theme=theme)
@@ -459,6 +465,8 @@ def spawn_minion_group(view, kind, count, origin_xy, spread=30):
         m.set_on_death(view._on_monster_death)
         m._walls = walls
         view.build_system.attach_monster(m)
+        # 范围技能 debuff 送达回调（与野外刷新同口径，见 _spawn_monster_group）
+        m.set_skill_debuff_sink(getattr(view, "monster_skill_debuff_sink", None))
         # 召唤计数标记：on_affix_update 据此统计场上召唤怪数以执行 summon_max_alive 上限
         m.affix_summoned = True
         assign_monster_armor(m, level=random.randint(*MONSTER_GEAR_LEVEL_RANGE), theme=theme)
@@ -509,6 +517,8 @@ def spawn_elite(view):
     # 注入 GameView 引用 provider：词缀的分裂/召唤/火墙需要访问场景
     # （不直接持有视图，与 _evac_point_provider 同一模式）
     m.set_affix_view_provider(lambda v=view: v)
+    # 范围技能 debuff 送达回调（与野外刷新同口径，见 _spawn_monster_group）
+    m.set_skill_debuff_sink(getattr(view, "monster_skill_debuff_sink", None))
 
     assign_monster_armor(m, level=random.randint(*MONSTER_GEAR_LEVEL_RANGE), theme=theme)
     assign_monster_helmet(m, level=random.randint(*MONSTER_GEAR_LEVEL_RANGE), theme=theme)

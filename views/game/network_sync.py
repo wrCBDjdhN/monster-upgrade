@@ -57,6 +57,22 @@ from game.monsters import Zombie  # 远端怪物实例化兜底（未知类型�
 # 注意：_RemoteLaser / _lookup_weapon_by_name 在函数内延迟导入，避免与 game_view.py 构成模块级循环导入
 
 
+def _color_to_list(color) -> list | None:
+    """颜色 tuple/list → JSON 可序列化的 [r,g,b]（None/非法值统一返回 None）
+
+    技能提示与范围圈特效颜色要进 MONSTER_SNAPSHOT，JSON 无法编码 tuple，
+    故所有颜色字段统一经此出口转换，缺失时返回 None 让客户端走本地默认值。
+    """
+    if not color:
+        return None
+    try:
+        return list(tuple(color)[:3])
+    except TypeError:
+        # 非序列（理论上不会发生）：显式告警后按缺失处理，禁静默吞掉脏数据
+        print(f"[警告] 快照颜色字段类型异常：{color!r}")
+        return None
+
+
 class NetworkSyncManager:
     """联机同步管理器：承载 GameView 的全部网络同步逻辑（Phase 1 提取）
 
@@ -554,6 +570,12 @@ class NetworkSyncManager:
         - player_id == 本地玩家 id → 本地扣血条 + 屏幕红闪 + 音效（本地触发，
           不依赖额外网络往返）；HP 权威值以 PLAYER_SNAPSHOT 校准为准；
         - player_id 为他人 → 对应幽灵 hp 扣减（显示用，快照校准）。
+
+        附带效果（bug #4 修复）：主机广播的 debuffs 是**全量列表** [(效果ID,等级), ...]
+        （含怪物自带 debuff + 武器 debuff + 武器 effects + 弹丸/近战技能 debuff），
+        旧实现只读单值 debuff/debuff_level，多效果时第一个之外的 debuff（含绝大多数
+        怪物技能效果）在客户端被静默丢弃。这里改为遍历 debuffs 逐个施加，
+        并兼容旧主机只下发单值字段的情况（debuffs 为空时回退读 debuff/debuff_level）。
         """
         gs = self.gv.window.game_state
         player_id = payload.get("player_id")
@@ -567,18 +589,89 @@ class NetworkSyncManager:
             self.gv._player_hit_flash = 0.3
             sound_manager.play_hurt()
             floating_texts.add_damage(self.gv.player.center_x, self.gv.player.center_y + 20, damage)
-            debuff = payload.get("debuff")
-            debuff_level = payload.get("debuff_level") or 1  # 附带效果等级（默认 1 级）
-            if debuff and hasattr(self.gv.player, "apply_debuff"):
-                try:
-                    self.gv.player.apply_debuff(debuff, debuff_level)
-                except Exception:
-                    pass  # 未知效果：忽略，快照校准
+            self._apply_debuff_payload(self.gv.player, payload)
         else:
             # 远端玩家（幽灵）受伤：同步 HP 显示（扣血，快照校准）
             ghost = self.gv.remote_players.get(player_id)
             if ghost is not None:
                 ghost.hp = max(0, round(getattr(ghost, "hp", 0) - damage, 2))
+
+    @staticmethod
+    def _apply_debuff_payload(player, payload: dict) -> None:
+        """把载荷里的附带效果施加到本地玩家实体（PLAYER_HURT 与 SKILL_DEBUFF 共用）
+
+        两条通道载荷结构一致（'debuffs' 全量列表 + 旧主机单值 debuff/debuff_level），
+        故共用本方法保证「同一条效果在任何通道下施加口径完全一致」，避免两处
+        各写一份逐渐漂移。单个效果施加失败（未知效果 id 等）只跳过该条，
+        禁静默吞异常——按 net 层铁律显式告警。
+        """
+        entries = payload.get("debuffs") or []
+        for entry in entries:
+            # 容忍裸二元组与 dict 两种形态（协议规定为 [(效果ID, 等级), ...]）
+            if isinstance(entry, dict):
+                eid, lvl = entry.get("id"), entry.get("level", 1)
+            elif isinstance(entry, (list, tuple)) and entry:
+                eid, lvl = entry[0], (entry[1] if len(entry) > 1 else 1)
+            else:
+                continue
+            if not eid:
+                continue
+            try:
+                player.apply_debuff(eid, int(lvl or 1))
+            except Exception as exc:  # noqa: BLE001 - 未知效果 id 属脏数据，须显式告警
+                print(f"[NetSync] 施加附带效果失败 id={eid} level={lvl}：{exc}")
+        if entries:
+            return  # 全量列表已消费，不再回退读旧单值字段
+        # 旧主机兼容：仅下发 debuff/debuff_level 单值时按单条施加
+        legacy = payload.get("debuff")
+        if legacy:
+            try:
+                player.apply_debuff(legacy, int(payload.get("debuff_level") or 1))
+            except Exception as exc:  # noqa: BLE001 - 同上，显式告警
+                print(f"[NetSync] 施加旧版附带效果失败 id={legacy}：{exc}")
+
+    def _broadcast_skill_debuff(self, player, debuffs: list) -> None:
+        """主机：把怪物技能的 debuff 单播给被影响的**远端**玩家（范围技能无伤害命中的唯一送达通道）
+
+        为什么需要本方法（为什么不能只靠 PLAYER_HURT.debuffs）：
+        1) 范围技能（沙尘暴/手雷投掷）对半径内所有玩家生效，但范围内玩家可能完全
+           没被弹丸命中 → 不会有 PLAYER_HURT 消息，debuff 会静默丢失；
+        2) 弹丸按「首个命中目标」结算伤害，弹丸掠过中途的玩家不会收到 PLAYER_HURT。
+        因此主机按玩家逐个单播 SKILL_DEBUFF，客户端仅在自己 id 匹配时施加
+        （_apply_skill_debuff）。
+
+        「恰好一次」的两条通道分工（不靠跨调用状态去重，见 game/monster_utils.py
+        apply_skill_effect 的 AoE 分支注释）：
+        - 命中类技能（近战挥砍 / 弹丸）的 debuff 只进 PLAYER_HURT.debuffs，不发本消息；
+        - 范围技能（沙尘暴/手雷投掷）的 debuff 只进本消息，不进 PLAYER_HURT.debuffs。
+        两条通道天然互斥，客户端不会对同一效果施加两次。
+        主机本地玩家不发送（本地已由 apply_skill_effect 直接施加）。
+        """
+        gs = self.gv.window.game_state
+        if gs.net_mode != "host" or gs.net_server is None or not debuffs:
+            return
+        player_id = getattr(player, "net_player_id", None)
+        if player_id is None or player_id == getattr(gs, "net_player_id", None):
+            return  # 主机本地玩家：本地已施加，无需发消息
+        gs.net_server.send_to(player_id, MsgType.SKILL_DEBUFF, {
+            "player_id": player_id,
+            "debuffs": [(eid, int(lvl or 1)) for eid, lvl in debuffs],
+        })
+
+    def _apply_skill_debuff(self, payload: dict) -> None:
+        """客户端应用主机 SKILL_DEBUFF：仅当 player_id 为本人时施加（他人 debuff 与我无关）
+
+        非本人 id 直接返回是刻意的：其他玩家的技能 debuff 由他们各自的客户端接收
+        主机单播的那份消息处理，此处重复施加会造成同效果刷新两次。
+        """
+        gs = self.gv.window.game_state
+        player_id = payload.get("player_id")
+        my_id = getattr(gs, "net_player_id", None)
+        if player_id is None or my_id is None or player_id != my_id:
+            return
+        player = self.gv.player
+        if player is not None:
+            self._apply_debuff_payload(player, payload)
 
     def _apply_player_snapshot(self, payload: dict) -> None:
         """客户端应用主机 PLAYER_SNAPSHOT：校准本地与幽灵 HP（防漂移）"""
@@ -1887,17 +1980,32 @@ class NetworkSyncManager:
 
         - 其余玩家/怪物不受影响继续游戏（死亡 = 单人事件，B9）；
         - 与放弃行动同路径：进入观战模式（连接保留、等待全员结束回房），
-          而非直接回 LobbyView（避免 SettingsView 阻挡视图切换）。
+          而非直接回 LobbyView（避免 SettingsView 阻挡视图切换）；
+        - 守卫只拦「非倒地的观战」（放弃行动 / 已死亡）：倒地态复用 `_spectating=True`
+          （spectate_system._player_downed:145），若一并拦掉，倒地者收到的真死通知
+          （60 秒超时 或 场上无可救援者立即结算）会被静默丢弃 → 本局携带物不清、
+          永不进观战，只能干等主机全员结束。倒地态必须放行，由本方法收口倒地账本。
         """
-        # 已在观战模式（放弃行动/已死亡）：不再重复处理 PLAYER_DEATH，
-        # 避免"你已阵亡"红字与"你已放弃行动"红字同时出现
-        if self.gv._spectating:
-            return
         gs = self.gv.window.game_state
-        player_id = payload.get("player_id")
         my_id = getattr(gs, "net_player_id", None)
+        # 已在观战（放弃行动/已死亡）且非倒地：不再重复处理 PLAYER_DEATH，
+        # 避免"你已阵亡"红字与"你已放弃行动"红字同时出现
+        if self.gv._spectating and not getattr(self.gv.player, "downed", False):
+            return
+        player_id = payload.get("player_id")
         if my_id is not None and player_id != my_id:
             return  # 非本人死亡事件：忽略（幽灵同步由快照处理）
+        # 收口本人倒地账本与状态（倒地者真死 = 本局结束，与非倒地路径同口径）：
+        # - player.downed/downed_timer 归零：否则 _spectating 解除后仍会被当作倒地者
+        #   （_try_rescue 拒绝救援、_serialize_players 上报 alive=False）；
+        # - 账本与状态清理：本人若已登记进倒地账本（主机自身 pid 0 / 远端标记），
+        #   不清会留下一条永不超时的"需要救援"渲染标记。
+        if self.gv.player is not None:
+            self.gv.player.downed = False
+            self.gv.player.downed_timer = 0.0
+        if my_id is not None:
+            self.gv._downed_players.pop(my_id, None)
+            self.gv._player_status[my_id] = "dead"
         # 死亡丢失装备（与单机死亡同口径），进入观战模式
         gs.net_wait_reason = "dead"
         self.gv._clear_run_equipment(gs)
@@ -2398,6 +2506,21 @@ class NetworkSyncManager:
                 "aggro_range": float(getattr(m, "_aggro_range", 0.0)),
                 "attack_delay": atk_delay,
                 "attack_cd_ratio": atk_cd_ratio,
+                # 技能表现三件套（提示文字 / 范围圈特效 / 自身 buff）：
+                # 客户端幽灵不跑 monster_base.update()，这三个计时器在主机递减，
+                # 快照下发「剩余值」由客户端本地按 dt 递减，避免提示与特效在
+                # 客户端永久停留（修复联机端看不到技能提示/范围圈/狂暴骨盾标记）。
+                # 全部为可选消费项，颜色统一转 list 便于 JSON 序列化。
+                "skill_prompt_text": getattr(m, "_skill_prompt_text", None),
+                "skill_prompt_color": _color_to_list(getattr(m, "_skill_prompt_color", None)),
+                "skill_prompt_timer": float(getattr(m, "_skill_prompt_timer", 0.0) or 0.0),
+                "skill_vfx_timer": float(getattr(m, "_skill_vfx_timer", 0.0) or 0.0),
+                "skill_vfx_duration": float(getattr(m, "_skill_vfx_duration", 0.0) or 0.0),
+                "skill_vfx_radius": float(getattr(m, "_skill_vfx_radius", 0.0) or 0.0),
+                "skill_vfx_color": _color_to_list(getattr(m, "_skill_vfx_color", None)),
+                # 自身 buff（狂暴/骨盾/战术撤退）：客户端据此画 buff 标记与倒计时条
+                "skill_buff_type": getattr(m, "_skill_buff_type", None),
+                "skill_buff_timer": float(getattr(m, "_skill_buff_timer", 0.0) or 0.0),
             })
         return snapshot
 
@@ -2552,6 +2675,23 @@ class NetworkSyncManager:
             # 攻击冷却剩余比例（0~1）：客户端按此线性衰减（game_view 客户端块），
             # 免去用本地 _attack_delay 反推主机冷却长度导致的脏进度条
             rm.net_attack_cd = entry.get("attack_cd_ratio")
+            # ── 技能表现字段（提示文字/范围圈/自身 buff）──────────────────────
+            # 全部 .get() 默认值，旧主机不下发时幽灵字段保持 0/None → 渲染层不画，
+            # 绝不会崩也不会显示脏值（向后兼容铁律）。
+            # 颜色经 JSON 传回是 list，渲染层的 arcade 填充需要 tuple，这里就地还原。
+            rm._skill_prompt_text = entry.get("skill_prompt_text")
+            prompt_color = entry.get("skill_prompt_color")
+            rm._skill_prompt_color = tuple(prompt_color[:3]) if prompt_color else None
+            rm._skill_prompt_timer = float(entry.get("skill_prompt_timer", 0.0) or 0.0)
+            rm._skill_vfx_timer = float(entry.get("skill_vfx_timer", 0.0) or 0.0)
+            rm._skill_vfx_duration = float(entry.get("skill_vfx_duration", 0.0) or 0.0)
+            rm._skill_vfx_radius = float(entry.get("skill_vfx_radius", 0.0) or 0.0)
+            vfx_color = entry.get("skill_vfx_color")
+            rm._skill_vfx_color = tuple(vfx_color[:3]) if vfx_color else None
+            # 自身 buff（狂暴/骨盾/战术撤退）：与主机同字段名，渲染层一套代码
+            # 同时服务本地怪物与远端幽灵，禁再开一套 net_ 前缀
+            rm._skill_buff_type = entry.get("skill_buff_type")
+            rm._skill_buff_timer = float(entry.get("skill_buff_timer", 0.0) or 0.0)
         if monster_list and not self._warned_old_monster_snapshot:
             # net 层铁律：禁静默丢字段——主机快照缺新字段时显式告警一次（非每帧刷屏）
             if "attack_cd_ratio" not in monster_list[0] or "shield" not in monster_list[0]:

@@ -72,8 +72,19 @@ class StartView(arcade.View):
         gs = getattr(self.window_ref, "game_state", None)
         pid = getattr(gs, "player_id", None) if gs is not None else None
         if not pid:
-            self._fac_levels = {}
-            return
+            # 兜底：player_id 尚未初始化（原为 None）时直接置空，会把已建成的
+            # 市场/锻造坊误判为"未建造"（修复 2026-10-04）——先补初始化再查库
+            try:
+                if gs is not None:
+                    from db.database import init_db, get_or_create_player
+                    init_db()
+                    pid = get_or_create_player(gs.player_name)
+                    gs.player_id = pid
+            except Exception:
+                pid = None
+            if not pid:
+                self._fac_levels = {}
+                return
         try:
             from db.database import get_facilities
             self._fac_levels = get_facilities(pid)

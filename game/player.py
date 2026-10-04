@@ -213,8 +213,12 @@ class Player(arcade.SpriteSolidColor):
         self.on_take_damage = None  # Callable[[float], None] | None
         # 倒地/救援系统（联机模式）：
         # downed=True 表示 HP=0 但可被队友救援（保留装备），超时未被救则真死
+        # 真死裁决权威源 = GameView._downed_players 账本（主机），downed_timer 只是
+        # 本机倒计时的表现层镜像：由 spectate._sync_local_downed_timer 每帧同步
+        # （主机取权威账本值、客户端按同 dt 递减本地镜像），供头顶倒计时标签读取；
+        # 归零不等于真死，真死一律经 _settle_downed_true_death 结算。
         self.downed = False
-        self.downed_timer = 0.0    # 倒地计时器（秒），归零时真死
+        self.downed_timer = 0.0    # 本机倒地剩余秒数（表现层镜像，非权威）
 
     def clamp_to_map(self):
         """将玩家位置限制在地图边界内"""
@@ -647,19 +651,17 @@ class PlayerController:
     def use_camera(self):
         """激活相机（设置视口变换）
 
-        Camera2D 构造时 viewport 取自 framebuffer 初始尺寸（1280x720），
-        窗口 resize 后不会自动更新；若沿用旧视口，世界层 GL 视口与
-        main.FixedLogicalProjector（HUD/文字层）的 letterbox 视口不一致，
-        会导致相机移动时文字与画面位移不同步（文字不随人物移动）。
-        因此每次激活相机前，按当前窗口逻辑尺寸重算 letterbox 视口并同步，
-        保证世界层与文字层使用同一 GL 视口（修复窗口缩放后文字错位 bug）。
+        修复非 16:9 窗口/全屏下"怪物头顶文字随玩家移动偏移"（2026-10-04）：
+        - 原实现按 letterbox 等比缩放居中视口（scale/vw/vh/vx/vy），而文字层
+          main.FixedLogicalProjector 是「拉伸满窗口」视口（viewport=全窗口）。
+          窗口恰好 16:9 时两者重合看不出问题；非 16:9（放大/全屏）时两层
+          缩放与偏移不同，世界标签换算（rendering.py: sx = wx - cam.x + W/2）
+          与怪物实际渲染位置的差值 ∝ (实体坐标 − 相机坐标) → 玩家一移动文字就漂移。
+        - 修复：视口改为与 FixedLogicalProjector 完全同口径——拉伸铺满当前窗口，
+          投影仍沿用构造时固定的 LRBT(±W/2, ±H/2)，世界层/文字层/鼠标层三层统一。
         """
         win = arcade.get_window()
         log_w, log_h = win.get_size()
-        scale = min(log_w / WINDOW_WIDTH, log_h / WINDOW_HEIGHT)
-        vw = max(1, round(WINDOW_WIDTH * scale))
-        vh = max(1, round(WINDOW_HEIGHT * scale))
-        vx = (log_w - vw) // 2
-        vy = (log_h - vh) // 2
-        self.camera.viewport = LBWH(vx, vy, vw, vh)
+        # 拉伸满窗口：与 main.FixedLogicalProjector.use() 视口口径一致（无 letterbox）
+        self.camera.viewport = LBWH(0, 0, max(1, log_w), max(1, log_h))
         self.camera.use()

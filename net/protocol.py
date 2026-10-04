@@ -47,6 +47,8 @@ class MsgType(Enum):
     DAMAGE_RESULT = "DAMAGE_RESULT"  # 主机→全部：伤害判定结果
     PLAYER_HURT = "PLAYER_HURT"      # 主机→全部：玩家受伤（HP 主机权威）
     PLAYER_DEATH = "PLAYER_DEATH"    # 主机→该玩家：玩家死亡
+    # ── 怪物技能 debuff（怪物技能命中/范围命中后由主机单播给被影响者本人）──
+    SKILL_DEBUFF = "SKILL_DEBUFF"    # 主机→指定玩家：该玩家被怪物技能 debuff 命中（范围技能无伤害命中时唯一送达通道）
     # ── 药水 ──
     POTION_USE = "POTION_USE"        # 客户端→主机：药水使用请求
     POTION_ACK = "POTION_ACK"        # 主机→全部：药水使用确认
@@ -226,8 +228,18 @@ MESSAGE_SCHEMAS: dict[MsgType, str] = {
         "       'damage': float,        攻击力（词缀/等级修正后的实际伤害，主机权威值）\n"
         "       'aggro_range': float,   仇恨探测距离（像素，词缀/等级修正后的生效值）\n"
         "       'attack_delay': float,  攻击冷却总时长（秒）\n"
-        "       'attack_cd_ratio': float}  攻击冷却剩余比例（0~1，1=刚攻击完；客户端按此\n"
+        "       'attack_cd_ratio': float,  攻击冷却剩余比例（0~1，1=刚攻击完；客户端按此\n"
         "                              线性衰减画冷却条，免去客户端硬套本地 _attack_delay）\n"
+        "       'skill_prompt_text': str|None,  技能提示文字（怪物施法头顶飘字）\n"
+        "       'skill_prompt_color': list|None, 技能提示颜色 [r,g,b]\n"
+        "       'skill_prompt_timer': float,    技能提示剩余显示时间（秒，客户端本地递减）\n"
+        "       'skill_vfx_timer': float,       技能范围圈特效剩余时间（秒，客户端本地递减）\n"
+        "       'skill_vfx_duration': float,    技能范围圈总时长（秒，画进度比例用）\n"
+        "       'skill_vfx_radius': float,      技能范围圈半径（像素）\n"
+        "       'skill_vfx_color': list|None,   技能范围圈颜色 [r,g,b]\n"
+        "       'skill_buff_type': str|None,   怪物自身 buff 类型（berserk/bone_shield/\n"
+        "                              tactical_retreat，None=无；客户端据此画 buff 标记）\n"
+        "       'skill_buff_timer': float}     自身 buff 剩余时间（秒，客户端本地递减）\n"
         "}"
     ),
     MsgType.PROJECTILE_SNAPSHOT: (
@@ -281,8 +293,22 @@ MESSAGE_SCHEMAS: dict[MsgType, str] = {
         "payload: {\n"
         "  'player_id': int,    受伤玩家 id\n"
         "  'damage': float,     伤害量\n"
-        "  'debuff': str|None,  附加 debuff 名\n"
-        "  'debuff_level': int|None}  debuff 等级（默认 1，修复 debuff 等级不同步）\n"
+        "  'debuff': str|None,  附加 debuff 名（旧主机单值字段，保留向后兼容）\n"
+        "  'debuff_level': int|None,  debuff 等级（旧主机单值字段，默认 1）\n"
+        "  'debuffs': list}     全量附加效果列表 [(效果ID, 等级), ...]（主机权威下发；\n"
+        "                      客户端遍历逐个施加，空/缺失时回退读 debuff/debuff_level）\n"
+        "}"
+    ),
+    MsgType.SKILL_DEBUFF: (
+        "主机→指定玩家：该玩家被怪物**范围技能**的 debuff 命中，客户端据此施加效果。\n"
+        "为什么需要独立消息：范围技能（沙尘暴/手雷投掷）对半径内所有玩家生效，\n"
+        "但范围内玩家可能完全没被弹丸命中（没有 PLAYER_HURT），只靠 PLAYER_HURT\n"
+        "会静默丢失；弹丸也只对首个命中目标结算伤害，掠过中途的玩家收不到。\n"
+        "「恰好一次」的两通道分工：命中类技能 debuff 只进 PLAYER_HURT.debuffs，\n"
+        "范围技能 debuff 只进本消息，两者互斥，客户端不会对同一效果施加两次。\n"
+        "payload: {\n"
+        "  'player_id': int,  被影响玩家 id（客户端仅在自己 id 匹配时施加）\n"
+        "  'debuffs': list}   附加效果列表 [(效果ID, 等级), ...]\n"
         "}"
     ),
     MsgType.PLAYER_DEATH: (

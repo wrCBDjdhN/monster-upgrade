@@ -15,7 +15,7 @@ from .batch_shapes import ShapeBatch  # 批量绘制：粒子一次 draw call �
 
 # ── 粒子对象池 ──
 _PARTICLE_POOL: list = []  # 空闲粒子缓存池
-_PARTICLE_POOL_MAX = 2000  # 池上限（防止内存无限增长）
+_PARTICLE_POOL_MAX = 1000  # 池上限（防止内存无限增长；降负载：特效过多卡顿，2026-10-04 由 2000 下调）
 
 
 class Particle:
