@@ -218,6 +218,9 @@ class PickupLootManager:
                     elif eid == "crit_chance":
                         current = getattr(self.gv.player, "crit_chance", 0.0)
                         self.gv.player.crit_chance = current + pdata.get("value", 0.05)
+            # 联机 HP 台账 rebase（方案A）：max_hp 被动效果可能直接提升本人 HP，
+            # 装备效果结算完毕后统一登记期望值（无 HP 变更时登记为同值，无副作用）
+            self.gv._rebase_expect_hp()
             # 同步更新 HUD 缓存，使左侧装备栏即时显示新拾取的装备（含 effects 列表）
             if self.gv._cached_equip is None:
                 self.gv._cached_equip = {}

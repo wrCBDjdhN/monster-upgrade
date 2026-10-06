@@ -19,6 +19,7 @@ from config import (
     NET_SNAPSHOT_HZ,  # 状态快照广播频率（怪物快照 20Hz）
     NET_HEARTBEAT_SEC,  # 心跳间隔（客户端 RTT 测量与保活）
     NET_ACTION_TIME_BCAST_SEC,  # 行动时间广播间隔（主机每秒广播剩余行动时间）
+    NET_ROOM_STATUS_INTERVAL,  # 房间内玩家对局状态广播间隔（房间页三态显示用）
     PROJECTILE_SIZE,  # 标准弹丸边长（客户端远端弹丸纯表现层渲染尺寸）
     DROP_PICKUP_RADIUS,  # 掉落物拾取半径（主机拾取仲裁距离阈值，Todo 18）
     LIFESTEAL_DEFAULT, SPREAD_COUNT_DEFAULT, SPREAD_ANGLE_DEFAULT,  # 武器扩展机制默认值（吸血/散射）
@@ -30,7 +31,7 @@ from config import (
     # 阶段8 难度星级：评星条件表 + 单图星上限（数值口径唯一来源）
     MAP_STAR_CRITERIA, MAP_MAX_STARS,
 )
-from net.protocol import MsgType  # 联机消息类型枚举（MONSTER_SNAPSHOT 等）
+from net.protocol import MsgType, build_ready_state_payload  # 联机消息类型枚举 + READY_STATE 载荷组装（②对局中客户端准备广播）
 from game.map_gen import generate_map
 from game.player import Player, PlayerController
 from game.monsters import Zombie, MummyMelee  # 刷怪映射兜底（未知类型回退用）
@@ -377,6 +378,13 @@ class GameView(arcade.View):
         self._net_fire_cd = 0.0
         # 联机客户端：本人实体快照上报计时器（20Hz 与主机快照同节拍，Todo 23）
         self._client_snap_timer = 0.0
+        # 联机客户端：已应用的本人 PLAYER_HURT 计数（伤害计数③，随快照上报 dmg_count，
+        # 主机比对幽灵 _dmg_seq 识别陈旧上报，防连续受伤血量回弹）
+        self._hurt_count = 0
+        # 联机客户端：本人 HP 期望血量台账（方案A，bug① 血量回弹兜底）——
+        # 所有合法 HP 变更点经 _rebase_expect_hp 登记期望值，帧末
+        # _enforce_hp_ledger 回滚未知上抬并打点日志；None=未武装（setup 末尾初始化）
+        self._net_expect_hp = None  # None=未武装，float=期望血量
         # 联机客户端：心跳/RTT 测量状态（每 NET_HEARTBEAT_SEC 发一次，测往返延迟）
         self._heartbeat_timer = 0.0
         self._heartbeat_seq = 0          # 心跳递增序号
@@ -385,6 +393,9 @@ class GameView(arcade.View):
         # 联机主机：行动时间广播计时器（每 NET_ACTION_TIME_BCAST_SEC 广播剩余行动时间，
         # 客户端 HUD 显示以广播值为准——修复客户端行动时间卡死不动）
         self._action_time_bcast_timer = 0.0
+        # 联机主机：房间内玩家对局状态广播计时器（每 NET_ROOM_STATUS_INTERVAL 广播一次，
+        # 房间页三态显示用；主机提前退出观战回房后后台对局转发期同样继续推进）
+        self._room_status_timer = 0.0
         # 联机：房间结束已广播/已处理标记（主机撤离/死亡/超时广播 ROOM_ENDED 防重复；
         # 客户端收到后回大厅，避免后续帧再次触发同一路径）
         self._room_ended_handled = False
@@ -770,6 +781,8 @@ class GameView(arcade.View):
             self.build_system.attach_monster(monster)
         # 联机客户端：撤离请求闸门重置（进入新一局后可再次请求撤离，B12）
         self._evac_request_sent = False
+        # 联机客户端：伤害计数复位（新一局与主机幽灵 _dmg_seq 同起点，伤害计数③）
+        self._hurt_count = 0
         # 联机主机：运行期地图改动已广播跟踪重置（新一局地图对象全新，旧广播记录作废，Todo 20）
         self._broadcasted_chests = set()
         self._broadcasted_env = set()
@@ -881,6 +894,49 @@ class GameView(arcade.View):
         if event_id:
             # 主机：开局立即广播 EVENT_START，客户端据此镜像 event_id/参数并显示横幅
             self.net_sync._broadcast_event_start()
+
+        # ── 方案A：联机 HP 期望台账武装（bug① 血量回弹兜底）──────────────
+        # 必须放在 setup 最末尾：此前的初始血量/祝福重算（apply_bonus_stats）等
+        # 所有 HP 写入均已落账，台账以最终值为起点；并把 Player.on_hp_changed
+        # 钩子指向 rebase，此后任何合法 HP 变更（扣血/回血/DoT/重算）自动同步台账。
+        self._net_expect_hp = float(self.player.hp)
+        self.player.on_hp_changed = self._rebase_expect_hp
+
+    def _rebase_expect_hp(self) -> None:
+        """HP 期望台账 rebase：任何合法 HP 变更后把台账同步为当前实际血量
+
+        调用点（方案A 唯一口径）：
+        - Player.on_hp_changed 钩子（take_damage/heal/_update_debuffs/apply_bonus_stats）
+        - 联机直写本人 HP 的权威路径（network_sync 救援成功/本人复活/伤害采纳，
+          pickup_loot 装备效果扣血）
+        - on_show_view（覆盖层期间的直改，如 level_up_view 升级加血）
+        未武装（None）或未进入游戏（player 未建）时直接跳过。
+        """
+        if self._net_expect_hp is None or self.player is None:
+            return
+        self._net_expect_hp = float(self.player.hp)
+
+    def _enforce_hp_ledger(self) -> None:
+        """帧末强制回写：客户端据期望血量台账回滚「未知来源的 HP 上抬」（bug①）
+
+        非对称策略（容差 0.005 抵消浮点误差）：
+        - hp > expect（上抬且未经 rebase 登记）→ 判为非法回弹，回滚到 expect 并打日志
+        - hp < expect（下跌且未经钩子登记）→ 采纳为新台账，避免未登记扣血
+          导致 expect 虚高、把此后所有合法回血误判为上抬（防挡死）
+        仅 client 强制回写（HP 主机权威）；host/solo 只维护台账不回滚。
+        """
+        gs = self.window.game_state
+        if gs.net_mode != "client" or self._net_expect_hp is None or self.player is None:
+            return
+        hp = float(self.player.hp)
+        expect = self._net_expect_hp
+        if hp > expect + 0.005:
+            # 未知来源上抬：回滚到台账期望值（血条渲染直读 player.hp，回滚即生效）
+            rolled = max(0.0, min(expect, float(self.player.max_hp)))
+            self.player.hp = round(rolled, 2)
+        elif hp < expect - 0.005:
+            # 未知来源下跌：采纳为新台账（并同步钩子已挂的同一台账值）
+            self._net_expect_hp = hp
 
     # ── 阶段5 祝福：薄编排（纯计算在 game/blessings.py，本处只做状态接线）──────────
     def refresh_blessing_stats(self, rebase_weapon: bool = False) -> None:
@@ -1040,6 +1096,12 @@ class GameView(arcade.View):
             lobby._players_info = gs.net_server.player_info()
             lobby._status = notice or "本局结束，等待再次开局"
             lobby._notice = notice
+            # 对局未收口（主机提前退出观战等）：挂后台引用，房间页 on_update 每帧
+            # 转发本视图 on_update 继续推进对局（权威泵/倒地计时/全员结束收口），
+            # 直到 _check_all_finished 广播 ROOM_ENDED 后重建房间页；
+            # 已收口（_broadcast_room_ended 之后）不挂，避免残留死引用
+            if not self._room_ended_handled:
+                lobby._game_view_ref = self
         elif gs.net_mode == "client" and gs.net_client is not None:
             lobby.mode = "client_wait"
             lobby.client = gs.net_client
@@ -1048,6 +1110,11 @@ class GameView(arcade.View):
             lobby._notice = notice
         gs.run_carried = {}  # 本局结束：携带物已结算/清空
         gs.run_potions = {}  # 本局药水槽一并清空（未撤离不结算）
+        if self._room_ended_handled:
+            # 对局已收口：清掉对局状态，房间页回退纯准备态显示（防上一局残留的
+            # alive 状态在下一局开播前误显示「游戏中」）；提前退出观战（对局未收口、
+            # 后台继续推进）不清——后台广播每 NET_ROOM_STATUS_INTERVAL 持续刷新
+            gs.room_player_status = {}
         self.window.show_view(lobby)
 
     def _apply_room_ended(self, payload: dict) -> None:
@@ -1196,74 +1263,27 @@ class GameView(arcade.View):
         """委托 → net_sync._apply_player_revived"""
         return self.net_sync._apply_player_revived(payload)
 
-    def _apply_spectate_leave(self, payload: dict) -> None:
-        """主机收到 SPECTATE_LEAVE：玩家主动退出观战 → 视为真死，清装备"""
-        gs = self.window.game_state
-        player_id = payload.get("player_id")
-        if player_id == 0:
-            # 主机自己退出观战：清装备 + 观战
-            self._clear_run_equipment(gs)
-            self._enter_spectate("dead")
-        else:
-            # 客户端退出观战：标记真死
-            self._downed_players.pop(player_id, None)
-            self._player_status[player_id] = "dead"
-            # 通知该客户端真死
-            gs.net_server.send_to(player_id, MsgType.PLAYER_DEATH, {
-                "player_id": player_id,
-                "killer_id": None,
-            })
+    def _apply_spectate_leave(self, payload: dict, sender_id=None) -> None:
+        """委托 → net_sync._apply_spectate_leave（身份收口 + 真死结算唯一实现处）
+
+        双版收口（2026-10-05，联机 bug ②）：原 game_view 与 network_sync 各存一份
+        实现且已漂移——game_view 版信任 payload.player_id 可被伪造（客户端发
+        player_id=0 可清主机装备强进观战）、主机退出不清 downed 账本导致反复触发；
+        net_sync 版含 sender_id 身份收口。统一委托到 net_sync 版避免再次分叉，
+        调用方须把连接侧 sender_id 传进来（禁采信 payload.player_id）。
+        """
+        return self.net_sync._apply_spectate_leave(payload, sender_id)
 
     def _handle_rescue_request(self, sender_id: int, payload: dict) -> None:
-        """主机处理 RESCUE_REQUEST：裁决距离并执行救援"""
-        gs = self.window.game_state
-        rescuer_id = payload.get("rescuer_id")
-        target_id = payload.get("target_id")
-        # 校验：被救者必须处于倒地状态
-        if self._player_status.get(target_id) != "downed":
-            return
-        # 校验：救援者必须存活
-        if self._player_status.get(rescuer_id) != "alive":
-            return
-        # 获取被救者位置
-        downed_info = self._downed_players.get(target_id)
-        if downed_info is None:
-            return
-        target_x, target_y = downed_info["x"], downed_info["y"]
-        # 获取救援者位置
-        if rescuer_id == 0:
-            rescuer_x, rescuer_y = self.player.center_x, self.player.center_y
-        else:
-            ghost = self.remote_players.get(rescuer_id)
-            if ghost is None:
-                return
-            rescuer_x, rescuer_y = ghost.center_x, ghost.center_y
-        # 距离校验
-        dist = math.hypot(rescuer_x - target_x, rescuer_y - target_y)
-        if dist > RESCUE_DISTANCE:
-            # 距离太远：发送失败结果
-            gs.net_server.send_to(rescuer_id, MsgType.RESCUE_RESULT, {
-                "target_id": target_id, "rescuer_id": rescuer_id,
-                "success": False, "hp": 0,
-            })
-            return
-        # 执行救援：被救者 HP 恢复为 REVIVE_HP
-        del self._downed_players[target_id]
-        self._player_status[target_id] = "alive"
-        # 广播救援成功
-        gs.net_server.broadcast(MsgType.RESCUE_RESULT, {
-            "target_id": target_id, "rescuer_id": rescuer_id,
-            "success": True, "hp": REVIVE_HP,
-        })
-        gs.net_server.broadcast(MsgType.PLAYER_REVIVED, {
-            "player_id": target_id, "hp": REVIVE_HP,
-        })
-        # 如果被救者是幽灵：恢复其 HP
-        ghost = self.remote_players.get(target_id)
-        if ghost is not None:
-            ghost.hp = REVIVE_HP
-            ghost.downed = False
-        print(f"[GameView] 玩家 {rescuer_id} 成功救援玩家 {target_id}，HP 恢复为 {REVIVE_HP}")
+        """委托 → net_sync._handle_rescue_request（救援裁决唯一实现处）
+
+        双版收口（2026-10-04）：原 game_view 与 network_sync 各存一份
+        _handle_rescue_request，行为已漂移（net_sync 版含 rescuer 身份收口
+        sender_id、拒绝回执 _send_rescue_reject、幽灵兜底 _ensure_ghost），
+        且 game_view 版信任 payload.rescuer_id 可被伪造。统一委托到
+        net_sync 版后删除本地实现，避免两处维护再次分叉。
+        """
+        return self.net_sync._handle_rescue_request(sender_id, payload)
 
     def _try_rescue(self) -> None:
         """本地玩家尝试救援附近的倒地队友（E 键触发）"""
@@ -1694,7 +1714,9 @@ class GameView(arcade.View):
             if int(resource.get(item_id, 0) or 0) < int(need):
                 print(f"[Host] 玩家 {sender_id} 资源不足（缺 {item_id}x{need}），拒绝 {action}")
                 self._broadcast_evac_point_state(force=True)
-                _reply(False, f"资源不足（缺 {item_id}x{need}）")
+                # 问题2 修复：回执与主机本地提示同口径——报全量需求清单而非仅首个
+                # 缺失项，客户端浮字才能看到「需要哪些资源各多少」（与 1441 行一致）
+                _reply(False, f"资源不足，需要 {self._evac_cost_text(cost)}")
                 return
         for item_id, need in cost.items():
             left = int(resource.get(item_id, 0) or 0) - int(need)
@@ -1811,6 +1833,10 @@ class GameView(arcade.View):
         # 本视图收不到导致 _pressed 残留；返回时清空按键状态，避免角色"卡住一直走"
         if self.controller:
             self.controller.clear_keys()
+        # 方案A：覆盖层（升级面板/背包/设置等）期间可能直改本人 HP（如
+        # level_up_view 升级加血），返回本视图时 rebase 台账，避免旧期望值
+        # 把合法变更误判为未知上抬而回滚。
+        self._rebase_expect_hp()
 
     def _hud_text(self, key, text, x, y, color, size=12, anchor_x="left",
                   anchor_y="baseline", bold=False):
@@ -1860,6 +1886,95 @@ class GameView(arcade.View):
         """委托 → pickup_loot._add_equipped_to_carried"""
         return self.pickup_loot._add_equipped_to_carried(gs)
 
+    def _handle_host_inbound(self, inbound) -> None:
+        """处理单条主机入站消息（原 on_update 泵循环体，②c 提取供 LobbyView 转发期复用）
+
+        主机提前退出观战回房后，LobbyView.on_update 每帧排空 server.inbound_poll()：
+        READY/SET_CHARACTER 由房间页本地处理，其余消息全部转交本方法权威执行，
+        随后再转发 on_update 推进对局——同一桥队列每帧只允许一个消费者排空，
+        避免双泵分流导致消息丢失（net 层铁律）。
+        """
+        gs = self.window.game_state
+        if gs.net_server is None:
+            return  # 房间已关闭：防御性收口（调用方仅在 server 存在时才转发）
+        if not isinstance(inbound, dict):
+            return  # 非字典消息（理论不可达）：忽略
+        sender_id = inbound.get("player_id", 0)
+        # 晚期加入同步：该玩家首次发来任意消息 → 发送全量状态（之后只收增量快照）
+        if sender_id not in self._full_state_sent:
+            self._full_state_sent.add(sender_id)
+            gs.net_server.send_to(sender_id, MsgType.FULL_STATE, self._serialize_full_state())
+            print(f"[GameView] 晚期加入玩家 {sender_id}：已发送全量状态")
+        if inbound.get("msg_type") == MsgType.ATTACK_EVENT.name:
+            self._resolve_attack_event(
+                sender_id, inbound.get("payload") or {})
+        elif inbound.get("msg_type") == MsgType.SKILL_USE.name:
+            # 客户端技能释放请求：主机在对应幽灵上权威裁决（伤害/位移/护盾，
+            # 弹丸经 PROJECTILE_SNAPSHOT 同步，命中经 DAMAGE_RESULT 广播）
+            self._resolve_skill_use(sender_id, inbound.get("payload") or {})
+        elif inbound.get("msg_type") == MsgType.POTION_USE.name:
+            # 药水使用请求：主机确认生效并广播 POTION_ACK（治疗数字全端可见）
+            self._handle_potion_use(sender_id, inbound.get("payload") or {})
+        elif inbound.get("msg_type") == MsgType.PICKUP_REQUEST.name:
+            # 主机仲裁客户端拾取请求：先到先得 + 距离校验，广播 PICKUP_RESULT（Todo 18）
+            self._handle_pickup_request(sender_id, inbound.get("payload") or {})
+        elif inbound.get("msg_type") == MsgType.EVAC_REQUEST.name:
+            # 主机：处理撤离请求（B12）：以主机权威 _players_run_carried 汇总该玩家
+            # 携带物清单并广播 EVAC_RESULT（各端据此调用 commit_run_to_warehouse 本地入库）
+            self._handle_evac_request(sender_id, inbound.get("payload") or {})
+        elif inbound.get("msg_type") == MsgType.INTERACTION_REQUEST.name:
+            # 客户端交互请求：主机验证距离 → 执行交互 → 通过 MAP_CHANGE 广播结果
+            self._handle_interaction_request(sender_id, inbound.get("payload") or {})
+        elif inbound.get("msg_type") == MsgType.EVAC_POINT_ACTION.name:
+            # 阶段2 撤离点激活/修复请求：主机权威校验距离与资源 → 执行 → 广播 STATE
+            self._handle_evac_point_action(sender_id, inbound.get("payload") or {})
+        elif inbound.get("msg_type") == MsgType.CARRIAGE_BUY.name:
+            # 客户端商队购买请求 → 主机裁决（校验金价自洽/限购 → 写权威携带账本
+            # → 单播 CARRIAGE_BUY_RESULT）。客户端本地不裁决、不先扣金。
+            self.net_sync._handle_carriage_buy(sender_id, inbound.get("payload") or {})
+        elif inbound.get("msg_type") == MsgType.PLAYER_ABANDON.name:
+            # 客户端放弃行动通知：更新 _player_status → 触发全员结束判定
+            self._handle_player_abandon(sender_id, inbound.get("payload") or {})
+        elif inbound.get("msg_type") == MsgType.RESCUE_REQUEST.name:
+            # 客户端请求救援倒地玩家：主机裁决距离并执行救援
+            self._handle_rescue_request(sender_id, inbound.get("payload") or {})
+        elif inbound.get("msg_type") == MsgType.SPECTATE_LEAVE.name:
+            # 客户端主动退出观战：视为真死（传 sender_id 做身份收口，禁采信 payload）
+            self._apply_spectate_leave(inbound.get("payload") or {},
+                                       sender_id=sender_id)
+        elif inbound.get("msg_type") == MsgType.PLAYER_SNAPSHOT.name:
+            # 客户端 20Hz 上报本人实体：主机据此更新对应幽灵的位置/朝向/存活（Todo 23）
+            self._apply_client_snapshot(sender_id, inbound.get("payload") or {})
+        elif inbound.get("msg_type") == MsgType.MISSION_PROGRESS.name:
+            # 阶段6.2 防御分支：MISSION_PROGRESS 语义为「主机→客户端」单向单播，
+            # 客户端上报同名消息一律显式忽略并记日志（禁静默忽略 + 防伪造他人进度）
+            print(f"[GameView] 忽略客户端 {sender_id} 上报的 MISSION_PROGRESS"
+                  "（该消息仅主机→客户端单向）")
+        elif inbound.get("msg_type") == MsgType.READY.name:
+            # 对局中客户端准备上报（②修复）：房主仍在对局、客户端死亡回房点准备时，
+            # 该消息原先落 else 被当未知消息丢弃 → 权威就绪表不更新、不广播 → 房间页
+            # 槽位一直显示未准备。身份收口用 sender_id（非 payload player_id，防伪造）；
+            # 开局时权威表已重置为 {0:True}，表内可能无该 pid → get 比较天然 upsert，
+            # 变化才广播（与 LobbyView 房间页分支同一套组装，见 protocol 工厂函数）。
+            ready = bool((inbound.get("payload") or {}).get("ready", False))
+            if gs.net_ready_state.get(sender_id) != ready:
+                gs.net_ready_state[sender_id] = ready
+                gs.net_server.broadcast(MsgType.READY_STATE,
+                                        build_ready_state_payload(
+                                            gs.net_server.player_info(),
+                                            gs.net_ready_state, gs.player_name))
+                print(f"[GameView] 玩家 {sender_id} 准备状态: {ready}")
+        elif inbound.get("msg_type") == MsgType.HEARTBEAT.name:
+            # 心跳回显：原样回给该客户端，客户端据此计算 RTT（保活同理）
+            gs.net_server.send_to(sender_id, MsgType.HEARTBEAT, inbound.get("payload") or {})
+        else:
+            # 11.1 接线核查：未识别的客户端消息显式记录（net 层铁律：禁静默忽略）。
+            # 仍继续走 _ensure_ghost：无论消息类型，该玩家的幽灵实体都必须建好。
+            print(f"[GameView] 主机收到未接线消息 "
+                  f"{inbound.get('msg_type')!r}（玩家 {sender_id}），仅保证幽灵存在")
+        # 其他客户端消息：确保该玩家幽灵已创建（多目标 AI 与 PLAYER_SNAPSHOT 需要）
+        self._ensure_ghost(sender_id)
+
     def on_update(self, delta_time):
         self._frame += 1
 
@@ -1890,6 +2005,21 @@ class GameView(arcade.View):
                 gs.net_server.broadcast(MsgType.ACTION_TIME, {
                     "action_time_left": self._action_time_remaining or 0.0,
                 })
+            # 房间内玩家对局状态周期广播（NET_ROOM_STATUS_INTERVAL 节拍，②d）：
+            # 房间页三态显示用——在局中（alive/downed）显示「游戏中」，已回大厅的显示准备
+            # 状态。同一份数据同时写 gs.room_player_status（主机本地房间页直读共享状态，
+            # 不走网络回环）。主机提前退出观战回房期间，后台对局 on_update 由 LobbyView
+            # 转发，本广播持续推进，房间页因此能实时看到仍在局中的玩家。
+            self._room_status_timer += dt
+            if self._room_status_timer >= NET_ROOM_STATUS_INTERVAL:
+                self._room_status_timer = 0.0
+                players = [
+                    {"player_id": pid, "status": status,
+                     "name": (gs.net_roster.get(pid) or {}).get("name", f"P{pid}")}
+                    for pid, status in self._player_status.items()
+                ]
+                gs.room_player_status = {p["player_id"]: p["status"] for p in players}
+                gs.net_server.broadcast(MsgType.ROOM_STATUS, {"players": players})
 
         # 客户端：每帧排空入站消息，按 MONSTER_SNAPSHOT 增/改/删维护 remote_monsters；
         # DAMAGE_RESULT 由主机伤害判定广播（Todo 14），客户端按 net_id 应用扣血显示。
@@ -2004,6 +2134,19 @@ class GameView(arcade.View):
                     # 房间结束（主机撤离/死亡/超时）：断开连接回大厅展示原因
                     self._apply_room_ended(payload)
                     return
+                elif msg_type == MsgType.ROOM_STATUS:
+                    # 主机房间对局状态周期广播：落共享状态供房间页三态显示
+                    # （在局中本视图不消费该数据，仅写 gs；回房后由 LobbyView 房间页读取）
+                    gs.room_player_status = {
+                        p.get("player_id"): p.get("status")
+                        for p in payload.get("players", []) if isinstance(p, dict)
+                    }
+                elif msg_type == MsgType.READY_STATE:
+                    # ②接线修复：主机广播的全员准备状态（大厅房间页显示用）。
+                    # 局内无消费方——权威就绪表在主机端（gs.net_ready_state），
+                    # 房间页显示由 LobbyView 自身泵收口（lobby_view.py:616），
+                    # 故此处显式忽略（已知消息按设计不消费，非未知消息静默丢弃）。
+                    pass
                 else:
                     # 11.1 接线核查：未知消息必须显式记录（net 层铁律：禁静默忽略）。
                     # 正常不应走到这里——decode 已拦未知类型名，此处兜底防枚举扩展后漏接线。
@@ -2094,69 +2237,10 @@ class GameView(arcade.View):
                     getattr(self.player, "_pending_debuff_level", 1),
                     getattr(self.player, "_pending_debuff_effects", None),
                 )
+            # 逐条分发统一走 _handle_host_inbound（②c 提取：LobbyView 后台对局
+            # 转发期也复用同一分发体，禁在两处维护同一 elif 链）
             for inbound in gs.net_server.inbound_poll():
-                if not isinstance(inbound, dict):
-                    continue  # 非字典消息（理论不可达）：忽略
-                sender_id = inbound.get("player_id", 0)
-                # 晚期加入同步：该玩家首次发来任意消息 → 发送全量状态（之后只收增量快照）
-                if sender_id not in self._full_state_sent:
-                    self._full_state_sent.add(sender_id)
-                    gs.net_server.send_to(sender_id, MsgType.FULL_STATE, self._serialize_full_state())
-                    print(f"[GameView] 晚期加入玩家 {sender_id}：已发送全量状态")
-                if inbound.get("msg_type") == MsgType.ATTACK_EVENT.name:
-                    self._resolve_attack_event(
-                        sender_id, inbound.get("payload") or {})
-                elif inbound.get("msg_type") == MsgType.SKILL_USE.name:
-                    # 客户端技能释放请求：主机在对应幽灵上权威裁决（伤害/位移/护盾，
-                    # 弹丸经 PROJECTILE_SNAPSHOT 同步，命中经 DAMAGE_RESULT 广播）
-                    self._resolve_skill_use(sender_id, inbound.get("payload") or {})
-                elif inbound.get("msg_type") == MsgType.POTION_USE.name:
-                    # 药水使用请求：主机确认生效并广播 POTION_ACK（治疗数字全端可见）
-                    self._handle_potion_use(sender_id, inbound.get("payload") or {})
-                elif inbound.get("msg_type") == MsgType.PICKUP_REQUEST.name:
-                    # 主机仲裁客户端拾取请求：先到先得 + 距离校验，广播 PICKUP_RESULT（Todo 18）
-                    self._handle_pickup_request(sender_id, inbound.get("payload") or {})
-                elif inbound.get("msg_type") == MsgType.EVAC_REQUEST.name:
-                    # 主机：处理撤离请求（B12）：以主机权威 _players_run_carried 汇总该玩家
-                    # 携带物清单并广播 EVAC_RESULT（各端据此调用 commit_run_to_warehouse 本地入库）
-                    self._handle_evac_request(sender_id, inbound.get("payload") or {})
-                elif inbound.get("msg_type") == MsgType.INTERACTION_REQUEST.name:
-                    # 客户端交互请求：主机验证距离 → 执行交互 → 通过 MAP_CHANGE 广播结果
-                    self._handle_interaction_request(sender_id, inbound.get("payload") or {})
-                elif inbound.get("msg_type") == MsgType.EVAC_POINT_ACTION.name:
-                    # 阶段2 撤离点激活/修复请求：主机权威校验距离与资源 → 执行 → 广播 STATE
-                    self._handle_evac_point_action(sender_id, inbound.get("payload") or {})
-                elif inbound.get("msg_type") == MsgType.CARRIAGE_BUY.name:
-                    # 客户端商队购买请求 → 主机裁决（校验金价自洽/限购 → 写权威携带账本
-                    # → 单播 CARRIAGE_BUY_RESULT）。客户端本地不裁决、不先扣金。
-                    self.net_sync._handle_carriage_buy(sender_id, inbound.get("payload") or {})
-                elif inbound.get("msg_type") == MsgType.PLAYER_ABANDON.name:
-                    # 客户端放弃行动通知：更新 _player_status → 触发全员结束判定
-                    self._handle_player_abandon(sender_id, inbound.get("payload") or {})
-                elif inbound.get("msg_type") == MsgType.RESCUE_REQUEST.name:
-                    # 客户端请求救援倒地玩家：主机裁决距离并执行救援
-                    self._handle_rescue_request(sender_id, inbound.get("payload") or {})
-                elif inbound.get("msg_type") == MsgType.SPECTATE_LEAVE.name:
-                    # 客户端主动退出观战：视为真死，清装备
-                    self._apply_spectate_leave(inbound.get("payload") or {})
-                elif inbound.get("msg_type") == MsgType.PLAYER_SNAPSHOT.name:
-                    # 客户端 20Hz 上报本人实体：主机据此更新对应幽灵的位置/朝向/存活（Todo 23）
-                    self._apply_client_snapshot(sender_id, inbound.get("payload") or {})
-                elif inbound.get("msg_type") == MsgType.MISSION_PROGRESS.name:
-                    # 阶段6.2 防御分支：MISSION_PROGRESS 语义为「主机→客户端」单向单播，
-                    # 客户端上报同名消息一律显式忽略并记日志（禁静默忽略 + 防伪造他人进度）
-                    print(f"[GameView] 忽略客户端 {sender_id} 上报的 MISSION_PROGRESS"
-                          "（该消息仅主机→客户端单向）")
-                elif inbound.get("msg_type") == MsgType.HEARTBEAT.name:
-                    # 心跳回显：原样回给该客户端，客户端据此计算 RTT（保活同理）
-                    gs.net_server.send_to(sender_id, MsgType.HEARTBEAT, inbound.get("payload") or {})
-                else:
-                    # 11.1 接线核查：未识别的客户端消息显式记录（net 层铁律：禁静默忽略）。
-                    # 仍继续走 _ensure_ghost：无论消息类型，该玩家的幽灵实体都必须建好。
-                    print(f"[GameView] 主机收到未接线消息 "
-                          f"{inbound.get('msg_type')!r}（玩家 {sender_id}），仅保证幽灵存在")
-                # 其他客户端消息：确保该玩家幽灵已创建（多目标 AI 与 PLAYER_SNAPSHOT 需要）
-                self._ensure_ghost(sender_id)
+                self._handle_host_inbound(inbound)
 
             # 主机权威幽灵倒地检测：HP 归零 → 广播 PLAYER_DOWNED（可被救援），
             # 超时未被救则发 PLAYER_DEATH（真死）；幽灵标记由 PLAYER_SNAPSHOT alive=False 下发
@@ -2317,9 +2401,10 @@ class GameView(arcade.View):
                 self.player.heal_duration -= dt
                 if self.player.heal_per_sec > 0:
                     heal_amount = self.player.heal_per_sec * dt
-                    old_hp = self.player.hp
-                    self.player.heal(int(heal_amount) if heal_amount >= 1 else 0)
-                    # 实际上逐帧回复（round 到 2 位小数，避免浮点累加出现极长小数点）
+                    # 修复「HoT 双加」bug：旧版先 self.player.heal(int(heal_amount))
+                    # 再 hp += heal_amount，整数部分被加了两次（heal 已加上整数部分，
+                    # 逐帧累加又把完整 heal_amount 再加一遍）。现只保留逐帧累加
+                    # （round 到 2 位小数，避免浮点累加出现极长小数点）。
                     self.player.hp = min(self.player.max_hp, round(self.player.hp + heal_amount, 2))
                 if self.player.heal_duration <= 0:
                     self.player.heal_per_sec = 0.0
@@ -2329,6 +2414,10 @@ class GameView(arcade.View):
                 # round 到 2 位小数：dt 为帧间隔（如 1/60），逐帧累加会产生浮点长小数
                 self.player.hp = min(self.player.max_hp, round(self.player.hp + self.player.regen_per_sec * dt, 2))
 
+            # 方案A：HoT/regen 为直写 hp（不经 Player.heal 钩子），手动 rebase
+            # 期望血量台账，把合法回血登记为新期望值，避免帧末被误判为未知上抬。
+            self._rebase_expect_hp()
+
         # 同步障碍物列表（确保已摧毁/已打开的物体不再阻挡移动）
         self._sync_obstacles()
 
@@ -2337,7 +2426,27 @@ class GameView(arcade.View):
 
         # BOSS 房间锁定逻辑
         boss_rect = self.map_data.get("boss_rect")
-        boss = self._boss_instance or self.active_boss
+        if gs.net_mode == "client":
+            # 客户端怪物由主机快照生成（setup 不跑怪物段），_boss_instance 恒 None →
+            # 旧版锁门/出界推回/解锁三分支全部不触发，客户端可自由离开未打死 BOSS 的
+            # 房间（联机 bug ①）。改为从快照远端怪物（remote_monsters，主机击杀后
+            # 快照删除 net_id 即查不到）现查房内 BOSS：
+            # - 限定在 boss_rect 内：space 主题还有火箭台 BossSpace（同 is_boss 但
+            #   不在房内），位置过滤与主机侧 `_boss_instance`（setup 生成的房内 BOSS）
+            #   语义对齐；
+            # - 逐帧现查不持有旧引用：死亡后查不到 → 走下方既有解锁分支，避免持有
+            #   已被快照删除的悬挂对象（其 hp 冻结、alive=hp>0 恒真，会卡死不解锁）。
+            boss = None
+            if boss_rect:
+                for rm in self.remote_monsters.values():
+                    if not getattr(rm, "is_boss", False):
+                        continue
+                    if (boss_rect[0] - TILE_SIZE <= rm.center_x <= boss_rect[2] + TILE_SIZE and
+                            boss_rect[1] - TILE_SIZE <= rm.center_y <= boss_rect[3] + TILE_SIZE):
+                        boss = rm
+                        break
+        else:
+            boss = self._boss_instance or self.active_boss
         if boss_rect and boss and boss.alive:
             # 检查玩家是否在 BOSS 房间内（含 1 块瓦片缓冲）
             in_boss_room = (boss_rect[0] - TILE_SIZE <= self.player.center_x <= boss_rect[2] + TILE_SIZE and
@@ -2372,6 +2481,10 @@ class GameView(arcade.View):
             # BOSS 死亡：解锁门洞
             self._boss_room_locked = False
             self._remove_boss_door_block()
+            # 清 BOSS 血条引用：客户端远端 BOSS 被快照删除后 hp 冻结（alive=hp>0 恒真），
+            # 不清 draw_boss_hp_bar 会永远显示旧血条；主机侧此处引用的必是已死房内 BOSS
+            # （血条本就因 alive=False 隐藏），置 None 视觉等价（联机 bug ① 配套收口）
+            self.active_boss = None
 
         # 环境物受击闪烁计时衰减（否则被攻击后会一直显示白圈）
         for h in self.harvestables:
@@ -3000,6 +3113,12 @@ class GameView(arcade.View):
         if self._chest_key_pressed and not picked:
             pass  # 保持状态直到交互完成
 
+        # ── 方案A：帧末 HP 台账强制回写（bug① 血量回弹兜底）──────────────
+        # 放在本帧所有 HP 变更路径（移动/战斗/拾取/HoT）跑完之后、祝福面板
+        # 切视图之前：客户端回滚未经 rebase 登记的未知上抬，未知下跌则采纳。
+        # 放末尾保证「先让合法变更（含钩子 rebase）落账，再做帧末校验」。
+        self._enforce_hp_ledger()
+
         # ── 阶段5 祝福面板：待选次数 >0 时在本帧末尾统一打开 ──────────────
         # 放末尾是为了让本帧的触发点（宝箱/精英/撤离点）先跑完，
         # 多次触发会在面板里逐次消费 blessing_pending，不会漏掉。
@@ -3113,6 +3232,10 @@ class GameView(arcade.View):
     def _settle_no_rescuer(self) -> None:
         """委托 → spectate._settle_no_rescuer（无可救援者立即结算，主机每帧调用）"""
         return self.spectate._settle_no_rescuer()
+
+    def _settle_downed_true_death(self, pid: int, reason: str) -> None:
+        """委托 → spectate._settle_downed_true_death（倒地真死统一结算）"""
+        return self.spectate._settle_downed_true_death(pid, reason)
 
     def on_key_press(self, key, modifiers):
         handle_key_press(self, key, modifiers)

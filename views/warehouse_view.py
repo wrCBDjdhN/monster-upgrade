@@ -47,6 +47,15 @@ class WarehouseView(ScrollView):
         self.weapon_sell_buttons = []  # [(rect, weapon_dict, sell_price)]
         self.equip_item_buttons = []   # [(rect, equip_dict)]
         self.equip_sell_buttons = []   # [(rect, equip_dict, sell_price)]
+        # 资源售卖数量对话框状态（2026-10-04：售卖改选数量，仿 backpack 丢弃弹窗）
+        self._sell_dialog_active = False   # 对话框是否显示
+        self._sell_dialog_item = None      # (wh_id, item_id, name, max_qty, gold_per)
+        self._sell_dialog_qty = 1          # 确认时生效的售卖数量
+        self._sell_dialog_input = "1"      # 输入缓冲区（字符串）
+        self._sell_dialog_btn_1 = None     # "卖1个" 按钮
+        self._sell_dialog_btn_all = None   # "全部" 按钮
+        self._sell_dialog_btn_confirm = None  # "确认" 按钮
+        self._sell_dialog_btn_cancel = None   # "取消" 按钮
         self.market_rect = arcade.XYWH(WINDOW_WIDTH - 100, 40, 120, 36)
         # 阶段11：仓库升级按钮（底部居中；与左侧「返回」/右侧「市场」留足间距）
         self.upgrade_rect = arcade.XYWH(WINDOW_WIDTH // 2, 40, 300, 36)
@@ -78,6 +87,138 @@ class WarehouseView(ScrollView):
             ty = 96 - i * 26
             self._tc.text(f"toast_{i}", text, WINDOW_WIDTH // 2, ty, color,
                           14, anchor_x="center", anchor_y="center")
+
+    # ── 资源售卖数量对话框（2026-10-04，仿 views/backpack_view.py 丢弃弹窗）──
+
+    def _show_sell_dialog(self, wh_id: int, gold_per: int) -> None:
+        """打开售卖数量对话框（资源售卖按钮点击时调用）
+
+        - 库存在开窗时现查（按钮坐标来自 _rebuild 缓存，可能已被其他操作改动）
+        - 数量 1 件直接售出不弹面板（与背包丢弃同口径：无可选数量时面板无意义）
+        - 数量 >1 弹面板：1个 / 全部(N) / 自定义输入 / 确认 / 取消
+        """
+        pid = self.window.game_state.player_id
+        max_qty, item_id, name = 0, "", ""
+        for item in get_warehouse(pid):
+            if item["id"] == wh_id and item["item_type"] == "resource":
+                max_qty = item["quantity"]
+                item_id = item["item_id"]
+                name = RESOURCES.get(item_id, {}).get("name", item_id)
+                break
+        if max_qty <= 0:
+            self._rebuild()  # 库存已空（他处已售/存入变化），刷新列表防幽灵按钮
+            return
+        if max_qty == 1:
+            gold, _ = sell_warehouse_item(pid, wh_id, qty=1)
+            self._rebuild()
+            if gold > 0:
+                self._toast(f"已出售 {name} x1，+{gold} 金币", (140, 230, 140))
+            return
+        self._sell_dialog_active = True
+        self._sell_dialog_item = (wh_id, item_id, name, max_qty, gold_per)
+        self._sell_dialog_qty = 1
+        self._sell_dialog_input = "1"
+        # 按钮布局与背包丢弃弹窗完全一致（标题→数量→快捷按钮→输入框→确认/取消）
+        cx, cy = WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2
+        self._sell_dialog_btn_1 = arcade.XYWH(cx - 60, cy + 5, 100, 32)
+        self._sell_dialog_btn_all = arcade.XYWH(cx + 60, cy + 5, 100, 32)
+        self._sell_dialog_btn_confirm = arcade.XYWH(cx + 60, cy - 75, 80, 32)
+        self._sell_dialog_btn_cancel = arcade.XYWH(cx - 60, cy - 75, 80, 32)
+
+    def _handle_sell_dialog_click(self, x: int, y: int) -> None:
+        """处理售卖对话框内的按钮点击（弹窗激活时 on_mouse_press 只进本方法）"""
+        if self._sell_dialog_btn_1 and self._sell_dialog_btn_1.point_in_rect((x, y)):
+            self._sell_dialog_qty = 1
+            self._execute_sell()
+            return
+        if self._sell_dialog_btn_all and self._sell_dialog_btn_all.point_in_rect((x, y)):
+            self._sell_dialog_qty = self._sell_dialog_item[3]
+            self._execute_sell()
+            return
+        if self._sell_dialog_btn_confirm and self._sell_dialog_btn_confirm.point_in_rect((x, y)):
+            try:
+                qty = max(1, min(int(self._sell_dialog_input), self._sell_dialog_item[3]))
+            except ValueError:
+                qty = 1
+            self._sell_dialog_qty = qty
+            self._execute_sell()
+            return
+        if self._sell_dialog_btn_cancel and self._sell_dialog_btn_cancel.point_in_rect((x, y)):
+            self._sell_dialog_active = False
+            self._sell_dialog_item = None
+            return
+
+    def _execute_sell(self) -> None:
+        """执行售卖并关闭对话框（部分售出走 sell_warehouse_item 的 qty 参数）"""
+        if not self._sell_dialog_item:
+            return
+        wh_id, item_id, name, max_qty, _gold_per = self._sell_dialog_item
+        qty = self._sell_dialog_qty
+        self._sell_dialog_active = False
+        self._sell_dialog_item = None
+        pid = self.window.game_state.player_id
+        gold, _ = sell_warehouse_item(pid, wh_id, qty=qty)
+        self._rebuild()
+        if gold > 0:
+            self._toast(f"已出售 {name} x{qty}，+{gold} 金币", (140, 230, 140))
+        else:
+            self._toast("出售失败：物品已不存在", (255, 120, 120))
+
+    def _draw_sell_dialog(self) -> None:
+        """绘制售卖数量对话框（屏幕坐标系覆盖层，不受滚动影响）
+
+        渲染铁律：全部不透明实心填充，不调用 draw_rect_outline/draw_line 线框 API。
+        """
+        # 半透明遮罩（实心填充）
+        arcade.draw_rect_filled(
+            arcade.XYWH(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2, WINDOW_WIDTH, WINDOW_HEIGHT),
+            (0, 0, 0, 150)
+        )
+        cx, cy = WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2
+        wh_id, item_id, name, max_qty, gold_per = self._sell_dialog_item
+        # 对话框背景 + 白色描边感（用两层实心矩形叠出边框，禁 outline 线框）
+        arcade.draw_rect_filled(arcade.XYWH(cx, cy, 336, 246), (235, 235, 235))
+        arcade.draw_rect_filled(arcade.XYWH(cx, cy, 324, 234), (30, 35, 50))
+        # 标题与数量/价格信息
+        self._tc.text("sdlg_title", f"售卖: {name}", cx, cy + 88,
+                      arcade.color.WHITE, 16, anchor_x="center")
+        self._tc.text("sdlg_max", f"当前数量: {max_qty}　单价: {gold_per} 金币/个",
+                      cx, cy + 62, arcade.color.LIGHT_GRAY, 13, anchor_x="center")
+        # 合计预览（按当前输入框数值实时换算，仅展示）
+        try:
+            preview = max(1, min(int(self._sell_dialog_input), max_qty))
+        except ValueError:
+            preview = 1
+        self._tc.text("sdlg_total", f"合计可得: {gold_per * preview} 金币",
+                      cx, cy + 38, arcade.color.GOLD, 13, anchor_x="center")
+        # "卖1个" / "全部(N)" 快捷按钮
+        if self._sell_dialog_btn_1:
+            arcade.draw_rect_filled(self._sell_dialog_btn_1, (50, 90, 60))
+            self._tc.text("sdlg_btn_1", "卖1个", self._sell_dialog_btn_1.center_x,
+                          self._sell_dialog_btn_1.center_y, arcade.color.WHITE, 12,
+                          anchor_x="center", anchor_y="center")
+        if self._sell_dialog_btn_all:
+            arcade.draw_rect_filled(self._sell_dialog_btn_all, (110, 90, 30))
+            self._tc.text("sdlg_btn_all", f"全部({max_qty})", self._sell_dialog_btn_all.center_x,
+                          self._sell_dialog_btn_all.center_y, arcade.color.WHITE, 12,
+                          anchor_x="center", anchor_y="center")
+        # 自定义数量输入框（实心填充）
+        self._tc.text("sdlg_input_label", "自定义数量:", cx, cy - 12,
+                      arcade.color.LIGHT_GRAY, 12, anchor_x="center")
+        arcade.draw_rect_filled(arcade.XYWH(cx, cy - 34, 80, 24), (50, 50, 60))
+        self._tc.text("sdlg_input_val", self._sell_dialog_input, cx, cy - 34,
+                      arcade.color.YELLOW, 14, anchor_x="center", anchor_y="center")
+        # 确认 / 取消
+        if self._sell_dialog_btn_confirm:
+            arcade.draw_rect_filled(self._sell_dialog_btn_confirm, (50, 100, 50))
+            self._tc.text("sdlg_confirm", "确认", self._sell_dialog_btn_confirm.center_x,
+                          self._sell_dialog_btn_confirm.center_y, arcade.color.WHITE, 12,
+                          anchor_x="center", anchor_y="center")
+        if self._sell_dialog_btn_cancel:
+            arcade.draw_rect_filled(self._sell_dialog_btn_cancel, (80, 80, 80))
+            self._tc.text("sdlg_cancel", "取消", self._sell_dialog_btn_cancel.center_x,
+                          self._sell_dialog_btn_cancel.center_y, arcade.color.WHITE, 12,
+                          anchor_x="center", anchor_y="center")
 
     def _rebuild(self):
         self._tc.clear()  # 内容结构变化，清空文本缓存防止旧 key 残留
@@ -301,6 +442,44 @@ class WarehouseView(ScrollView):
         self._tc.text("nav_market", "市场", self.market_rect.center_x, self.market_rect.center_y,
                       arcade.color.WHITE, 13, anchor_x="center", anchor_y="center")
 
+        # 售卖数量对话框（最后绘制：覆盖层压住全部内容）
+        if self._sell_dialog_active and self._sell_dialog_item:
+            self._draw_sell_dialog()
+
+    def on_key_press(self, key, modifiers):
+        """键盘输入（仅售卖对话框激活时处理：数字/退格/回车确认/ESC取消）
+
+        对话框未激活时不接管任何按键（仓库页此前无键位绑定，保持原状）。
+        """
+        if not self._sell_dialog_active:
+            return
+        max_qty = self._sell_dialog_item[3] if self._sell_dialog_item else 1
+        if key == arcade.key.BACKSPACE:
+            self._sell_dialog_input = self._sell_dialog_input[:-1]
+            if not self._sell_dialog_input:
+                self._sell_dialog_input = "1"
+        elif key == arcade.key.RETURN or key == arcade.key.NUM_ENTER:
+            try:
+                qty = max(1, min(int(self._sell_dialog_input), max_qty))
+            except ValueError:
+                qty = 1
+            self._sell_dialog_qty = qty
+            self._execute_sell()
+        elif key == arcade.key.ESCAPE:
+            self._sell_dialog_active = False
+            self._sell_dialog_item = None
+        elif arcade.key.NUM_0 <= key <= arcade.key.NUM_9 or arcade.key.KEY_0 <= key <= arcade.key.KEY_9:
+            if key >= arcade.key.NUM_0 and key <= arcade.key.NUM_9:
+                digit = str(key - arcade.key.NUM_0)
+            else:
+                digit = str(key - arcade.key.KEY_0)
+            # 首位默认 "1" 被新输入替换，其余位追加（与背包丢弃弹窗同规则）
+            if self._sell_dialog_input == "1" and len(self._sell_dialog_input) == 1:
+                self._sell_dialog_input = digit
+            else:
+                if len(self._sell_dialog_input) < 4:
+                    self._sell_dialog_input += digit
+
     def _draw_upgrade_panel(self):
         """阶段11 仓库升级区：下一级容量预告 + 费用明细 + 实心升级按钮
 
@@ -385,6 +564,11 @@ class WarehouseView(ScrollView):
         pid = gs.player_id
         offset = self.scroll_offset
 
+        # 售卖对话框激活时，优先处理对话框按钮（同时拦截 Tab/滚动条/装备/升级/导航全部点击）
+        if self._sell_dialog_active:
+            self._handle_sell_dialog_click(x, y)
+            return
+
         # 顶部 Tab 栏切换分类
         for name, rect in self.tab_rects.items():
             if rect.point_in_rect((x, y)):
@@ -417,13 +601,12 @@ class WarehouseView(ScrollView):
                 self._rebuild()
                 return
 
-        # 售卖资源
+        # 售卖资源 → 弹数量选择对话框（2026-10-04：不再直接整栈售出）
         for btn, wh_id, gold_per, item_id in self.sell_buttons:
             # 资源售卖按钮在 on_draw 中重算为 center_y + offset，这里同步
             screen_btn = arcade.XYWH(btn.center_x, btn.center_y + offset, btn.width, btn.height)
             if screen_btn.point_in_rect((x, y)):
-                sell_warehouse_item(pid, wh_id)
-                self._rebuild()
+                self._show_sell_dialog(wh_id, gold_per)
                 return
 
         # 装备物品（头盔/护甲/背包）

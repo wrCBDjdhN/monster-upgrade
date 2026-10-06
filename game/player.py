@@ -211,6 +211,11 @@ class Player(arcade.SpriteSolidColor):
         # 用于广播 PLAYER_HURT（HP 主机权威，见 views/game_view.py _record_hurt）。
         # 仅当主机模式且已注入网络对象时才被设置，其余模式恒为 None。
         self.on_take_damage = None  # Callable[[float], None] | None
+        # 本人 HP 变更钩子（联机方案A，bug① 血量回弹兜底）：任何合法 HP 写入
+        # （扣血/回血/DoT/祝福重算）完成后回调，GameView 据此 rebase 期望血量
+        # 台账（_net_expect_hp），帧末 _enforce_hp_ledger 据台账回滚未知上抬。
+        # 未注册时（幽灵实体/无台账场景）恒为 None，直接跳过，零开销。
+        self.on_hp_changed = None  # Callable[[], None] | None
         # 倒地/救援系统（联机模式）：
         # downed=True 表示 HP=0 但可被队友救援（保留装备），超时未被救则真死
         # 真死裁决权威源 = GameView._downed_players 账本（主机），downed_timer 只是
@@ -256,11 +261,17 @@ class Player(arcade.SpriteSolidColor):
         # 单机/客户端模式为 None 直接跳过，零开销，行为与旧版完全一致。
         if self.on_take_damage is not None:
             self.on_take_damage(actual)
+        # HP 变更钩子（方案A 台账 rebase）：扣血已落账，通知期望血量台账同步
+        if self.on_hp_changed is not None:
+            self.on_hp_changed()
         return actual
 
     def heal(self, amount: int):
         """回复生命（不超过最大生命值）"""
         self.hp = min(self.max_hp, self.hp + amount)
+        # HP 变更钩子（方案A 台账 rebase）：回血已落账，通知期望血量台账同步
+        if self.on_hp_changed is not None:
+            self.on_hp_changed()
 
     def apply_hot(self, heal_per_sec: float, duration: float):
         """施加持续回复效果（新效果覆盖旧效果）"""
@@ -360,6 +371,9 @@ class Player(arcade.SpriteSolidColor):
         gained = new_max - old_max
         self.max_hp = new_max
         self.hp = min(self.hp + max(0.0, gained), new_max)
+        # HP 变更钩子（方案A 台账 rebase）：上限重算可能补血/截断，通知台账同步
+        if self.on_hp_changed is not None:
+            self.on_hp_changed()
 
         self.defense = base["defense"] + float(bonus.get("defense", 0.0))
         self.char_speed_mult = base["char_speed_mult"] * (1.0 + float(bonus.get("speed", 0.0)))
@@ -490,6 +504,9 @@ class Player(arcade.SpriteSolidColor):
                     # 中毒/燃烧：持续掉血。玩家侧直接扣 hp（绕防御，与计划一致），
                     # 不使用 take_damage 以免被防御减免影响
                     self.hp = max(0, self.hp - dmg)
+                    # HP 变更钩子（方案A 台账 rebase）：DoT 扣血已落账，通知台账同步
+                    if self.on_hp_changed is not None:
+                        self.on_hp_changed()
         # 持续时间递减并清理过期效果
         for d in list(self.debuffs):
             d["duration"] -= delta_time

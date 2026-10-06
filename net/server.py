@@ -45,7 +45,8 @@ from net.thread_bridge import NetBridge
 __all__ = ["NetServer", "Room", "PlayerSlot"]
 
 # 协议版本号：与 HELLO 消息的 payload['protocol'] 比对，不一致则拒绝握手
-PROTOCOL_VERSION = 1
+# v2：新增 ROOM_STATUS 房间对局状态广播（旧版客户端收到未知消息会解码失败，握手期直接拒连）
+PROTOCOL_VERSION = 2
 # 握手超时（秒）：客户端必须在此期限内完成 HELLO/JOIN，防恶意连接占住不放
 HANDSHAKE_TIMEOUT = 10.0
 # 服务器启动就绪等待超时（秒）

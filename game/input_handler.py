@@ -403,20 +403,32 @@ def handle_mouse_press(view, x, y, button, modifiers):
         exit_rect = getattr(view, "_exit_spectate_rect", None)
         if exit_rect is not None and exit_rect.point_in_rect((x, y)):
             gs = view.window.game_state
-            # 倒地玩家退出观战：通知主机真死
+            # 倒地玩家退出观战 = 放弃救援按真死结算，且一次点击即回房间页
+            # （联机 bug ② 修复：旧版主机分支只清账本不回房，看起来"没反应"；
+            #  客户端只发 SPECTATE_LEAVE 干等主机回执，要第二次点击才退得出去）
             if getattr(view.player, "downed", False) if view.player else False:
                 if gs.net_mode == "host":
+                    # 主机倒地退出：_apply_spectate_leave 内走真死完整结算
+                    # （清 downed/账本/装备 → 进观战），再回房间页；房间保留，
+                    # 对局继续模拟，直到 _check_all_finished 判定全员结束才收口
                     view._apply_spectate_leave({"player_id": 0})
+                    view._back_to_lobby("退出观战，等待下一局")
                 elif gs.net_mode == "client" and gs.net_client is not None:
+                    # 客户端倒地退出：先本地收口（_apply_player_death 的死亡清理：
+                    # downed/账本/装备/观战标志），再通知主机清该玩家账本，然后
+                    # 立即回房间页，不等主机回执（旧版干等 PLAYER_DEATH 导致要点两次）
+                    my_id = gs.net_player_id
+                    view._apply_player_death({"player_id": my_id})
                     from net.protocol import MsgType
                     gs.net_client.send((MsgType.SPECTATE_LEAVE, {
-                        "player_id": gs.net_player_id,
+                        "player_id": my_id,
                     }))
+                    view._back_to_lobby("退出观战，等待下一局")
                 return
-            if gs.net_mode == "host":
-                view._broadcast_room_ended("all_finished")
-            else:
-                view._back_to_lobby("退出观战，等待下一局")
+            # 非倒地（已撤离/已阵亡观战中）：主机/客户端统一回房间页——
+            # 主机退出不再广播 ROOM_ENDED 终止全局（旧版 bug：主机一点退出
+            # 就直接关局，其他客户端被动收到 ROOM_ENDED 掉出对局）
+            view._back_to_lobby("退出观战，等待下一局")
         return
     # 阶段4 商队弹层右上角「✕ 关闭」按钮：换购弹层是绘制函数不是 arcade.View，
     # 没有天然关闭入口（原先只能走远自动关闭，玩家无法主动关），故在此自己做命中：

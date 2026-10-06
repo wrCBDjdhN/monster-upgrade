@@ -44,12 +44,12 @@ if _ROOT not in sys.path:
 
 try:
     from net.protocol import MESSAGE_SCHEMAS, MsgType, decode, encode
-    from net.server import NetServer
+    from net.server import NetServer, PROTOCOL_VERSION
     from net.thread_bridge import NetBridge
 except ImportError:
     # 兜底：以顶层模块方式导入（net/ 已在 sys.path 时走此分支）
     from protocol import MESSAGE_SCHEMAS, MsgType, decode, encode  # pyright: ignore[reportMissingImports]
-    from server import NetServer  # pyright: ignore[reportMissingImports]
+    from server import NetServer, PROTOCOL_VERSION  # pyright: ignore[reportMissingImports]
     from thread_bridge import NetBridge  # pyright: ignore[reportMissingImports]
 
 from websockets.asyncio.client import ClientConnection, connect  # type: ignore[attr-defined]
@@ -71,7 +71,7 @@ def _pick_free_port() -> int:
 async def _handshake_join(port: int, name: str) -> tuple[ClientConnection, int]:
     """连接并完成 HELLO+JOIN 握手：返回 (连接, player_id)。失败抛断言。"""
     ws = await connect(f"ws://{TEST_HOST}:{port}")
-    await ws.send(encode(MsgType.HELLO, {"protocol": 1, "name": name}))
+    await ws.send(encode(MsgType.HELLO, {"protocol": PROTOCOL_VERSION, "name": name}))
     await ws.send(encode(MsgType.JOIN, {"name": name}))
     msg_type, payload = decode(
         await asyncio.wait_for(ws.recv(), timeout=MSG_TIMEOUT)
@@ -86,7 +86,7 @@ async def _handshake_join(port: int, name: str) -> tuple[ClientConnection, int]:
 async def _handshake_reject(port: int, name: str) -> str:
     """连接一个期望被拒绝的客户端（房间已满）：返回拒绝原因。"""
     ws = await connect(f"ws://{TEST_HOST}:{port}")
-    await ws.send(encode(MsgType.HELLO, {"protocol": 1, "name": name}))
+    await ws.send(encode(MsgType.HELLO, {"protocol": PROTOCOL_VERSION, "name": name}))
     await ws.send(encode(MsgType.JOIN, {"name": name}))
     msg_type, payload = decode(
         await asyncio.wait_for(ws.recv(), timeout=MSG_TIMEOUT)
@@ -280,6 +280,13 @@ _ROUNDTRIP_CASES: tuple[tuple[str, MsgType, dict], ...] = (
             "blessings": [{"blessing_id": "twin_shot", "stack": 2}],
         }],
     }),
+    # 可选字段向后兼容：PLAYER_SNAPSHOT.dmg_count（伤害计数③，客户端→主机陈旧上报识别）
+    ("PLAYER_SNAPSHOT/dmg_count", MsgType.PLAYER_SNAPSHOT, {
+        "players": [{
+            "player_id": 1, "x": 100.0, "y": 200.0, "hp": 90.0, "max_hp": 120.0,
+            "weapon": "铁剑", "facing": 0.5, "alive": True, "dmg_count": 3,
+        }],
+    }),
     # 可选字段向后兼容：POTION_ACK.for_peer（单播回执时指明回给谁）
     ("POTION_ACK/for_peer", MsgType.POTION_ACK, {
         "player_id": 1, "potion": "health", "ok": True, "for_peer": 2,
@@ -293,7 +300,7 @@ _SCHEMA_KEY_EXPECT: tuple[tuple[MsgType, tuple[str, ...]], ...] = (
     (MsgType.EVAC_POINT_ACTION, ("player_id", "action", "x", "y")),
     (MsgType.EVENT_START, ("event_id", "flags")),
     (MsgType.MAP_CHANGE, ("obj_id", "change_type", "state", "extra")),
-    (MsgType.PLAYER_SNAPSHOT, ("players", "stats", "blessings")),
+    (MsgType.PLAYER_SNAPSHOT, ("players", "stats", "blessings", "dmg_count")),
     (MsgType.FULL_STATE, ("evac_point", "event_id")),
     # 本轮新增/扩展消息的键名（联机「四接线」依赖 schema 描述，故纳入断言）
     (MsgType.BUILD_REQUEST, ("build_id", "x", "y")),

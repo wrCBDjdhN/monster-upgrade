@@ -261,9 +261,15 @@ class GameState:
         self.net_roster: dict = {}              # 玩家名册 {player_id: {"name": str, "slot": int}}，状态条与幽灵名称用
         self.net_spawns: dict[int, tuple[int, int]] = {}  # 全房出生点 {player_id: (x, y)}，幽灵出生用
         self.net_ready: bool = False            # 本端是否已准备（开始游戏前全员就绪判定；host 恒为 True）
+        self.net_ready_state: dict = {0: True}  # 房间全员就绪表 {player_id: bool}（主机权威写；主机=0 恒 True）。
+                                                # 唯一权威源：LobbyView（房间页）与 GameView（对局中收 READY 上报）
+                                                # 共同读写——对局中客户端死亡回房点「准备」时由 GameView 更新并广播，
+                                                # 修复旧版就绪表只活在 LobbyView 实例里、对局中 READY 被当未接线消息丢弃
         self.net_wait_reason: str = ""          # 客户端撤离/死亡后回房等待的原因（evac/dead），大厅提示用
         self.net_characters: dict = {}          # 联机玩家角色映射 {player_id: character_id}，主机权威维护，
                                                 # 开局前由 SET_CHARACTER 上报更新，ROOM_START 打包下发全房
+        self.room_player_status: dict = {}      # 房间内各玩家对局状态 {player_id: status}（主机本地写 + 客户端收
+                                                # ROOM_STATUS 写）；房间页三态显示：alive/downed→游戏中，否则显示准备状态
         # 新手教程状态（首次启动 active=True；跳过/完成后 active=False）
         self.tutorial: TutorialState | None = None
         # 仓库满仓时的「未入仓报告」（阶段11：撤离时仓库装不下的战利品）。

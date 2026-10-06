@@ -19,6 +19,7 @@ from config import (
     DAMAGE_RESULT_QUEUE_TIMEOUT,  # DAMAGE_RESULT 目标缺失时的排队等待上限（秒）
     PROJECTILE_SIZE,  # 标准弹丸边长（客户端远端弹丸纯表现层渲染尺寸）
     DROP_PICKUP_RADIUS,  # 掉落物拾取半径（主机拾取仲裁距离阈值，Todo 18）
+    DROP_PICKUP_POS_TOLERANCE,  # 拾取上报坐标与幽灵的位置容差（移动拾取判距回退，③修复）
     LIFESTEAL_DEFAULT, SPREAD_COUNT_DEFAULT, SPREAD_ANGLE_DEFAULT,  # 武器扩展机制默认值（吸血/散射）
     AURA_SLOW_TICK, AURA_SLOW_LEVEL,  # 攻速光环：减速结算周期与效果等级
     # 等级系统：击杀/撤离经验常量（客户端击杀结算用）
@@ -204,6 +205,15 @@ class NetworkSyncManager:
         self._last_attack_at[attacker_id] = now
         if ts is not None:
             self._last_attack_ts[attacker_id] = ts
+        # ②修复：外层门通过后清掉战斗层内层冷却，使外层门成为唯一节流口。
+        # 内层 melee_attack/ranged_attack/spawn_laser 会按 can_attack 检查
+        # _cooldowns[attacker_id]（按主机模板武器攻速 1/speed 设置），而外层门
+        # 按客户端上报攻速（含攻击加成后更高）计算窗口——两窗口不一致时
+        # （加成攻速 > 模板攻速），内层冷却未归零 → can_attack 为假 →
+        # 战斗函数静默 return []，客户端攻击被吞且无任何日志。
+        # 外层门已按上报攻速限速（防刷成立），内层冷却对经此入口的事件冗余，
+        # 故每次裁决前弹出；单机/主机本地路径不经此入口，不受影响。
+        self.gv.combat._cooldowns.pop(attacker_id, None)
         # 伤害优先采用客户端上报的实际伤害（修复联机假伤害 8/1）：主机模板 damage 是
         # 基础值，客户端武器可能已升级（gs.weapon_damage 更高），直接按模板裁决会让
         # 升级武器在联机时伤害退回基础值；客户端是本人武器的权威源，与幽灵 HP 采纳同口径。
@@ -492,6 +502,9 @@ class NetworkSyncManager:
         # 幽灵联机身份：技能弹丸归属（_arcane_blast 取 owner_net_id=net_player_id，
         # 客户端快照跳过 owner_id==my_id 去重，见 _apply_projectile_snapshot 注释）
         ghost.net_player_id = player_id
+        # 伤害计数（③）：主机已广播的本人 PLAYER_HURT 次数（damage>0 才计），
+        # 客户端上报 dmg_count 与之比对识别陈旧上报（防连续受伤血量回弹）
+        ghost._dmg_seq = 0
         # 幽灵朝向（Entity 同步 todo 23 快照字段，默认朝右）
         ghost.facing = 0.0
         # 主机权威：幽灵受击（怪物近战/弹丸）→ 广播 PLAYER_HURT（各端扣血显示）。
@@ -519,6 +532,12 @@ class NetworkSyncManager:
         """
         gs = self.gv.window.game_state
         if gs.net_mode == "host" and gs.net_server is not None:
+            # 伤害计数（③）：damage>0 才计（与客户端 _hurt_count 门槛一致）；
+            # 主机本端玩家无幽灵（不走上报采纳路径），仅客户端玩家幽灵计数
+            if damage > 0:
+                ghost = self.gv.remote_players.get(player_id)
+                if ghost is not None:
+                    ghost._dmg_seq = int(getattr(ghost, "_dmg_seq", 0)) + 1
             gs.net_server.broadcast(MsgType.PLAYER_HURT, {
                 "player_id": player_id,
                 "damage": damage,
@@ -586,6 +605,13 @@ class NetworkSyncManager:
         if my_id is not None and player_id == my_id:
             # 本地玩家受伤：扣血 + 红闪 + 音效（受击反馈本地即时触发）
             self.gv.player.hp = max(0, round(self.gv.player.hp - damage, 2))
+            # HP 台账 rebase（方案A）：合法扣血登记期望值——不登记的话期望虚高，
+            # 后续未知上抬恰好拉回旧值时帧末检查会漏判（回弹正是拉回受击前值）
+            self.gv._rebase_expect_hp()
+            # 伤害计数（③）：damage>0 才计（与主机 _dmg_seq 门槛一致），
+            # 随本人 PLAYER_SNAPSHOT 上报，主机据此识别陈旧上报防血量回弹
+            if damage > 0:
+                self.gv._hurt_count = int(getattr(self.gv, "_hurt_count", 0)) + 1
             self.gv._player_hit_flash = 0.3
             sound_manager.play_hurt()
             floating_texts.add_damage(self.gv.player.center_x, self.gv.player.center_y + 20, damage)
@@ -674,7 +700,7 @@ class NetworkSyncManager:
             self._apply_debuff_payload(player, payload)
 
     def _apply_player_snapshot(self, payload: dict) -> None:
-        """客户端应用主机 PLAYER_SNAPSHOT：校准本地与幽灵 HP（防漂移）"""
+        """客户端应用主机 PLAYER_SNAPSHOT：同步幽灵实体（本人条目跳过，①修复血量回弹）"""
         gs = self.gv.window.game_state
         my_id = getattr(gs, "net_player_id", None)
         for entry in payload.get("players", []):
@@ -682,26 +708,25 @@ class NetworkSyncManager:
             hp = entry.get("hp", 0)
             max_hp = entry.get("max_hp", 0)
             if my_id is not None and pid == my_id:
-                # 观战期跳过自身 HP 校准：主机快照中已撤离玩家幽灵 alive=False → hp=0，
-                # 若仍校准会把本地 player.hp 置 0（触发 Player.alive=False 派生副作用），
-                # 观战渲染已由 _spectating 守卫隐藏本体，HP 值无需再校准（修复观战崩溃）
-                if self.gv._spectating:
-                    continue
-                # 本地玩家：权威 HP 校准（含 max_hp；round 避免浮点长小数）
-                self.gv.player.max_hp = max(1, int(max_hp or self.gv.player.max_hp))
-                self.gv.player.hp = min(self.gv.player.max_hp, round(hp, 2))
-            else:
-                ghost = self.gv.remote_players.get(pid)
-                if ghost is None:
-                    ghost = self._ensure_ghost(pid)
-                ghost.max_hp = max(1, int(max_hp or getattr(ghost, "max_hp", 0)))
-                ghost.hp = min(ghost.max_hp, round(hp, 2))
-                # 远端实体同步：主机快照为权威位置/朝向/存活（todo 23 玩家实体同步）
-                ghost.center_x = entry.get("x", ghost.center_x)
-                ghost.center_y = entry.get("y", ghost.center_y)
-                ghost.facing = entry.get("facing", getattr(ghost, "facing", 0.0))
-                if not entry.get("alive", True):
-                    ghost.hp = 0  # 存活标记为假：HP 归零（Player.alive 由 hp>0 派生）
+                # 本人条目：客户端是本人 HP/max_hp 权威源（受击 PLAYER_HURT、药水
+                # POTION_ACK、复活 PLAYER_REVIVED 均本地落地后经 _send_player_snapshot
+                # 上报，主机 _apply_client_snapshot 带回血跳变护栏采纳）——主机快照中
+                # 的本人 hp 只是回声，覆盖它会在连续受击时把本地已扣血量拉回上一帧
+                # 回声值（血量不断回弹，①修复），故无条件跳过。
+                # 观战期跳过的旧原因由同一 continue 覆盖：已撤离幽灵 alive=False →
+                # hp=0 会把本地 player.hp 置 0 触发 Player.alive=False 派生副作用。
+                continue
+            ghost = self.gv.remote_players.get(pid)
+            if ghost is None:
+                ghost = self._ensure_ghost(pid)
+            ghost.max_hp = max(1, int(max_hp or getattr(ghost, "max_hp", 0)))
+            ghost.hp = min(ghost.max_hp, round(hp, 2))
+            # 远端实体同步：主机快照为权威位置/朝向/存活（todo 23 玩家实体同步）
+            ghost.center_x = entry.get("x", ghost.center_x)
+            ghost.center_y = entry.get("y", ghost.center_y)
+            ghost.facing = entry.get("facing", getattr(ghost, "facing", 0.0))
+            if not entry.get("alive", True):
+                ghost.hp = 0  # 存活标记为假：HP 归零（Player.alive 由 hp>0 派生）
 
     def _send_player_snapshot(self) -> None:
         """客户端 20Hz 上报本人实体为 PLAYER_SNAPSHOT（单播，主机据此更新本端幽灵）
@@ -735,6 +760,9 @@ class NetworkSyncManager:
                 # 阶段5 祝福：上报本人「含祝福」的有效属性，主机据此套用到该玩家幽灵，
                 # 使主机裁决该玩家承伤（ghost.take_damage 走 defense）时与本人一致
                 "stats": self.gv.player.blessing_stats(),
+                # 伤害计数（③）：本人已应用的 PLAYER_HURT 次数，主机比对幽灵
+                # _dmg_seq，落后即陈旧上报 → 跳过 hp 采纳（防连续受伤血量回弹）
+                "dmg_count": int(getattr(self.gv, "_hurt_count", 0)),
             }],
         }))
 
@@ -745,6 +773,8 @@ class NetworkSyncManager:
           客户端本地应用了装备被动效果（max_hp/regen 加成），是本人 HP/max_hp 的权威源，
           若不采纳，主机 _serialize_players 会把无加成的默认 max_hp 广播回客户端，
           客户端 _apply_player_snapshot 校准后会把装备 max_hp 加成覆盖掉（B1 装备效果不全生效）；
+          例外：上报 dmg_count 落后于幽灵 _dmg_seq（生成于最近一次 PLAYER_HURT 之前的
+          陈旧值）→ 跳过 HP/max_hp 采纳，防止客户端连续受伤后血量回弹（伤害计数③）；
         - 阵亡时 HP 归零（主机随后 PLAYER_DEATH 单播通知）；
         - 幽灵经 _ensure_ghost 懒创建（客户端幽灵在主机侧必然已存在）。
         """
@@ -757,17 +787,25 @@ class NetworkSyncManager:
             ghost.center_y = entry.get("y", ghost.center_y)
             ghost.facing = entry.get("facing", getattr(ghost, "facing", 0.0))
             # 采纳客户端上报的 HP/max_hp（含装备被动加成），保持幽灵与客户端本人一致，
-            # 避免快照校准覆盖装备效果（详见函数 docstring）
-            ghost.max_hp = max(1, int(entry.get("max_hp") or ghost.max_hp))
-            reported_hp = min(ghost.max_hp, round(entry.get("hp", ghost.hp), 2))
-            # 回血跳变限制：单帧上报的回血量 ≤ max_hp × config.SNAPSHOT_HEAL_JUMP_RATIO，
-            # 超出部分按上限截断（扣血方向不限制：伤害本就应立即生效）。
-            # 残余风险：客户端按接近上限的恒定速率持续回血仍可缓慢作弊——
-            # 限幅只挡「一次性跳变」，彻底防作弊需主机侧独立结算回血来源。
-            max_heal_step = ghost.max_hp * SNAPSHOT_HEAL_JUMP_RATIO
-            if reported_hp > ghost.hp and (reported_hp - ghost.hp) > max_heal_step:
-                reported_hp = ghost.hp + max_heal_step
-            ghost.hp = reported_hp
+            # 避免快照校准覆盖装备效果（详见函数 docstring）。
+            # 伤害计数（③）：上报 dmg_count 落后于主机已广播的伤害次数 → 该报告
+            # 生成于最近一次 PLAYER_HURT 之前（陈旧值），采纳会把客户端刚扣的血量
+            # 回弹 → 跳过 hp/max_hp 采纳（位置/朝向/属性照常采纳）；
+            # 缺省 dmg_count=None（旧客户端不带该字段）→ 按旧口径直接采纳，向后兼容。
+            dmg_count = entry.get("dmg_count")
+            stale_report = (dmg_count is not None
+                            and int(dmg_count) < int(getattr(ghost, "_dmg_seq", 0)))
+            if not stale_report:
+                ghost.max_hp = max(1, int(entry.get("max_hp") or ghost.max_hp))
+                reported_hp = min(ghost.max_hp, round(entry.get("hp", ghost.hp), 2))
+                # 回血跳变限制：单帧上报的回血量 ≤ max_hp × config.SNAPSHOT_HEAL_JUMP_RATIO，
+                # 超出部分按上限截断（扣血方向不限制：伤害本就应立即生效）。
+                # 残余风险：客户端按接近上限的恒定速率持续回血仍可缓慢作弊——
+                # 限幅只挡「一次性跳变」，彻底防作弊需主机侧独立结算回血来源。
+                max_heal_step = ghost.max_hp * SNAPSHOT_HEAL_JUMP_RATIO
+                if reported_hp > ghost.hp and (reported_hp - ghost.hp) > max_heal_step:
+                    reported_hp = ghost.hp + max_heal_step
+                ghost.hp = reported_hp
             # 阶段5 祝福：套用客户端上报的「含祝福有效属性」——主机裁决该玩家承伤时
             # 走 ghost.take_damage（读 defense/shield），不同步会让主机按无祝福数值扣血。
             # 全部按绝对值覆盖（不是倍率叠乘），与客户端本地重算结果一致、不会双倍加成。
@@ -846,7 +884,19 @@ class NetworkSyncManager:
         # 本局结束但房间保留：回房等待（连接保持，等待主机再次开局）
         gs.run_carried = {}
         gs.run_potions = {}  # 本局药水槽一并清空
-        self.gv._back_to_lobby(f"本局结束：{reason}")
+        # 问题3a 修复：reason 是英文枚举（all_finished/host_evac/…），旧版直接拼进
+        # 提示会在房间页/菜单页顶部显示「本局结束：all_finished」——映射为中文文案
+        _reason_cn = {
+            "all_finished": "全员已结束，等待主机再次开局",
+            "host_evac": "主机已撤离，本局结束",
+            "host_evac_fail": "主机撤离失败，本局结束",
+            "host_fail": "主机行动失败，本局结束",
+            "host_end": "本局结束，等待主机再次开局",
+        }
+        if reason not in _reason_cn:
+            # net 铁律：未知 reason 不静默拼接英文枚举，记录后用通用文案兜底
+            print(f"[GameView] ROOM_ENDED 未知 reason={reason!r}，使用通用结束提示")
+        self.gv._back_to_lobby(_reason_cn.get(reason, "本局结束，等待主机再次开局"))
 
     def _handle_potion_use(self, sender_id: int, payload: dict) -> None:
         """主机确认客户端药水使用请求：查库存 → 应用到对应玩家/幽灵 → 广播 POTION_ACK
@@ -1011,7 +1061,10 @@ class NetworkSyncManager:
 
         仲裁规则（对应协议 PICKUP_REQUEST/RESULT 设计）：
         - 按掉落物网络 id 在主机掉落列表中查找（掉落在主机权威生成，客户端视觉为副本）；
-        - 距离校验：用该玩家幽灵位置（远程玩家实体）与掉落物距离 < DROP_PICKUP_RADIUS；
+        - 距离校验（双条件，③修复移动拾取误判）：上报坐标与幽灵偏差 ≤
+          DROP_PICKUP_POS_TOLERANCE 时视为快照滞后，用上报坐标判距（与客户端本地
+          try_pickup 同口径）；偏差超容差则回退幽灵实测坐标（防伪造隔空捡物）；
+          最终与掉落物距离 < DROP_PICKUP_RADIUS 才接受；
         - 先到先得：匹配成功即从主机掉落列表移除该掉落物并广播 accepted=True，
           后续同 id 请求必然失败（already_taken）——双客户端抢同一掉落物只有一人获得。
         """
@@ -1038,10 +1091,15 @@ class NetworkSyncManager:
                 result["drop"] = dict(taken)
             gs.net_server.broadcast(MsgType.PICKUP_RESULT, result)
             return
-        # 距离校验优先用幽灵实测坐标（PLAYER_SNAPSHOT 主机权威）：直接采信上报坐标等于
-        # 「隔空捡物」，客户端可伪造 x/y 在全图任意位置拾取。
-        # 幽灵缺失（异常）→ 限频告警，并优先用本次上报坐标兜底判定；上报坐标也缺失时
-        # 才退到出生点（懒创建幽灵的初始位置），而不是 (0,0)（地图左上角会误判成「很近」）。
+        # 距离校验（双条件，③修复移动拾取误判 too_far）：
+        # 客户端本地 try_pickup 用实测坐标判距成功后才上报 PICKUP_REQUEST（附带该瞬间
+        # 坐标），主机幽灵来自 20Hz 快照有滞后——移动中偏差可达 240px/s × 快照间隔，
+        # 只按幽灵判距会把「客户端已判定可拾」的请求拒成 too_far（回滚后物品仍在地上）。
+        # |上报-幽灵| ≤ DROP_PICKUP_POS_TOLERANCE：视为同一位置的快照滞后，用上报坐标
+        #   判距（与客户端本地同口径）；超容差：上报坐标异常（伪造/瞬移），回退幽灵
+        #   实测坐标（守住防隔空捡物底线）。
+        # 幽灵缺失（异常）→ 优先用本次上报坐标兜底；上报坐标也缺失时才退到出生点
+        #   （懒创建幽灵的初始位置），而不是 (0,0)（地图左上角会误判成「很近」）。
         req_x, req_y = payload.get("x"), payload.get("y")
         ghost = self.gv.remote_players.get(sender_id)
         if ghost is None:
@@ -1049,16 +1107,33 @@ class NetworkSyncManager:
             warn_key = ("ghost_missing", "pickup", sender_id)
             if warn_key not in self._warned_keys:
                 self._warned_keys.add(warn_key)
-                if req_x is not None and req_y is not None:
-                    print(f"[Host] 玩家 {sender_id} 拾取时幽灵缺失，"
-                          f"已按上报坐标 ({float(req_x)},{float(req_y)}) 兜底（限频告警一次）")
-                    check_x, check_y = float(req_x), float(req_y)
-                else:
-                    print(f"[Host] 玩家 {sender_id} 拾取时幽灵缺失且无上报坐标，"
-                          f"已按出生点 ({ghost.center_x},{ghost.center_y}) 兜底（限频告警一次）")
-                    check_x, check_y = ghost.center_x, ghost.center_y
+                print(f"[Host] 玩家 {sender_id} 拾取时幽灵缺失，已按上报坐标/出生点兜底"
+                      f"（限频告警一次）")
+            # 兜底坐标判定放在告警守卫之外：幽灵被清（重开一局）后再次缺失时，
+            # 告警已限频但 check_x/check_y 必须仍被赋值（否则 NameError 中断主机泵）
+            if req_x is not None and req_y is not None:
+                check_x, check_y = float(req_x), float(req_y)
+            else:
+                check_x, check_y = ghost.center_x, ghost.center_y
+        elif req_x is not None and req_y is not None and (
+                math.hypot(float(req_x) - ghost.center_x,
+                           float(req_y) - ghost.center_y)
+                <= DROP_PICKUP_POS_TOLERANCE):
+            # 幽灵在位且上报坐标在容差内（快照滞后窗口）：用上报坐标，与客户端本地
+            # try_pickup 判距口径一致 → 移动中拾取不再被幽灵滞后误判 too_far
+            check_x, check_y = float(req_x), float(req_y)
+        elif req_x is not None and req_y is not None:
+            # 超容差：上报坐标与幽灵严重偏离（伪造/异常瞬移）→ 回退幽灵实测坐标 + 限频告警
+            warn_key = ("pos_desync", "pickup", sender_id)
+            if warn_key not in self._warned_keys:
+                self._warned_keys.add(warn_key)
+                gap = math.hypot(float(req_x) - ghost.center_x,
+                                 float(req_y) - ghost.center_y)
+                print(f"[Host] 玩家 {sender_id} 拾取上报坐标与幽灵偏差 {gap:.0f}px 超容差"
+                      f"（{DROP_PICKUP_POS_TOLERANCE}px），回退幽灵坐标判距（限频告警一次）")
+            check_x, check_y = ghost.center_x, ghost.center_y
         else:
-            # 幽灵在位：距离判据吃实测坐标，客户端上报的 x/y 仅用于日志/告警，不参与判定
+            # 幽灵在位但无上报坐标：用幽灵实测坐标（旧版口径）
             check_x, check_y = ghost.center_x, ghost.center_y
         dist = math.hypot(check_x - target.center_x, check_y - target.center_y)
         if dist >= DROP_PICKUP_RADIUS:
@@ -1075,7 +1150,12 @@ class NetworkSyncManager:
             return
         # 先到先得：从主机掉落列表移除（后续请求必失败）并记录该玩家携带物
         self.gv.drops.remove(target)
-        self._record_player_pickup(sender_id, target)
+        # 修复（2026-10-04）：原写 self._record_player_pickup —— NetworkSyncManager
+        # 无此方法（真定义在 GameView，委托 pickup_loot），客户端按 E 拾取发来的
+        # PICKUP_REQUEST 在此抛 AttributeError，中断主机 on_update 整帧：同批
+        # 消息里的 RESCUE_REQUEST 等全部丢失、后续帧倒地检测/结算/快照被跳过
+        # （客户端表现为怪物冻结"游戏暂停"）。由重构 commit 2f469ef 引入。
+        self.gv._record_player_pickup(sender_id, target)
         # 缓存该掉落物身份（供后续 already_taken 拒绝时下发 drop，客户端精确回滚）
         self._remember_taken_drop(target)
         # 阶段6.2 任务 harvest：远程玩家拾取资源按拾取者归属补计数
@@ -2048,6 +2128,9 @@ class NetworkSyncManager:
             if my_id is not None and target_id == my_id:
                 # 本人被救：恢复 HP，退出倒地状态
                 self.gv.player.hp = hp
+                # 方案A：权威直写本人 HP（救援回血属合法上抬）→ rebase 期望血量台账，
+                # 否则帧末 _enforce_hp_ledger 会把这次恢复误判为未知上抬回滚。
+                self.gv._rebase_expect_hp()
                 self.gv.player.downed = False
                 self.gv.player.downed_timer = 0.0
                 self.gv._spectating = False
@@ -2078,6 +2161,9 @@ class NetworkSyncManager:
         if my_id is not None and player_id == my_id:
             # 本人复活：恢复 HP
             self.gv.player.hp = hp
+            # 方案A：权威直写本人 HP（复活回血属合法上抬）→ rebase 期望血量台账，
+            # 否则帧末 _enforce_hp_ledger 会把复活回血误判为未知上抬回滚。
+            self.gv._rebase_expect_hp()
             self.gv.player.downed = False
             self.gv.player.downed_timer = 0.0
             self.gv._spectating = False
@@ -2091,32 +2177,34 @@ class NetworkSyncManager:
             self.gv._player_status[player_id] = "alive"
 
     def _apply_spectate_leave(self, payload: dict, sender_id=None) -> None:
-        """主机收到 SPECTATE_LEAVE：玩家主动退出观战 → 视为真死，清装备
+        """主机收到 SPECTATE_LEAVE：玩家主动退出观战 → 视为真死（联机 bug ② 收口）
 
         身份收口：sender_id 传入时（连接侧已知来源）一律以它为准，禁采信
         payload.player_id —— 否则客户端可伪造他人 id 把别人标记 dead，
         也会伪造 player_id=0 让主机自己清装备进观战。
-        sender_id 为 None 时（历史调用方未提供来源）才回退 payload.player_id。
+        sender_id 为 None 时（本地调用方，如主机自己点退出按钮）才回退 payload.player_id。
+
+        结算路径（2026-10-05 统一）：
+        - 主机自己退出 → spectate._settle_downed_true_death(0)：清 downed 账本 +
+          清装备 + 进观战一次到位（旧版只清装备进观战，_player_status/_downed_players
+          残留 "downed"，_check_all_finished 永远算主机没结束 → 房间收不了口）；
+        - 客户端退出 → 主机只清账本 + 置 dead，**不再回执 PLAYER_DEATH**：发起端
+          在 input_handler 点击处已先本地 _apply_player_death 再发包，回执会造成
+          二次结算，且旧版等回执才退是"要点两次"的根因之一。
         """
-        gs = self.gv.window.game_state
         # 身份收口：优先用连接 sender_id（禁信任 payload.player_id）
         player_id = sender_id if sender_id is not None else payload.get("player_id")
         if player_id is None:
             print("[Host] SPECTATE_LEAVE 缺少玩家身份，忽略本次请求")
             return
         if player_id == 0:
-            # 主机自己退出观战：清装备 + 观战
-            self.gv._clear_run_equipment(gs)
-            self.gv._enter_spectate("dead")
+            # 主机自己退出观战：统一真死结算（清账本/装备 → 进观战）
+            self.gv._settle_downed_true_death(0, "主动退出观战")
         else:
-            # 客户端退出观战：标记真死
+            # 客户端退出观战：清账本 + 标记真死（不再回执 PLAYER_DEATH，见 docstring）
             self.gv._downed_players.pop(player_id, None)
             self.gv._player_status[player_id] = "dead"
-            # 通知该客户端真死
-            gs.net_server.send_to(player_id, MsgType.PLAYER_DEATH, {
-                "player_id": player_id,
-                "killer_id": None,
-            })
+            print(f"[Host] 玩家 {player_id} 主动退出观战 → 视为真死")
 
     def handle_evac_point_result(self, payload: dict) -> None:
         """客户端应用主机 EVAC_POINT_RESULT：撤离点激活/修复的权威回执
@@ -2146,9 +2234,12 @@ class NetworkSyncManager:
         ok = bool(payload.get("ok"))
         reason = payload.get("reason") or "撤离点操作被拒绝"
         if not ok:
-            print(f"[Client] 撤离点操作被主机拒绝：action={action!r} reason={reason}")
+            print(f"[Client] 撒离点操作被主机拒绝：action={action!r} reason={reason}")
+            # 问题2 修复：直接显示主机 reason 原文（现为全量需求清单
+            # 「资源不足，需要 木材x8 …」，与主机本地提示同口径）；
+            # 旧版加「操作失败：」前缀且主机只报首个缺失项，客户端看不出需求
             floating_texts.add(self.gv.player.center_x, self.gv.player.center_y + 60,
-                               f"操作失败：{reason}", arcade.color.RED,
+                               str(reason), arcade.color.RED,
                                life=2.0, font_size=16)
             return
         # ok=True：客户端未乐观扣料（依据 game_view.py:1460-1489），按主机权威 action 扣资源
@@ -2206,6 +2297,11 @@ class NetworkSyncManager:
         读条会卡在原地。此处补齐拒绝型 ACK，hp=0 表示未复活。
         """
         gs = self.gv.window.game_state
+        if rescuer_id == 0:
+            # 主机自己发起的救援（本地读条路径，spectate_system 直调 sender_id=0）：
+            # host 不在 room.players 连接列表里，send_to(0) 必被服务端丢弃并打
+            # 「目标不存在」告警——拒绝原因已由调用方 print，无需回执
+            return
         if gs.net_server is None:
             return  # 防御性：无服务端连接时无从回执（调用方已记日志）
         gs.net_server.send_to(rescuer_id, MsgType.RESCUE_RESULT, {
@@ -2278,11 +2374,31 @@ class NetworkSyncManager:
         gs.net_server.broadcast(MsgType.PLAYER_REVIVED, {
             "player_id": target_id, "hp": REVIVE_HP,
         })
-        # 如果被救者是幽灵：恢复其 HP
-        ghost = self.gv.remote_players.get(target_id)
-        if ghost is not None:
-            ghost.hp = REVIVE_HP
-            ghost.downed = False
+        if target_id == 0:
+            # 被救者是主机本体：广播只发给客户端连接（host 不在 room.players，
+            # 自己收不到 RESCUE_RESULT/PLAYER_REVIVED），且本体不在幽灵表里——
+            # 必须本地直接复活，否则 _player_status 已置 alive 而 hp/_spectating
+            # 永不复位，主机永远卡在观战（救援 host 无效的根因之一）。
+            # 复位口径与客户端 _apply_rescue_result「本人被救」分支完全一致。
+            self.gv.player.hp = REVIVE_HP
+            self.gv.player.downed = False
+            self.gv.player.downed_timer = 0.0
+            self.gv._spectating = False
+            self.gv.controller.follow_player = True
+            floating_texts.add(self.gv.player.center_x, self.gv.player.center_y + 60,
+                               f"你已被救！HP 恢复为 {int(REVIVE_HP)}",
+                               arcade.color.GREEN, life=2.0, font_size=16)
+        else:
+            # 被救者是幽灵（客户端）：恢复幽灵 HP，并复位倒地登记标记——
+            # _downed_notified 不复位的话，该玩家第二次倒地会被 game_view
+            # 幽灵倒地检测的 `if not _downed_notified` 跳过，_player_status
+            # 永远停在 alive → 救援被拒、_settle_no_rescuer 无账可结、
+            # _check_all_finished 永不满足 → 死锁「等待救援」（2026-10-04 修复）
+            ghost = self.gv.remote_players.get(target_id)
+            if ghost is not None:
+                ghost.hp = REVIVE_HP
+                ghost.downed = False
+                ghost._downed_notified = False
         print(f"[GameView] 玩家 {rescuer_id} 成功救援玩家 {target_id}，HP 恢复为 {REVIVE_HP}")
 
     def _handle_interaction_request(self, sender_id: int, payload: dict) -> None:

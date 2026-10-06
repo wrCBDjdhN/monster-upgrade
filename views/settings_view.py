@@ -150,6 +150,13 @@ class SettingsView(arcade.View):
         self._codex_rect = arcade.XYWH(cx + 80, 40, 140, 40)
         self._abandon_rect = arcade.XYWH(cx + 245, 40, 150, 40)
 
+    # Bug 7 fix 同款（2026-10-04 无条件转发口径）：局内开设置转发 on_update 给 GameView，
+    # 防止 show_view 摘掉 GameView handler 后主机停止快照广播/仲裁、客户端停帧冻结；
+    # 主页面打开时 game_view 为 None，直接跳过（与背包/升级面板同口径）
+    def on_update(self, delta_time):
+        if self.game_view is not None:
+            self.game_view.on_update(delta_time)
+
     # ── 绘制 ──
     def on_show_view(self):
         arcade.set_background_color((25, 30, 40))

@@ -47,6 +47,12 @@ class LevelUpView(arcade.View):
         else:
             self.options = []
 
+    # Bug 7 fix 同款（2026-10-04 无条件转发口径）：面板打开期间转发 on_update 给 GameView，
+    # 防止 show_view 摘掉 GameView handler 后主机停止快照广播/仲裁、客户端停帧冻结
+    def on_update(self, delta_time):
+        if self.game_view is not None:
+            self.game_view.on_update(delta_time)
+
     # ── 绘制 ──
     def on_show_view(self):
         arcade.set_background_color((25, 30, 40))

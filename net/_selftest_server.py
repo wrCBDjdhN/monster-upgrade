@@ -33,12 +33,12 @@ if _ROOT not in sys.path:
 
 try:
     from net.protocol import MsgType, decode, encode
-    from net.server import NetServer
+    from net.server import NetServer, PROTOCOL_VERSION
     from net.thread_bridge import NetBridge
 except ImportError:
     # 兜底：以顶层模块方式导入（net/ 已在 sys.path 时走此分支）
     from protocol import MsgType, decode, encode  # pyright: ignore[reportMissingImports]
-    from server import NetServer  # pyright: ignore[reportMissingImports]
+    from server import NetServer, PROTOCOL_VERSION  # pyright: ignore[reportMissingImports]
     from thread_bridge import NetBridge  # pyright: ignore[reportMissingImports]
 
 from websockets.asyncio.client import ClientConnection, connect  # type: ignore[attr-defined]
@@ -59,7 +59,7 @@ def _pick_free_port() -> int:
 async def _handshake_join(port: int, name: str) -> tuple[ClientConnection, int]:
     """连接并完成 HELLO+JOIN 握手：返回 (连接, player_id)。失败抛断言。"""
     ws = await connect(f"ws://{TEST_HOST}:{port}")
-    await ws.send(encode(MsgType.HELLO, {"protocol": 1, "name": name}))
+    await ws.send(encode(MsgType.HELLO, {"protocol": PROTOCOL_VERSION, "name": name}))
     await ws.send(encode(MsgType.JOIN, {"name": name}))
     msg_type, payload = decode(
         await asyncio.wait_for(ws.recv(), timeout=MSG_TIMEOUT)
@@ -74,7 +74,7 @@ async def _handshake_join(port: int, name: str) -> tuple[ClientConnection, int]:
 async def _handshake_reject(port: int, name: str) -> str:
     """连接一个期望被拒绝的客户端（房间已满）：返回拒绝原因。"""
     ws = await connect(f"ws://{TEST_HOST}:{port}")
-    await ws.send(encode(MsgType.HELLO, {"protocol": 1, "name": name}))
+    await ws.send(encode(MsgType.HELLO, {"protocol": PROTOCOL_VERSION, "name": name}))
     await ws.send(encode(MsgType.JOIN, {"name": name}))
     msg_type, payload = decode(
         await asyncio.wait_for(ws.recv(), timeout=MSG_TIMEOUT)

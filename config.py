@@ -51,6 +51,11 @@ CHEST_WELL_INTERACT_RANGE = 40 # 宝箱/水井交互距离
 
 # ── 掉落 ──
 DROP_PICKUP_RADIUS = 40
+# 拾取上报坐标容差（px）：移动中拾取时主机幽灵位置（20Hz 快照）滞后于客户端实测坐标，
+# |上报-幽灵| ≤ 容差判定为同一位置 → 用上报坐标判距（与客户端本地 try_pickup 同口径，
+# 修复移动拾取误判 too_far ③）；超容差回退幽灵坐标（防伪造坐标隔空捡物）。
+# 推算：玩家 240px/s × 快照 50ms + RTT/抖动 ≈ 12-30px，取 64 留裕量且仍远小于全图。
+DROP_PICKUP_POS_TOLERANCE = 64
 DROP_LIFETIME = 120.0          # 秒后消失（原30秒太短，玩家来不及捡）
 
 # ── 撤离 ──
@@ -531,6 +536,7 @@ NET_HEARTBEAT_SEC = 1.0             # 心跳间隔（秒）
 NET_TIMEOUT_SEC = 5.0               # 断线判定超时（秒）
 NET_SPAWN_OFFSET = 40               # 玩家出生点槽位偏移（像素）
 NET_ACTION_TIME_BCAST_SEC = 1.0     # 行动时间广播间隔（秒）
+NET_ROOM_STATUS_INTERVAL = 1.0      # 房间内玩家对局状态广播间隔（秒）：房间页三态显示（在局玩家显示「游戏中」）
 NET_ATTACK_SPEED_TOLERANCE = 0.8     # 主机攻击事件攻速容差（倍数）：客户端攻击间隔窗口 = (1/attack_speed)*TOLERANCE
 SNAPSHOT_HEAL_JUMP_RATIO = 0.35     # 快照回血跳变上限比例（相对 max_hp）：限制单帧回血跳变，缓解缓慢回血作弊残余风险
 DAMAGE_RESULT_QUEUE_TIMEOUT = 0.5   # DAMAGE_RESULT 目标缺失时的排队等待上限（秒）：等 MONSTER_SNAPSHOT 补到对象后重放，超时丢弃并限频告警

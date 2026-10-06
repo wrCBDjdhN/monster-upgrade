@@ -32,6 +32,7 @@ class MsgType(Enum):
     ROOM_START = "ROOM_START"      # 主机→全部：房间开始（含 seed/theme，客户端据此重建地图）
     ROOM_ENDED = "ROOM_ENDED"      # 主机→全部：房间结束（含原因，各端回大厅）
     ROOM_ERROR = "ROOM_ERROR"      # 主机→全部：房间错误（断线 / 校验失败等）
+    ROOM_STATUS = "ROOM_STATUS"    # 主机→全部：房间内玩家对局状态周期广播（房间页三态显示：在局→游戏中）
     # ── 玩家准备 ──
     READY = "READY"                # 客户端→主机：准备/取消准备（开始游戏前全员就绪）
     READY_STATE = "READY_STATE"    # 主机→全部：全员准备状态广播（大厅/房间内同步显示）
@@ -101,7 +102,7 @@ MESSAGE_SCHEMAS: dict[MsgType, str] = {
     MsgType.HELLO: (
         "客户端连接建立后发送的身份握手消息。\n"
         "payload: {\n"
-        "  'protocol': int,  协议版本号（本协议版本为 1）\n"
+        "  'protocol': int,  协议版本号（当前值见 net/server.py 的 PROTOCOL_VERSION）\n"
         "  'name': str,      玩家名（用于显示与存档区分）\n"
         "}"
     ),
@@ -177,7 +178,18 @@ MESSAGE_SCHEMAS: dict[MsgType, str] = {
         "即「死消息实装」）；房间级故障仍可由主机 broadcast() 广播全房。各端据此回大厅并展示错误。\n"
         "payload: {\n"
         "  'reason': str,  错误描述（如：client_disconnect / join_validation_failed）\n"
-        "}"
+        "}\n"
+    ),
+    MsgType.ROOM_STATUS: (
+        "主机周期广播房间内各玩家的对局状态（NET_ROOM_STATUS_INTERVAL 节拍），供房间页\n"
+        "三态显示：alive/downed（在局中）显示「游戏中」，evac/dead/left 或未登记显示准备状态。\n"
+        "主机在局内或后台对局（提前退出观战回房）期间持续广播；各端写 game_state.room_player_status。\n"
+        "payload: {\n"
+        "  'players': list[dict], 每项：\n"
+        "      {'player_id': int,  玩家 id\n"
+        "       'status': str,     对局状态：alive/downed=在局中；evac/dead/left=已结束/离开\n"
+        "       'name': str}       玩家名（net_roster 查询，兜底 P{id}）\n"
+        "}\n"
     ),
     MsgType.PLAYER_SNAPSHOT: (
         "玩家实体快照（双向，可复用）：\n"
@@ -192,6 +204,10 @@ MESSAGE_SCHEMAS: dict[MsgType, str] = {
         "       'weapon': str|None,                    当前武器名\n"
         "       'facing': float,                       朝向角度（弧度）\n"
         "       'alive': bool,                         是否存活\n"
+        "       'dmg_count': int|None,                 伤害计数（可选，客户端→主机）：\n"
+        "                 客户端已应用的本人 PLAYER_HURT 次数（damage>0 才计）；\n"
+        "                 主机比对幽灵 _dmg_seq，落后即陈旧上报 → 跳过 hp/max_hp\n"
+        "                 采纳（防连续受伤血量回弹）；缺省 None 按旧口径直接采纳\n"
         "       'stats': dict|None,                    含祝福的有效属性（阶段5）\n"
         "                 {'max_hp','defense','char_speed_mult','regen_per_sec',\n"
         "                  'crit_chance','lifesteal','thorns','damage_mult'}}\n"
@@ -656,3 +672,24 @@ def decode(raw: str) -> tuple[MsgType, dict]:
     if not isinstance(payload, dict):
         raise ValueError(f"payload 必须是 dict，实际为 {type(payload).__name__}")
     return msg_type, payload
+
+
+def build_ready_state_payload(players_info: list[tuple[int, str, int]],
+                              ready_state: dict,
+                              host_name: str) -> dict:
+    """组装 READY_STATE 广播载荷：主机名册 + 权威就绪表 → {"players": [...]}。
+
+    供主机两处 READY 广播共用（LobbyView._broadcast_ready_state 房间页 +
+    GameView._handle_host_inbound 对局中 READY 分支，②修复），避免载荷
+    结构在两处复制而漂移。
+
+    - players_info: NetServer.player_info() 的 [(player_id, name, slot)]；
+    - ready_state: GameState.net_ready_state 权威表 {player_id: bool}；
+    - host_name: 主机玩家名（player_id=0 恒就绪）。
+    """
+    players = [{"player_id": 0, "ready": True, "name": host_name}]
+    for pid, name, _ in players_info:
+        players.append({"player_id": pid,
+                        "ready": bool(ready_state.get(pid, False)),
+                        "name": name})
+    return {"players": players}

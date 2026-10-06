@@ -18,7 +18,9 @@
 """
 
 import asyncio
+import os
 import socket
+import sys
 import threading
 import time
 
@@ -27,18 +29,28 @@ import websockets.asyncio.server  # 临时 echo 服务器（与客户端同版�
 from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosed
 
+# 保证 net 包可被导入：把项目根目录（本文件上一级）加入 sys.path
+# （python net/_selftest_client.py 直接运行时，net/ 在 sys.path，父目录不在；
+#  server.py 内 `from net.protocol import ...` 需要父目录在路径上，故先补齐——
+#  与 _selftest.py 的 _ROOT 引导同口径，修复 ②f 加 HELLO 常量导入后的直跑回归）
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
 # 优先以包模块方式导入（供 pyright 静态分析 / python -m 运行时解析）
 try:
     # client_mod：阶段5 需要临时改写 client 模块级 HEARTBEAT_TIMEOUT_SEC（压阈值加速）
     from net import client as client_mod
     from net.client import NetClient
     from net.protocol import MsgType, decode, encode
+    from net.server import PROTOCOL_VERSION
 except ImportError:
     # 直接运行 python net/_selftest_client.py 时，脚本所在目录
     # （net/）在 sys.path 中，此时以顶层模块方式导入
     import client as client_mod  # pyright: ignore[reportMissingImports]
     from client import NetClient  # pyright: ignore[reportMissingImports]
     from protocol import MsgType, decode, encode  # pyright: ignore[reportMissingImports]
+    from server import PROTOCOL_VERSION  # pyright: ignore[reportMissingImports]
 
 # 自检常量
 READY_TIMEOUT = 5.0        # 等待 echo 服务器就绪超时（秒）
@@ -227,7 +239,7 @@ def _run_phase4_new_messages() -> int:
             return 1
 
         # 4a) HELLO → JOIN_ACCEPT：客户端解码出自己的联机传输 id（归属过滤基准）
-        if not client.send((MsgType.HELLO, {"protocol": 1, "name": "stage4"})):
+        if not client.send((MsgType.HELLO, {"protocol": PROTOCOL_VERSION, "name": "stage4"})):
             print("FAIL: 阶段4 send(HELLO) 应返回 True")
             return 1
         own_id = -1
@@ -489,7 +501,7 @@ def main() -> int:
     print("OK: connect() 返回 True")
 
     # 2) echo 收发：发送 (MsgType, payload) 元组，轮询 poll() 收回应
-    client.send((MsgType.HELLO, {"protocol": 1, "name": "selftest"}))
+    client.send((MsgType.HELLO, {"protocol": PROTOCOL_VERSION, "name": "selftest"}))
     echo_received = False
     deadline = time.monotonic() + ECHO_TIMEOUT
     while time.monotonic() < deadline:

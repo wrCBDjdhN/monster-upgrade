@@ -19,7 +19,7 @@
 
 import arcade
 import random
-from config import WINDOW_WIDTH, WINDOW_HEIGHT, NET_PORT, NET_SPAWN_OFFSET
+from config import WINDOW_WIDTH, WINDOW_HEIGHT, NET_PORT, NET_SPAWN_OFFSET, NET_HEARTBEAT_SEC
 from entities.character_defs import CHARACTERS, CHARACTER_ORDER  # 房间内选角（联机开局前必选）
 from views.text_cache import TextCache  # 持久 Text 对象缓存，替代 draw_text
 from views.lobby_tutorial import LobbyTutorial  # 教程辅助模块（页面构建 + 覆盖层绘制）
@@ -92,12 +92,24 @@ class LobbyView(arcade.View):
         self._status = ""
         # HELLO+JOIN 握手已发送标志（client_wait 轮询 state=connected 后发一次，防每帧重发）
         self._handshake_sent = False
+        # 客户端等待页：已告警的未消费消息类型（once-per-type，net 铁律禁静默忽略且防刷屏）
+        self._warned_unknown: set = set()
         # 已加入玩家信息 [(player_id, name, slot)]（host_wait 显示）
         self._players_info: list = []
-        # 全员准备状态：host 维护 {player_id: bool}（含 host=0 恒就绪）；
+        # 全员准备状态：权威表迁至 GameState.net_ready_state（LobbyView/GameView 共享，
+        # ②修复——原存于本视图实例，对局中的 GameView 收到客户端 READY 后无处可写）；
+        # 每新建 LobbyView（回房/首建）重置，保持原「回房重置」语义。
         # client 收到 READY_STATE 后更新 _ready_display（[{player_id, ready, name}] 供显示）
-        self._ready_state: dict = {0: True}
+        window.game_state.net_ready_state = {0: True}
         self._ready_display: list = []
+        # host 提前回房（未收口）时挂载的后台 GameView 引用（game_view._back_to_lobby
+        # 设置）：on_update 每帧转发其 on_update 继续推进对局，直到全员结束收口
+        self._game_view_ref = None
+        # 主机房间页心跳广播（3b 修复）：对局结束后的房间空闲期几乎无下行帧，客户端
+        # 看门狗（对局中布防后 5s 无帧即判定链路已死）会误踢客户端——按 NET_HEARTBEAT_SEC
+        # 周期广播 HEARTBEAT 保活（计时器 + 递增序号）
+        self._hb_bcast_timer = 0.0
+        self._hb_seq = 0
         # 房间结束提示（GameView ROOM_ENDED 回大厅时设置，menu 模式顶部显示）
         self._notice = ""
         # 局域网房间发现
@@ -167,14 +179,12 @@ class LobbyView(arcade.View):
 
     def _broadcast_ready_state(self):
         """主机广播 READY_STATE：全员准备状态（含主机=0 恒就绪），供各端同步显示"""
-        from net.protocol import MsgType
+        from net.protocol import MsgType, build_ready_state_payload
         gs = self.window.game_state
         if self.server is None:
             return
-        players = [{"player_id": 0, "ready": True, "name": gs.player_name}]
-        for pid, name, _ in self.server.player_info():
-            players.append({"player_id": pid, "ready": self._ready_state.get(pid, False), "name": name})
-        self.server.broadcast(MsgType.READY_STATE, {"players": players})
+        self.server.broadcast(MsgType.READY_STATE, build_ready_state_payload(
+            self.server.player_info(), gs.net_ready_state, gs.player_name))
 
     def _toggle_ready(self):
         """客户端准备/取消准备：战备检查 → 翻转本地 net_ready 并上报 READY 给主机"""
@@ -193,6 +203,15 @@ class LobbyView(arcade.View):
                 return
         gs.net_ready = not gs.net_ready
         self.client.send((MsgType.READY, {"player_id": my_id, "ready": gs.net_ready}))
+        # 乐观更新本地槽位显示（②修复）：对局中主机收到 READY 后才广播，不本地更新
+        # 则槽位要等一次网络往返才变；权威 READY_STATE 到达时会整体覆盖纠偏
+        my_entry = next((p for p in self._ready_display
+                         if p.get("player_id") == my_id), None)
+        if my_entry is not None:
+            my_entry["ready"] = gs.net_ready
+        else:
+            self._ready_display.append({"player_id": my_id, "ready": gs.net_ready,
+                                        "name": gs.player_name})
         self._status = ("已准备，等待房主开始游戏…" if gs.net_ready else "已取消准备")
 
     def _enter_host(self):
@@ -235,12 +254,16 @@ class LobbyView(arcade.View):
         self._error = ""
         self._status = f"房间已创建，等待玩家加入…（端口 {NET_PORT}）"
         # 新建房间：准备状态初始化（主机=0 恒就绪，客户端待加入后上报）
-        self._ready_state = {0: True}
+        gs.net_ready_state = {0: True}
         self._ready_display = []
         gs.net_ready = False
         gs.net_wait_reason = ""
         # 新房间：角色映射重置（全员需重新选角，开局前必选，见 _host_start_game 校验）
         gs.net_characters = {}
+        # 新房间：清上一局残留的对局状态与结束提示（1b/3a——不清则旧 alive
+        # 会让玩家行误显示「游戏中」、旧 _notice 会在 menu 顶部残留英文枚举提示）
+        gs.room_player_status = {}
+        self._notice = ""
         self.mode = "host_wait"
 
     def _select_character(self, cid: str):
@@ -286,9 +309,17 @@ class LobbyView(arcade.View):
         if server is None or gs.net_server is None:
             return
         # 全员就绪检查：主机(0)恒就绪，所有已入座客户端必须 ready 才能开局
-        unready = [pid for pid, _, _ in server.player_info() if not self._ready_state.get(pid, False)]
+        unready = [pid for pid, _, _ in server.player_info() if not gs.net_ready_state.get(pid, False)]
         if unready:
             self._status = f"还有 {len(unready)} 名玩家未准备，无法开始游戏"
+            return
+        # 后台对局拦截（②f）：主机提前退出观战回房后上一局仍在后台推进
+        # （_game_view_ref 挂着 GameView），此时开局会让新旧两局的状态机/快照互相
+        # 污染——拒开局，等后台对局收口（_room_ended_handled 置位 → on_update 门控
+        # 释放 _game_view_ref）后再放行
+        gv = self._game_view_ref
+        if gv is not None and not getattr(gv, "_room_ended_handled", False):
+            self._status = "上一局尚未结束，无法开始新对局"
             return
         # 全员角色检查：主机(0) + 所有已入座客户端都必须已选角色（联机开局前必选）
         all_pids = [0] + [pid for pid, _, _ in server.player_info()]
@@ -302,7 +333,7 @@ class LobbyView(arcade.View):
             self._status = f"主机战备不足：{host_error}"
             return
         # 开局后重置准备状态（新一局全员重新准备，避免直接继承上一局就绪态）
-        self._ready_state = {0: True}
+        gs.net_ready_state = {0: True}
         # 修复「同房间每局地图不变」：建房时定的种子（server.room.seed）只应约束首局，
         # 之后每局重新随机种子并写回，保证同一房间多次开局地图布局各不相同。
         # 服务器线程不读写 seed（仅主线程开局时使用），主线程直接更新无并发风险。
@@ -365,6 +396,9 @@ class LobbyView(arcade.View):
         host = self._ip_buffer.strip() or "127.0.0.1"
         self._error = ""
         self._status = "连接中…"
+        # 新连接：清上一房间残留的对局状态与结束提示（1b/3a，与 _enter_host 同口径）
+        gs.room_player_status = {}
+        self._notice = ""
         client = NetClient()
         self.client = client
         self._handshake_sent = False
@@ -450,6 +484,7 @@ class LobbyView(arcade.View):
         gs.net_roster = {}
         gs.net_spawns = {}
         gs.net_characters = {}  # 离开房间：清空角色映射
+        gs.net_ready_state = {0: True}  # 离开房间：权威就绪表复位（下次进房从干净状态开始）
         from views.start_view import StartView
         self.window.show_view(StartView(self.window_ref))
 
@@ -472,20 +507,40 @@ class LobbyView(arcade.View):
                 self._status = f"房间已创建，等待玩家加入…（{len(self._players_info) + 1}/4）"
                 self._notice = ""
             # 新加入玩家：登记未就绪并广播 READY_STATE（各端同步显示准备状态）
-            new_ids = [pid for pid, _, _ in self._players_info if pid not in self._ready_state]
+            new_ids = [pid for pid, _, _ in self._players_info if pid not in gs.net_ready_state]
             if new_ids:
                 for pid, _, _ in self._players_info:
-                    self._ready_state.setdefault(pid, False)
+                    gs.net_ready_state.setdefault(pid, False)
                 self._broadcast_ready_state()
+            # ── 3b 心跳广播：房间空闲期下行几乎无帧（READY_STATE 仅状态变化时发），
+            # 客户端看门狗（对局中布防后 5s 无帧即判定链路已死）会误踢客户端——
+            # 按 NET_HEARTBEAT_SEC 节拍广播 HEARTBEAT 保活（收包即重置 last_recv_age）──
+            self._hb_bcast_timer += delta_time
+            if self._hb_bcast_timer >= NET_HEARTBEAT_SEC:
+                self._hb_bcast_timer = 0.0
+                from net.protocol import MsgType
+                self._hb_seq += 1
+                self.server.broadcast(MsgType.HEARTBEAT,
+                                      {"seq": self._hb_seq, "client_time": 0.0})
+            # ── ②c 后台对局转发：主机提前退出观战回房时，对局仍在本房间继续推进 ──
+            # 同一桥队列每帧只允许一个消费者排空（net 铁律）：本视图先 inbound_poll，
+            # READY/SET_CHARACTER 房间本地处理，其余消息转交后台 GameView 权威执行；
+            # 末尾转发 gv.on_update 推进对局（怪物AI/倒地计时/全员结束 → ROOM_ENDED 收口）。
+            gv = self._game_view_ref
+            if gv is not None and gv._room_ended_handled:
+                self._game_view_ref = None  # 对局已收口：释放引用，避免死引用继续转发
+                gv = None
             # 处理客户端 READY 上报：更新就绪表并广播（全员就绪由 _host_start_game 判定）
             for inbound in self.server.inbound_poll():
                 if not isinstance(inbound, dict):
                     continue
                 if inbound.get("msg_type") == "READY":
-                    pid = (inbound.get("payload") or {}).get("player_id")
+                    # 身份用桥队列顶层 player_id（服务端盖章的发送者），防 payload 伪造；
+                    # 权威表在 GameState（与 GameView 共享，②修复）——get 比较天然 upsert
+                    pid = inbound.get("player_id")
                     ready = bool((inbound.get("payload") or {}).get("ready", False))
-                    if pid in self._ready_state and self._ready_state.get(pid) != ready:
-                        self._ready_state[pid] = ready
+                    if pid is not None and gs.net_ready_state.get(pid) != ready:
+                        gs.net_ready_state[pid] = ready
                         self._broadcast_ready_state()
                         print(f"[LobbyView] 玩家 {pid} 准备状态: {ready}")
                 elif inbound.get("msg_type") == "SET_CHARACTER":
@@ -495,6 +550,28 @@ class LobbyView(arcade.View):
                     if pid is not None and cid:
                         gs.net_characters[pid] = cid
                         print(f"[LobbyView] 玩家 {pid} 选择角色: {cid}")
+                elif inbound.get("msg_type") == "HEARTBEAT":
+                    # 心跳回显（3b，与 GameView._handle_host_inbound HEARTBEAT 分支同口径）：
+                    # 后台对局存在时转交（保持幽灵确保链路），否则直接回显——
+                    # 显式消费，不落入下方"忽略非房间消息"告警（net 铁律）
+                    if gv is not None:
+                        gv._handle_host_inbound(inbound)
+                    else:
+                        from net.protocol import MsgType
+                        self.server.send_to(inbound.get("player_id", 0),
+                                            MsgType.HEARTBEAT,
+                                            inbound.get("payload") or {})
+                elif gv is not None:
+                    # 后台对局进行中：非房间消息全部转交 GameView 权威处理（②c）
+                    gv._handle_host_inbound(inbound)
+                else:
+                    # 显式记录（net 层铁律：禁静默忽略未知/错上下文消息）
+                    print(f"[LobbyView] 忽略非房间消息 "
+                          f"{inbound.get('msg_type')!r}（当前无进行中的对局）")
+            # ②c 末尾转发后台对局：若本帧内对局收口，_broadcast_room_ended 会新建
+            # 房间页替换本视图，本视图剩余代码仅执行这一次即随旧视图丢弃，无害。
+            if gv is not None:
+                gv.on_update(delta_time)
         # 加入等待：轮询连接状态推进握手 + poll 握手/房间消息
         if self.mode == "client_wait" and self.client is not None:
             st = self.client.state
@@ -505,12 +582,13 @@ class LobbyView(arcade.View):
                 # 连接成功：首次补发 HELLO+JOIN 握手（防每帧重发）
                 if not self._handshake_sent:
                     from net.protocol import MsgType
+                    from net.server import PROTOCOL_VERSION  # HELLO 协议版本与服务端校验同源（禁硬编码）
                     self._handshake_sent = True
                     gs.net_mode = "client"
                     gs.net_client = self.client
                     gs.net_room_id = "default"
                     self._status = f"已连接 {self.client.host}，正在加入房间…"
-                    self.client.send((MsgType.HELLO, {"protocol": 1, "name": gs.player_name}))
+                    self.client.send((MsgType.HELLO, {"protocol": PROTOCOL_VERSION, "name": gs.player_name}))
                     self.client.send((MsgType.JOIN, {"name": gs.player_name, "room_id": "default"}))
             elif st == "disconnected":
                 # 连接失败（拒绝/超时/不可达）：报错并回 join 模式
@@ -557,6 +635,26 @@ class LobbyView(arcade.View):
                     self._status = f"本局已结束，等待房主再次开局…"
                     # 新一局重新准备
                     gs.net_ready = False
+                    # 1b 修复：清对局状态——主机收口后不再发 ROOM_STATUS，不清则
+                    # 最后一次 alive/downed 成为陈旧值，玩家行永久显示「游戏中」
+                    gs.room_player_status = {}
+                elif msg_type.name == "HEARTBEAT":
+                    # 3b：主机房间页心跳保活帧，仅用于刷新本端看门狗（收包已重置
+                    # last_recv_age），无业务载荷——显式消费，不落 unknown 告警
+                    pass
+                elif msg_type.name == "ROOM_STATUS":
+                    # 主机对局状态周期广播（②e）：写共享状态供房间页三态显示——
+                    # alive/downed 显示「游戏中」，否则显示准备状态
+                    gs.room_player_status = {
+                        p.get("player_id"): p.get("status")
+                        for p in payload.get("players", []) if isinstance(p, dict)
+                    }
+                else:
+                    # net 铁律：禁静默忽略——对局期快照类消息（20Hz）按类型只告警一次，
+                    # 防日志刷屏；本页只消费房间握手消息，游戏内消息留待 GameView 处理
+                    if msg_type.name not in self._warned_unknown:
+                        self._warned_unknown.add(msg_type.name)
+                        print(f"[Lobby] 客户端等待页忽略未消费消息: {msg_type.name}")
             # 断线感知：连接意外中断 → 回 menu 提示
             if self.client.is_disconnected:
                 if not self._error:
@@ -574,6 +672,11 @@ class LobbyView(arcade.View):
         gs.net_client = None
         gs.net_mode = "solo"
         gs.net_characters = {}  # 断开连接：清空角色映射（重新加入需重新选角）
+        # 离开房间：清对局状态与结束提示残留（1b/3a——不清则回 menu 后
+        # room_player_status 的旧 alive 会在下次进房误显示「游戏中」、
+        # _notice 会在 menu 顶部残留上一局的结束提示）
+        gs.room_player_status = {}
+        self._notice = ""
 
     def _get_battle_readiness_status(self, theme: str) -> tuple[bool, str]:
         """检查当前玩家的战备状态，返回 (passed, status_text)"""
@@ -668,17 +771,23 @@ class LobbyView(arcade.View):
                           arcade.color.WHITE, size=14, anchor_x="center", anchor_y="center")
         # 角色选择区（开局前必选，主机本人在此选角）
         self._draw_char_select(cx)
-        # 玩家列表（主机 + 已加入客户端，含准备状态）
-        players = [("(主机) " + gs.player_name, 0, True)] + [
-            (f"玩家{pid}: {name}", slot, self._ready_state.get(pid, False))
+        # 玩家列表（主机 + 已加入客户端，含三态状态②e：在局中显示「游戏中」，
+        # 已回大厅的显示准备状态——状态源 gs.room_player_status，主机 1Hz 广播维护）
+        players = [(0, "(主机) " + gs.player_name, 0, True)] + [
+            (pid, f"玩家{pid}: {name}", slot, gs.net_ready_state.get(pid, False))
             for pid, name, slot in self._players_info
         ]
         y = WINDOW_HEIGHT // 2 + 80
-        for i, (name, slot, ready) in enumerate(players):
+        for i, (pid, name, slot, ready) in enumerate(players):
             self._tc.text(f"plist_{i}", f"[槽位{slot}] {name}", cx, y,
                           arcade.color.WHITE, size=15, anchor_x="center")
-            self._tc.text(f"plist_ready_{i}", ("✔ 已准备" if ready else "✘ 未准备"),
-                          cx + 170, y, arcade.color.GREEN if ready else arcade.color.ORANGE_RED,
+            if gs.room_player_status.get(pid) in ("alive", "downed"):
+                state_text, state_color = "游戏中", arcade.color.CYAN
+            else:
+                state_text = "✔ 已准备" if ready else "✘ 未准备"
+                state_color = arcade.color.GREEN if ready else arcade.color.ORANGE_RED
+            self._tc.text(f"plist_ready_{i}", state_text,
+                          cx + 170, y, state_color,
                           size=13, anchor_x="center")
             y -= 28
         # 开始游戏按钮（全员就绪判定在 _host_start_game，按钮常亮便于提示）
@@ -867,17 +976,54 @@ class LobbyView(arcade.View):
         # 角色选择区（连接建立后可用，点击上报 SET_CHARACTER 给主机权威映射）
         if self._handshake_sent:
             self._draw_char_select(cx)
-        # 全员准备状态（READY_STATE 广播驱动）
-        if self._ready_display:
+        # 全员状态列表：三源合并出行（1a/1c 修复）——旧版整块由 _ready_display 门控：
+        # 客户端死亡退出观战回房是新建视图（_ready_display=[]），且主机对局中不重播
+        # READY_STATE → 槽位整块空白。现按 pid 合并「名册 net_roster（名字兜底）∪
+        # READY_STATE（名字/准备态权威）∪ ROOM_STATUS（对局状态）」，任一源命中即出行。
+        rows: dict[int, dict] = {}
+        # 源1 名册：进过局后本局结束仍保留（_back_to_lobby 不清 net_roster），兜底名字
+        for pid, info in (gs.net_roster or {}).items():
+            try:
+                pid_i = int(pid)
+            except (TypeError, ValueError):
+                continue
+            rows[pid_i] = {"name": (info or {}).get("name") or f"玩家{pid_i}",
+                           "ready": False}
+        # 源2 READY_STATE：名字与准备态权威（开局前/有人点准备/新玩家加入时广播）
+        for p in self._ready_display:
+            if not isinstance(p, dict) or p.get("player_id") is None:
+                continue
+            try:
+                pid_i = int(p["player_id"])
+            except (TypeError, ValueError):
+                continue
+            row = rows.setdefault(pid_i, {"name": f"玩家{pid_i}", "ready": False})
+            if p.get("name"):
+                row["name"] = p["name"]
+            row["ready"] = bool(p.get("ready", False))
+        # 源3 对局状态：alive/downed → 游戏中（主机 1Hz 广播维护，收口后已清空）
+        for pid, status in gs.room_player_status.items():
+            try:
+                pid_i = int(pid)
+            except (TypeError, ValueError):
+                continue
+            rows.setdefault(pid_i, {"name": f"玩家{pid_i}", "ready": False})
+            rows[pid_i]["status"] = status
+        if rows:
             y = WINDOW_HEIGHT // 2 + 4
-            for p in self._ready_display:
-                name = p.get("name", f"玩家{p.get('player_id')}")
-                ready = p.get("ready", False)
-                self._tc.text(f"cw_ready_{p.get('player_id')}", f"{name}：",
+            for pid_i in sorted(rows.keys()):  # 升序：主机 0 恒排首行
+                row = rows[pid_i]
+                name = row.get("name") or f"玩家{pid_i}"
+                ready = bool(row.get("ready", False))
+                self._tc.text(f"cw_ready_{pid_i}", f"{name}：",
                               cx - 40, y, arcade.color.WHITE, size=14, anchor_x="center")
-                self._tc.text(f"cw_ready_state_{p.get('player_id')}",
-                              ("✔ 已准备" if ready else "✘ 未准备"),
-                              cx + 40, y, arcade.color.GREEN if ready else arcade.color.ORANGE_RED,
+                if row.get("status") in ("alive", "downed"):
+                    state_text, state_color = "游戏中", arcade.color.CYAN
+                else:
+                    state_text = "✔ 已准备" if ready else "✘ 未准备"
+                    state_color = arcade.color.GREEN if ready else arcade.color.ORANGE_RED
+                self._tc.text(f"cw_ready_state_{pid_i}", state_text,
+                              cx + 40, y, state_color,
                               size=14, anchor_x="center")
                 y -= 18
         # 准备 / 取消准备按钮（已连接后可用）

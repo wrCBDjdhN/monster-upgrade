@@ -78,12 +78,18 @@ def spend_warehouse_item(player_id: int, item_id: str, qty: int = 1) -> bool:
         return True
 
 
-def sell_warehouse_item(pid: int, item_id: int) -> tuple[int, str]:
+def sell_warehouse_item(pid: int, item_id: int, qty: int | None = None) -> tuple[int, str]:
     """售卖仓库物品，返回 (获得金币数, item_id)
 
     价格：
     - 资源：sell_price × 数量
-    - 武器：伤害 × 2
+    - 武器：伤害 × 2（quantity × 10）
+
+    qty 参数（2026-10-04 新增，仓库售卖选数量面板）：
+    - None：整栈售出（保持旧行为，向后兼容所有既有调用方）
+    - 正整数：按指定数量部分售出，gold = 单价 × 实售数量；
+      实售数钳位在 1..quantity，部分售出时 UPDATE quantity 减量，
+      整栈售完才 DELETE 行（与 spend_warehouse_item 的减量口径一致）
     """
     with _conn() as c:
         row = c.execute(
@@ -93,14 +99,20 @@ def sell_warehouse_item(pid: int, item_id: int) -> tuple[int, str]:
         if not row:
             return 0, ""
         wid, item_type, db_item_id, quantity = row
+        # 部分售出数量解析：None=整栈；否则钳位到 1..库存（0/负数/超量一律按合法值收敛）
+        sell_qty = quantity if qty is None else max(1, min(int(qty), quantity))
         if item_type == "resource":
             from entities.resource_defs import RESOURCES
             info = RESOURCES.get(db_item_id, {})
             sell_price = info.get("sell_price", 1)
-            gold_earned = sell_price * quantity
+            gold_earned = sell_price * sell_qty
         else:
-            gold_earned = quantity * 10  # 武器默认价格
-        c.execute("DELETE FROM warehouse_items WHERE id=?", (wid,))
+            gold_earned = sell_qty * 10  # 武器默认价格
+        if sell_qty >= quantity:
+            c.execute("DELETE FROM warehouse_items WHERE id=?", (wid,))
+        else:
+            c.execute("UPDATE warehouse_items SET quantity=? WHERE id=?",
+                      (quantity - sell_qty, wid))
         c.execute("UPDATE players SET gold=gold+? WHERE id=?", (gold_earned, pid))
         return gold_earned, db_item_id
 
