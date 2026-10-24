@@ -740,6 +740,29 @@ def update_skill_buffs(monster, delta_time: float):
         monster._skill_buff_original = 0
 
 
+def update_skill_cast(monster, delta_time: float):
+    """BOSS 技能前摇计时（每帧调用，由 monster_base 近战/远程两基类 update 接入）
+
+    前摇由 monsters._boss_try_skill 起手时写入 monster._skill_cast
+    （emitter/目标/配置快照）；归零才真正结算（调 emitter）。
+    - 预警提示（_skill_prompt_* / _skill_vfx_*）计时器与本计时器同步递减，
+      故归零瞬间头顶文字与范围圈恰好消失、技能同时落地；
+    - BOSS 中途死亡（alive=False）立即取消不结算；
+    - 无前摇的普通怪 getattr 返回 None，直接 no-op（零开销）。
+    """
+    cast = getattr(monster, "_skill_cast", None)
+    if not cast:
+        return
+    if not getattr(monster, "alive", False):
+        monster._skill_cast = None  # 死亡取消前摇
+        return
+    cast["left"] -= delta_time
+    if cast["left"] > 0:
+        return
+    monster._skill_cast = None
+    cast["emitter"](cast["player"], cast["players"], cast["cfg"])
+
+
 def show_combo_prompt(monsters, combo_name, combo_color=(255, 200, 100)):
     """显示组合技能提示（多个怪物协同）
     

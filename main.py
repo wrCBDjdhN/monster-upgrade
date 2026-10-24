@@ -235,6 +235,8 @@ class GameState:
         self.current_weapon_kind: str = "melee"     # 当前武器类型: "melee"(近战) 或 "ranged"(远程)
         self.current_weapon_id: int | None = None   # 当前武器数据库 ID
         self.current_weapon_item_id: str | None = None  # 当前武器物品ID（如 "iron_sword"），用于渲染
+        self.weapon_level: int = 0               # 当前武器等级（阶段D：BOSS 装等门槛消费，
+        # 不足则对 BOSS 伤害打折，见 config.BOSS_UNDERLEVEL_*；setup/免费拾取双写，联机经 ATTACK_EVENT 上报）
         self.equipped_weapon_id: int | None = None  # 从仓库选择携带的武器 ID（进入游戏前选择）
         self.equipped_helmet_id: str | None = None  # 当前装备的头盔 ID（从数据库加载）
         self.equipped_armor_id: str | None = None   # 当前装备的护甲 ID（从数据库加载）

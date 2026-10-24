@@ -57,26 +57,33 @@ MONSTER_COMPOSITIONS = {
 }
 
 # BOSS召唤配置：定义每个BOSS可以召唤的怪物类型和数量
+# 字段：summons=召唤列表[(类名,min,max)] / cooldown=召唤冷却秒数 /
+#       phase_thresholds=血量阈值（降序，各触发一次）/ text+text_color=召唤时漂浮提示
+# 消费方：game/monsters.py 的 _boss_tick（阶段B 收口，cooldown/阈值不再由各 __init__ 硬编码）
 BOSS_SUMMON_CONFIG = {
     "BossZombie": {
         "summons": [("Zombie", 2, 3)],  # 召唤2-3只僵尸
         "cooldown": 15.0,  # 15秒冷却
         "phase_thresholds": [0.6, 0.3],  # 血量60%和30%时触发召唤
+        "text": "召唤僵尸!", "text_color": (255, 100, 50),
     },
     "BossSkeleton": {
         "summons": [("Skeleton", 3, 4)],  # 召唤3-4只骷髅
         "cooldown": 12.0,
         "phase_thresholds": [0.6, 0.3],
+        "text": "召唤骷髅!", "text_color": (100, 150, 255),
     },
     "BossMummy": {
         "summons": [("MummyMelee", 2, 2), ("MummyRanged", 2, 2)],  # 召唤2近战+2远程木乃伊
         "cooldown": 18.0,
         "phase_thresholds": [0.6, 0.3],
+        "text": "召唤木乃伊!", "text_color": (180, 160, 100),
     },
     "BossSpace": {
         "summons": [("Sniper", 1, 2), ("Assault", 2, 3), ("RocketTroop", 1, 1)],  # 召唤混合部队
         "cooldown": 20.0,
         "phase_thresholds": [0.7, 0.4, 0.1],  # 三次召唤
+        "text": "召唤援军!", "text_color": (255, 80, 30),
     },
 }
 
@@ -93,19 +100,34 @@ BOSS_SUMMON_CONFIG = {
 #   debuff_id / debuff_level       技能附带 debuff 的 id（effects_defs.EFFECTS 键）与效果等级 1-5
 #   stun / stun_level              眩晕秒数与等级；等级取 5（效果表上限），实际时长以 stun 为准
 #   pull                           标记牵引类技能；本项目无位移机制，落地时降级为眩晕+减速
+#   cast_time                      前摇秒数（阶段A）：>0 时先预警（头顶提示+AOE 范围圈）
+#                                  cast_time 秒，归零才真正结算；0/缺省 = 立即释放（旧行为）。
+#                                  冷却在前摇开始时即扣除；预警字段复用已同步的
+#                                  _skill_prompt_* / _skill_vfx_*（客户端零新协议可见）
+#   phases                         解锁阶段门槛（阶段C）：怪物已转阶段数 _boss_phase_idx
+#                                  >= phases 才可施放；0/缺省 = 开场即可用
 BOSS_SKILLS = {
     "BossZombie": [
         {
             "id": "flame_charge", "name": "烈焰冲击", "cooldown": 8.0,
             "damage_mult": 1.5, "range": 200, "type": "cone",
-            "debuff_id": "burn", "debuff_level": 2,
+            "debuff_id": "burn", "debuff_level": 2, "cast_time": 0.8,
             "description": "向前方扇形范围发射火焰弹幕",
         },
         {
             "id": "zombie_roar", "name": "僵尸咆哮", "cooldown": 15.0,
             "damage_mult": 0, "range": 120, "type": "aoe",
             "stun": 2.0, "stun_level": 5, "aoe_radius": 120, "aoe_center": "self",
+            "cast_time": 1.0,
             "description": "咆哮眩晕周围玩家 2 秒",
+        },
+        {
+            # 阶段C 新技能：首次转阶段（血量 60%）后解锁
+            "id": "quake_slam", "name": "震地猛击", "cooldown": 14.0, "phases": 1,
+            "damage_mult": 1.8, "range": 180, "type": "aoe",
+            "aoe_radius": 160, "aoe_center": "self",
+            "stun": 1.0, "stun_level": 5, "cast_time": 1.0,
+            "description": "重击地面，震晕周围玩家 1 秒（首次转阶段后解锁）",
         },
     ],
     "BossSkeleton": [
@@ -113,6 +135,7 @@ BOSS_SKILLS = {
             "id": "skeleton_rain", "name": "骷髅箭雨", "cooldown": 10.0,
             "damage_mult": 1.2, "range": 350, "type": "aoe",
             "aoe_radius": 80, "aoe_center": "target", "projectile_count": 8,
+            "cast_time": 1.0,
             "description": "在目标位置召唤 8 支箭从天而降",
         },
         {
@@ -120,8 +143,16 @@ BOSS_SKILLS = {
             "damage_mult": 1.0, "range": 150, "type": "aoe",
             "aoe_radius": 150, "aoe_center": "self",
             "debuff_id": "freeze", "debuff_level": 2,
-            "stun": 1.5, "stun_level": 5,
+            "stun": 1.5, "stun_level": 5, "cast_time": 0.8,
             "description": "以自身为中心释放冰冻波",
+        },
+        {
+            # 阶段C 新技能：首次转阶段（血量 60%）后解锁
+            "id": "bone_storm", "name": "白骨旋风", "cooldown": 15.0, "phases": 1,
+            "damage_mult": 1.4, "range": 220, "type": "aoe",
+            "aoe_radius": 140, "aoe_center": "self",
+            "debuff_id": "slow", "debuff_level": 2, "cast_time": 0.9,
+            "description": "旋起骨片风暴撕扯周围玩家并减速（首次转阶段后解锁）",
         },
     ],
     "BossMummy": [
@@ -129,29 +160,44 @@ BOSS_SKILLS = {
             "id": "poison_fog", "name": "毒雾弥漫", "cooldown": 12.0,
             "damage_mult": 0.8, "range": 180, "type": "aoe",
             "aoe_radius": 180, "aoe_center": "self",
-            "debuff_id": "poison", "debuff_level": 2,
+            "debuff_id": "poison", "debuff_level": 2, "cast_time": 1.0,
             "description": "释放大范围毒雾区域，持续中毒",
         },
         {
             "id": "mummy_grab", "name": "木乃伊缠绕", "cooldown": 20.0,
             "damage_mult": 1.3, "range": 100, "type": "aoe",
             "debuff_id": "slow", "debuff_level": 2,
-            "stun": 2.5, "stun_level": 5, "pull": True,
+            "stun": 2.5, "stun_level": 5, "pull": True, "cast_time": 0.7,
             "description": "拉近玩家并眩晕 2.5 秒（无位移机制，实为眩晕+减速）",
+        },
+        {
+            # 阶段C 新技能：首次转阶段（血量 60%）后解锁
+            "id": "scarab_swarm", "name": "圣甲虫群", "cooldown": 16.0, "phases": 1,
+            "damage_mult": 1.2, "range": 300, "type": "projectile",
+            "projectile_count": 5,
+            "debuff_id": "poison", "debuff_level": 2, "cast_time": 0.9,
+            "description": "放出圣甲虫群噬咬目标并使其中毒（首次转阶段后解锁）",
         },
     ],
     "BossSpace": [
         {
             "id": "laser_sweep", "name": "激光扫射", "cooldown": 10.0,
             "damage_mult": 2.0, "range": 400, "type": "cone",
-            "aoe_center": "self",
+            "aoe_center": "self", "cast_time": 1.2,
             "description": "发射旋转激光（扇形范围持续伤害）",
         },
         {
             "id": "missile_barrage", "name": "导弹齐射", "cooldown": 16.0,
             "damage_mult": 1.5, "range": 350, "type": "missile",
-            "aoe_center": "target", "projectile_count": 3,
+            "aoe_center": "target", "projectile_count": 3, "cast_time": 0.9,
             "description": "向玩家位置发射 3 枚追踪导弹",
+        },
+        {
+            # 阶段C 新技能：首次转阶段（血量 70%）后解锁
+            "id": "orbital_strike", "name": "轨道打击", "cooldown": 18.0, "phases": 1,
+            "damage_mult": 2.2, "range": 400, "type": "aoe",
+            "aoe_radius": 120, "aoe_center": "target", "cast_time": 1.4,
+            "description": "呼叫轨道光束轰击目标位置（首次转阶段后解锁）",
         },
     ],
 }

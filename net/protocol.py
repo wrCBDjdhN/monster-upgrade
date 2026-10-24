@@ -45,6 +45,7 @@ class MsgType(Enum):
     PROJECTILE_SNAPSHOT = "PROJECTILE_SNAPSHOT"      # 弹丸快照
     # ── 攻击 / 伤害 ──
     ATTACK_EVENT = "ATTACK_EVENT"    # 客户端→主机：上报攻击动作（主机收敛判定）
+    ATTACK_VFX = "ATTACK_VFX"        # 主机→全部：攻击表现（挥砍刀光/开火闪白，纯视觉同步）
     DAMAGE_RESULT = "DAMAGE_RESULT"  # 主机→全部：伤害判定结果
     PLAYER_HURT = "PLAYER_HURT"      # 主机→全部：玩家受伤（HP 主机权威）
     PLAYER_DEATH = "PLAYER_DEATH"    # 主机→该玩家：玩家死亡
@@ -255,7 +256,13 @@ MESSAGE_SCHEMAS: dict[MsgType, str] = {
         "       'skill_vfx_color': list|None,   技能范围圈颜色 [r,g,b]\n"
         "       'skill_buff_type': str|None,   怪物自身 buff 类型（berserk/bone_shield/\n"
         "                              tactical_retreat，None=无；客户端据此画 buff 标记）\n"
-        "       'skill_buff_timer': float}     自身 buff 剩余时间（秒，客户端本地递减）\n"
+        "       'skill_buff_timer': float,     自身 buff 剩余时间（秒，客户端本地递减）\n"
+        "       'atk_vfx_kind': str|None,      攻击表现类型：'melee'=挥砍刀光+闪白 /\n"
+        "                              'ranged'/'laser'=开火闪白 / None=无（2026-10-17\n"
+        "                              怪物攻击特效；客户端本地递减 timer）\n"
+        "       'atk_vfx_timer': float,        攻击表现剩余时间（秒，客户端本地递减）\n"
+        "       'atk_vfx_angle': float,        攻击方向（弧度，刀光方向基准）\n"
+        "       'atk_vfx_range': float}        刀光半径（像素，近战射程）\n"
         "}"
     ),
     MsgType.PROJECTILE_SNAPSHOT: (
@@ -291,8 +298,28 @@ MESSAGE_SCHEMAS: dict[MsgType, str] = {
         "  'damage': float,      实际伤害（升级武器以客户端为准，主机据此裁决）\n"
         "  'debuffs': list,      客户端装备/武器附加 debuff 列表 [(效果ID, 等级), ...]\n"
         "  'timestamp': float,   客户端时间戳（毫秒，用于去重/延迟测量）\n"
+        "  'weapon_level': int,  可选，客户端当前武器等级（阶段D：主机写到幽灵同名属性，\n"
+        "                          供 BOSS required_weapon_level 不足打折判定；缺省 0）\n"
         "  'attack_speed': float} 可选，客户端所持武器攻速（连发/激光武器以主机时序为准时，\n"
         "                          客户端据本地武器攻速上报；缺省时主机退回武器定义默认攻速）\n"
+    ),
+    MsgType.ATTACK_VFX: (
+        "主机→全部客户端：攻击表现同步（纯视觉，不参与任何伤害/命中裁决）。\n"
+        "用途：联机时让「别人看到我的攻击」——主机在本地玩家攻击、以及裁决客户端\n"
+        "ATTACK_EVENT 时各广播一次；客户端收到后在对应幽灵身上播放刀光/闪白。\n"
+        "（怪物攻击表现不走本消息，随 MONSTER_SNAPSHOT 的 atk_vfx_* 字段下发。）\n"
+        "payload: {\n"
+        "  'attacker_id': int,   攻击者玩家 id（主机本地玩家 = gs.net_player_id；\n"
+        "                        客户端收到自己 id 时忽略——本地已有表现，防重复绘制）\n"
+        "  'kind': str,          攻击类型：'melee'=挥砍刀光+闪白 / 'ranged'=开火闪白\n"
+        "                        / 'laser'=激光开火闪白（远程弹丸/激光本身已快照同步）\n"
+        "  'x': float, 'y': float,  攻击瞬间攻击者世界坐标（刀光圆心；不取幽灵当前\n"
+        "                        位置——幽灵由 20Hz 快照驱动有滞后，直接用本帧实测值）\n"
+        "  'angle': float,       攻击方向（弧度，客户端据此推算刀光目标点）\n"
+        "  'range': float}       攻击距离（像素，刀光半径 = 武器近战射程）\n"
+        "注：本消息**单向**（仅主机→客户端）。客户端若上报本消息，主机按未知消息\n"
+        "    显式告警丢弃（_handle_host_inbound 未接线分支），不做任何表现。\n"
+        "    远端表现只画特效**不播音效**（用户决策 2026-10-17，避免联机混战音效叠加）。\n"
     ),
     MsgType.DAMAGE_RESULT: (
         "主机广播伤害判定结果，各端据此更新怪物血量显示。\n"
@@ -583,7 +610,7 @@ MESSAGE_SCHEMAS: dict[MsgType, str] = {
     ),
     MsgType.MISSION_PROGRESS: (
         "主机→指定玩家：该玩家的任务/成就进度增量（阶段6.2 联机双端口径）。\n"
-        "防双计铁律：局内战斗事件（kill/elite_kill/harvest/chest/evac）唯一计数端=主机，\n"
+        "防双计铁律：局内战斗事件（kill/elite_kill/boss_kill/harvest/chest/evac）唯一计数端=主机，\n"
         "主机按归属裁决（击杀按 last_attacker_id、采集/开箱按发起者、撤离按结算玩家）后\n"
         "单播给归属客户端，客户端据此写自己的本地库；客户端永不自计局内战斗事件。\n"
         "本消息为单向（主机→客户端）：客户端上报同名消息一律显式忽略（防伪造他人进度）。\n"
@@ -592,7 +619,7 @@ MESSAGE_SCHEMAS: dict[MsgType, str] = {
         "进度不纳入 FULL_STATE：各端进度落各自本地库，无需全量同步。\n"
         "payload: {\n"
         "  'player_id': int,  归属玩家的联机传输 id\n"
-        "  'event': str,      事件键（kill/elite_kill/harvest/chest/evac/forge/reforge）\n"
+        "  'event': str,      事件键（kill/elite_kill/boss_kill/harvest/chest/evac/forge/reforge）\n"
         "  'amount': int}     本次增量次数\n"
     ),
     MsgType.HEARTBEAT: (

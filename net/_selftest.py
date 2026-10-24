@@ -127,7 +127,7 @@ EVAC_POINT_ACTIONS = ("activate", "repair")                           # 撤离�
 # 任务/成就事件键全集：镜像 entities/mission_defs.MISSION_EVENT_KEYS
 # （net 自检不 import entities/game，避免与游戏层耦合；键集变更需同步此处）
 MISSION_EVENT_KEYS = (
-    "kill", "elite_kill", "harvest", "chest", "evac", "forge", "reforge",
+    "kill", "elite_kill", "boss_kill", "harvest", "chest", "evac", "forge", "reforge",
 )
 
 # 新消息载荷样例（encode/decode 往返用例）：覆盖本版本新增/扩展的消息
@@ -227,6 +227,15 @@ _ROUNDTRIP_CASES: tuple[tuple[str, MsgType, dict], ...] = (
     ("PLAYER_ABANDON_RESULT/受理", MsgType.PLAYER_ABANDON_RESULT, {
         "player_id": 2, "ok": True, "reason": None,
     }),
+    # 攻击表现同步（ATTACK_VFX）：主机→客户端单向广播，纯视觉无伤害判定
+    ("ATTACK_VFX/近战刀光", MsgType.ATTACK_VFX, {
+        "attacker_id": 1, "kind": "melee", "x": 320.0, "y": 240.0,
+        "angle": 0.7853981, "range": 65.0,
+    }),
+    ("ATTACK_VFX/远程闪白", MsgType.ATTACK_VFX, {
+        "attacker_id": 2, "kind": "ranged", "x": 100.0, "y": 200.0,
+        "angle": -1.5707963, "range": 0.0,
+    }),
     # 断线广播（peer_id + reason）
     ("DISCONNECT", MsgType.DISCONNECT, {
         "peer_id": 2, "reason": "connection_closed",
@@ -317,6 +326,9 @@ _SCHEMA_KEY_EXPECT: tuple[tuple[MsgType, tuple[str, ...]], ...] = (
     (MsgType.EVAC_POINT_RESULT, ("player_id", "ok", "reason", "action")),
     # 怪物范围技能 debuff 送达（单播归属端）：键名必须写进 schema，否则接线无从查
     (MsgType.SKILL_DEBUFF, ("player_id", "debuffs")),
+    # 攻击表现同步（2026-10-17）：键名必须写进 schema，否则接线无从查
+    (MsgType.ATTACK_VFX, ("attacker_id", "kind", "x", "y", "angle", "range")),
+    (MsgType.MONSTER_SNAPSHOT, ("atk_vfx_kind", "atk_vfx_timer", "atk_vfx_angle", "atk_vfx_range")),
 )
 
 # 非法帧样本：(说明, 原始 JSON 帧) —— decode 必须一律抛 ValueError，禁止静默忽略

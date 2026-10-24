@@ -85,7 +85,12 @@ class EvacResultView(arcade.View):
             f"  · 按 {k_destroy} 炸毁发射台 → 立即获得大量奖励，随后地图毁灭需马上撤离",
             f"  · 按 {k_rocket_evac} 启用发射台撤离 → 站上平台读条 {evac_hold_seconds()} 秒撤离，"
             f"同样带走战利品",
-        ], next_text="查看结算"))
+        ]))
+        # ── 教程完善（2026-10-24）：撤离后详解精英词缀与随机事件（游戏内横幅只
+        #    一句带过，详情在这弹；内容从 entities 数据表动态生成，禁硬编码）──
+        from views.tutorial import build_elite_affix_pages, build_map_event_pages
+        pages.extend(build_elite_affix_pages())
+        pages.extend(build_map_event_pages())
         if self.success:
             pages.append(TutorialPage("本局结算", [
                 "本局你从普通撤离点撤离成功，",
@@ -96,9 +101,12 @@ class EvacResultView(arcade.View):
             ]))
         else:
             # 教程事实修正（2026-09-26）：失败局不能复用成功局文案
+            # 教程完善（2026-10-24）：补背包保底说明（任务3——死亡清装后系统
+            # 兜底补发新手背包，见 db.players.ensure_starter_backpack）
             pages.append(TutorialPage("本局结算", [
                 "本局没能撤出，携带的武器/装备/资源与金币全部丢失。",
-                "（仓库里原本存放的东西不受影响。）",
+                "（仓库里原本存放的东西不受影响；",
+                "背包会被系统保底补发，不会失去拾取能力。）",
                 "",
                 "想撤出：撤离点要先靠近按 " + k_atk + " 消耗材料激活，",
                 f"守住防守波次后再按 {k_atk} 读条 {evac_hold_seconds()} 秒。",

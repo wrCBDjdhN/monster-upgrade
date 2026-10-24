@@ -1,9 +1,11 @@
 """新手教程模块：向导弹窗组件 + 游戏内引导提示
 
 首次启动启用（db settings 未标记 tutorial_done 时）。教程流程：
-  开始界面向导 → 角色选择向导 → 地图选择向导 → 游戏内引导（打怪/拾取/小地图/建造/撤离）
-  → 撤离结算 + BOSS/火箭发射台教学（成功与失败两套文案）+ 星级结算
-  → 市场买卖/设施/图鉴教学 → 标记完成。
+  开始界面向导 → 角色选择向导 → 地图选择向导 → 游戏内引导（打怪/拾取/小地图/
+  建造+精英祝福 + 按撤离点状态分步指引直到撤离）
+  → 撤离结算 + BOSS/火箭发射台教学（成功与失败两套文案，含 BOSS 阶段强化/
+  装等打折/必掉奖励）+ 精英词缀/随机事件详解 + 星级结算
+  → 市场买卖/设施/图鉴/套装教学 → 标记完成。
 
 向导弹窗：不透明深色遮罩 + 高亮框 + 中文说明 + 下一步/跳过按钮；
 任意时刻按 ESC 或点跳过 → 立即结束教程并标记完成（之后不再出现）。
@@ -19,6 +21,9 @@ config.KEY_BINDINGS），造价/读条秒数/星级/设施等级/图鉴档位/�
 
 import arcade
 from config import (
+    BOSS_BONUS_MIN_LEVEL,
+    BOSS_UNDERLEVEL_MIN_MULT,
+    BOSS_UNDERLEVEL_PENALTY_PER_LEVEL,
     EVAC_CHANNEL_TIME,
     EVAC_DEFAULT_THEME,
     KEY_BINDINGS,
@@ -241,8 +246,9 @@ def draw_in_game_tutorial(view, tc):
 
     调用点：render_game HUD 阶段末尾。仅在教程激活且处于游戏内阶段时绘制。
     推进条件链（只看可观测事实，禁额外埋点）：kill_count → pickup_count →
-    minimap_taught → 终态（建造/祝福 + 撤离）。终态不再自动推进，避免玩家
-    没开过建造模式就被卡在建造页看不到撤离指引。
+    minimap_taught → kill_count≥3（精英/祝福一句带过，详见撤离后弹窗）→
+    终态（建造 + 按撤离点真实状态分步指引，直到撤离完成）。终态不再自动
+    推进，避免玩家没开过建造模式就被卡住看不到撤离指引。
     """
     gs = view.window.game_state
     tut = getattr(gs, "tutorial", None)
@@ -272,27 +278,45 @@ def draw_in_game_tutorial(view, tc):
         tut_banner(view, f"按 {k_map} 切换小地图视野/全图  图例: 浅灰=房间 黄=宝箱 绿=撤离点 "
                         f"金=BOSS 白=自己 橙=队友",
                    tc, "tut_banner_map")
+    elif tut.kill_count < 3:
+        # 小地图已讲：一句带过精英/祝福机制（详解在撤离后弹窗页），再攒几杀进终态
+        tut_banner(view, "精英怪带强力词缀（狂暴/分裂/火墙/召唤/护盾），",
+                   tc, "tut_banner_elite",
+                   sub="击杀精英掉落更好并触发祝福 3 选 1；再击杀几只怪物，随后指引撤离")
     else:
-        # 小地图已讲解：主行讲建造 + 祝福，副行讲撤离（BOSS 介绍在撤离后单独展示）
+        # 终态：主行讲建造，副行按撤离点**真实状态**分步指引（dormant→defending
+        # →secured / destroyed），跟着战况走直到撤离完成——满足「指引直到撤离」。
         # 教程事实错误修正（2026-09-26）：原文案「站上去读条 3 秒即可撤离」是 v1
         # 规则。现行机制 = 蓝色方块撤离点须靠近按 E 消耗材料激活 → 进入防守波次
-        # （倒计时防守）→ 守住后再按 E 读条撤离；撤离点被打成废墟可按 E
-        # 消耗材料修复重守。造价/读条秒数一律实查 config.evac_activate_cost(theme)
-        # 与 config.EVAC_CHANNEL_TIME，此处不写死数字以免再次过期。
-        tut_banner(view, f"按 {k_build} 进入建造模式：{k_num} 选建筑、左键放置、"
-                        f"ESC 退出；击杀精英会触发祝福 3 选 1",
+        # （倒计时防守）→ 守住后站上点**按住** E 读条撤离（EvacState 需 holding
+        # 才推进读条）；撤离点被打成废墟可按 E 消耗材料修复重守。
+        ep = getattr(view, "evac_point", None)
+        st = getattr(ep, "state", None)
+        if st == "defending":
+            left = max(0, int(round(getattr(ep, "defend_left", 0.0))))
+            evac_line = f"撤离点防守中：守住波次（剩 {left} 秒）！按 {k_build} 建造防御工事"
+        elif st == "secured":
+            evac_line = (f"撤离点已守住！站到点上按住 {k_atk} 读条 "
+                         f"{evac_hold_seconds()} 秒完成撤离")
+        elif st == "destroyed":
+            evac_line = f"撤离点被摧毁！靠近废墟按 {k_atk} 消耗 {evac_cost_label(theme)} 修复重守"
+        else:  # dormant（含 None 兜底）
+            evac_line = f"撤离：找到蓝色方块，靠近按 {k_atk} 消耗 {evac_cost_label(theme)} 激活"
+        tut_banner(view, f"按 {k_build} 进入建造模式：{k_num} 选建筑、左键放置、ESC 退出",
                    tc, "tut_banner_build",
-                   sub=f"撤离：靠近蓝色方块按 {k_atk} 消耗 {evac_cost_label(theme)} 激活 → "
-                       f"守住防守波次 → 再按 {k_atk} 读条 {evac_hold_seconds()} 秒撤离"
-                       f"（被拆成废墟可按 {k_atk} 修复）")
+                   sub=evac_line)
 
 
 def build_boss_intro_pages():
-    """BOSS 介绍向导页（4 页）：撤离后展示，介绍 BOSS 房间机制
+    """BOSS 介绍向导页（5 页）：撤离后展示，介绍 BOSS 房间机制与 v2.2 战斗规则
 
     装备等级门槛实查 boss_level_label()（读 MONSTER_CONFIGS 里 BOSS 条目的
     required_weapon_level），禁写死 "Lv5+"——门槛一改这里就会过期。
+    装等打折与必掉奖励等级同样实查 config.BOSS_UNDERLEVEL_*/BOSS_BONUS_MIN_LEVEL。
     """
+    # 装等每差 1 级的伤害折减与下界（config.BOSS_UNDERLEVEL_*，与 combat._underlevel_mult 同源）
+    pen_pct = int(round(BOSS_UNDERLEVEL_PENALTY_PER_LEVEL * 100))
+    min_pct = int(round(BOSS_UNDERLEVEL_MIN_MULT * 100))
     return [
         TutorialPage("BOSS 房间介绍", [
             "地图上标有金色方块的房间是 BOSS 房间。",
@@ -307,22 +331,72 @@ def build_boss_intro_pages():
             "",
             "击败 BOSS 后门洞自动解除封锁。",
         ]),
-        TutorialPage("💥 BOSS 技能", [
-            "每个 BOSS 拥有 2 个专属技能，",
-            "技能会定期自动释放，造成范围伤害。",
+        TutorialPage("💥 BOSS 技能与前摇", [
+            "每个 BOSS 拥有 2 个专属基础技能，",
+            "战斗中血量下降还会解锁新的强力技能！",
             "",
-            "注意观察 BOSS 的动作前摇：",
-            "技能释放前会有短暂的粒子特效提示。",
+            "技能释放前有明显前摇预警：",
+            "地面出现范围圈、读条提示，看到立刻躲开。",
+        ]),
+        TutorialPage("📈 BOSS 阶段强化", [
+            "BOSS 血量每下降一档就进入新阶段：",
+            "移速与伤害提升，技能冷却缩短，",
+            "越拖越危险——技能还会翻新。",
+            "",
+            "最后阶段 BOSS 会进入狂暴：",
+            "攻速拉满、死战不退，速战速决！",
         ]),
         TutorialPage("准备挑战", [
             "确保装备充足、药水备好！",
+            f"推荐 {boss_level_label()} 装备再挑战；",
+            f"装等不足会被打折：每差 1 级伤害降低 {pen_pct}%，",
+            f"最低保底 {min_pct}% 伤害。",
             "",
-            f"推荐 {boss_level_label()} 装备再挑战 BOSS。",
-            "击败 BOSS 可获得稀有装备和神器。",
-            "",
+            f"击败 BOSS 必掉 Lv{BOSS_BONUS_MIN_LEVEL}+ 稀有装备，",
+            "并必定获得一次祝福强化！",
             "祝你好运，勇者！",
         ], next_text="了解"),
     ]
+
+
+def build_elite_affix_pages() -> list:
+    """精英词缀详解页（撤离后弹窗）：词缀名/效果从 ELITE_AFFIXES 动态生成
+
+    每条词缀一页标题 + desc 两行；条目数随数据表增减自动适配（禁硬编码条目）。
+    """
+    from entities.monster_defs import ELITE_AFFIXES
+    pages = [TutorialPage("精英怪 · 强力词缀", [
+        "精英怪体型更大、血更厚，还带一条随机词缀：",
+        "血条下方有词缀标记，看到要格外小心。",
+        "",
+        "击杀精英掉落更好，并触发祝福 3 选 1！",
+    ])]
+    for aff in ELITE_AFFIXES.values():
+        pages.append(TutorialPage(f"词缀 · {aff['name']}", [
+            str(aff.get("desc", "")),
+            "",
+            "（同一只精英只带一条词缀，认准标记再动手）",
+        ]))
+    return pages
+
+
+def build_map_event_pages() -> list:
+    """随机事件详解页（撤离后弹窗）：事件名/效果从 MAP_EVENTS 动态生成
+
+    每局开局随机抽一个事件（横幅提示）；条目数随数据表自动适配。
+    """
+    from entities.event_defs import MAP_EVENTS
+    pages = [TutorialPage("随机事件", [
+        "每局开局会随机触发一种事件，",
+        "屏幕上方横幅会告知具体是哪种。",
+        "",
+        "利用好事件能更快发育！",
+    ])]
+    for ev in MAP_EVENTS.values():
+        pages.append(TutorialPage(f"事件 · {ev['name']}", [
+            str(ev.get("banner", "")),
+        ]))
+    return pages
 
 
 def build_warehouse_capacity_page(highlight=None) -> TutorialPage:

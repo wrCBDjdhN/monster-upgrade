@@ -32,6 +32,7 @@ from config import (
     MONSTER_AGGRO_RANGE_MULT, MONSTER_AGGRO_RANGE_BASE, MONSTER_ACQUIRE_RANGE_MAX,
     PLAYER_SIZE, DEBUFF_TICK_INTERVAL,
     HIT_FLASH_DURATION, RANGED_KEEP_MIN, RANGED_KEEP_MAX, BUILDING_ATTACK_SEARCH_RANGE,
+    ATTACK_VFX_DURATION,  # 怪物攻击表现（刀光/闪白）时长，与玩家同款
     MONSTER_NAV_CELL_PAD, MONSTER_NAV_REFRESH_INTERVAL, MONSTER_NAV_WAYPOINT_LOOKAHEAD,
     MONSTER_NAV_WAYPOINT_ARRIVE_RATIO, MONSTER_NAV_WAYPOINT_STUCK_FRAMES,
     MONSTER_NAV_STUCK_FRAMES, MONSTER_NAV_MOVE_EPS, MONSTER_NAV_UNSTICK_SEARCH_RING,
@@ -791,6 +792,24 @@ def _ranged_attack_distance(monster) -> float:
     return reach if reach is not None else monster._aggro_range
 
 
+def _mark_attack_vfx(monster, kind: str, tx: float, ty: float) -> None:
+    """记录一次攻击的**表现数据**（挥砍刀光 / 开火闪白），渲染层只读消费。
+
+    - kind："melee" 画与玩家同款的挥砍刀光 + 攻击闪白；"ranged"/"laser" 只闪白
+      （远程弹丸/激光本身已经 PROJECTILE_SNAPSHOT 同步可见，无需刀光）；
+    - tx/ty：本次攻击目标坐标（刀光方向基准，近战=被砍目标，远程=开火方向）；
+    - 计时器 _atk_vfx_timer 由 monster_base.update() 逐帧递减（主机/单机怪物），
+      联机客户端远端怪物不跑 update，改由 MONSTER_SNAPSHOT 的 atk_vfx_* 快照字段
+      覆盖同名属性 + game_view 客户端块本地递减（与 skill_vfx_* 完全同模式）。
+    渲染消费点：game/rendering_hud._draw_monster（刀光 draw_attack_swing +
+    draw_monster_body 的攻击闪白分支）。
+    """
+    monster._atk_vfx_kind = kind
+    monster._atk_vfx_timer = ATTACK_VFX_DURATION
+    monster._atk_vfx_range = _melee_attack_distance(monster)
+    monster._atk_vfx_angle = math.atan2(ty - monster.center_y, tx - monster.center_x)
+
+
 def _building_attack_distance(monster, building) -> float:
     """计算怪物与建筑边缘接触所需的攻击距离（与近战武器射程同口径）。"""
     sprite = getattr(building, "sprite", None)
@@ -1043,6 +1062,12 @@ class _MeleeMonsterBase(arcade.SpriteSolidColor):
         self._attack_timer = 0.0
         self._on_death_cb = None
         self._hit_flash = 0.0
+        # 攻击表现（挥砍刀光/闪白）：_mark_attack_vfx 写初值，update() 逐帧递减，
+        # 渲染层（_draw_monster）只读消费；联机时经 MONSTER_SNAPSHOT 的 atk_vfx_* 同步
+        self._atk_vfx_kind = None       # "melee"/"ranged"/"laser"，None=无攻击表现
+        self._atk_vfx_timer = 0.0       # 表现剩余时间（秒）
+        self._atk_vfx_angle = 0.0       # 攻击方向（弧度）
+        self._atk_vfx_range = 0.0       # 刀光半径（近战射程，远程不画刀光但字段仍填）
         self.room_bounds = None
         self._walls = []
         # 局内建造：仅保存建筑查询/伤害回调，不持有 GameView，便于联机与召唤怪物复用
@@ -1165,6 +1190,10 @@ class _MeleeMonsterBase(arcade.SpriteSolidColor):
         _nav_unstick(self)
         if self._hit_flash > 0:
             self._hit_flash = max(0, self._hit_flash - delta_time)
+        # 攻击表现计时器递减（刀光/闪白）：归零后渲染层自动不画；
+        # 远端怪物（net_ghost）在 update 入口已 return，由 game_view 客户端块本地递减
+        if getattr(self, "_atk_vfx_timer", 0) > 0:
+            self._atk_vfx_timer = max(0.0, self._atk_vfx_timer - delta_time)
         # 技能提示计时器递减
         if getattr(self, '_skill_prompt_timer', 0) > 0:
             self._skill_prompt_timer = max(0, self._skill_prompt_timer - delta_time)
@@ -1175,9 +1204,10 @@ class _MeleeMonsterBase(arcade.SpriteSolidColor):
         # 技能 buff 计时器递减（狂暴/骨盾/战术撤退等临时效果到期恢复）
         # 技能冷却递减：按距离分档 + 冷却取代原 50% 概率随机（用户需求 2026-09-26）后，
         # 冷却表 monster._skill_cds 必须逐帧推进，否则技能永不再放
-        from game.monster_utils import try_trigger_rage, update_skill_buffs, update_skill_cooldowns
+        from game.monster_utils import try_trigger_rage, update_skill_buffs, update_skill_cooldowns, update_skill_cast
         update_skill_buffs(self, delta_time)
         update_skill_cooldowns(self, delta_time)
+        update_skill_cast(self, delta_time)  # BOSS 技能前摇归零结算（无前摇实例 no-op）
         # 附加效果结算（中毒/燃烧掉血、冰冻/减速、眩晕）
         self._update_debuffs(delta_time)
         # 阶段 3 精英词缀：狂暴半血提速 / 火墙近身灼烧 / 召唤周期召怪
@@ -1326,6 +1356,8 @@ class _MeleeMonsterBase(arcade.SpriteSolidColor):
                     self.center_x, self.center_y, player.center_x, player.center_y,
                     self._walls, self._size, PLAYER_SIZE)):
             self._attack_timer = self._attack_delay
+            # 攻击表现：记录挥砍刀光 + 闪白（用户需求 2026-10-17，怪物与玩家同款特效）
+            _mark_attack_vfx(self, "melee", player.center_x, player.center_y)
             # 攻击时触发技能提示 + 实际效果
             # 按距离分档 + 冷却取代原 50% 概率随机（用户需求 2026-09-26）：
             # pick_skill_index 按 dist 选距离档位技能，返回 None 表示该档技能冷却中，本次不放
@@ -1539,6 +1571,12 @@ class _RangedMonsterBase(arcade.SpriteSolidColor):
         self._attack_timer = 0.0
         self._on_death_cb = None
         self._hit_flash = 0.0
+        # 攻击表现（挥砍刀光/闪白）：_mark_attack_vfx 写初值，update() 逐帧递减，
+        # 渲染层（_draw_monster）只读消费；联机时经 MONSTER_SNAPSHOT 的 atk_vfx_* 同步
+        self._atk_vfx_kind = None       # "melee"/"ranged"/"laser"，None=无攻击表现
+        self._atk_vfx_timer = 0.0       # 表现剩余时间（秒）
+        self._atk_vfx_angle = 0.0       # 攻击方向（弧度）
+        self._atk_vfx_range = 0.0       # 刀光半径（近战射程，远程不画刀光但字段仍填）
         self.room_bounds = None
         self._walls = []
         # 局内建造：仅保存建筑查询/伤害回调，不持有 GameView，便于联机与召唤怪物复用
@@ -1664,6 +1702,10 @@ class _RangedMonsterBase(arcade.SpriteSolidColor):
         _nav_unstick(self)
         if self._hit_flash > 0:
             self._hit_flash = max(0, self._hit_flash - delta_time)
+        # 攻击表现计时器递减（刀光/闪白）：归零后渲染层自动不画；
+        # 远端怪物（net_ghost）在 update 入口已 return，由 game_view 客户端块本地递减
+        if getattr(self, "_atk_vfx_timer", 0) > 0:
+            self._atk_vfx_timer = max(0.0, self._atk_vfx_timer - delta_time)
         # 技能提示计时器递减
         if getattr(self, '_skill_prompt_timer', 0) > 0:
             self._skill_prompt_timer = max(0, self._skill_prompt_timer - delta_time)
@@ -1674,9 +1716,10 @@ class _RangedMonsterBase(arcade.SpriteSolidColor):
         # 技能 buff 计时器递减（狂暴/骨盾/战术撤退等临时效果到期恢复）
         # 技能冷却递减：按距离分档 + 冷却取代原 50% 概率随机（用户需求 2026-09-26）后，
         # 冷却表 monster._skill_cds 必须逐帧推进，否则技能永不再放
-        from game.monster_utils import try_trigger_rage, update_skill_buffs, update_skill_cooldowns
+        from game.monster_utils import try_trigger_rage, update_skill_buffs, update_skill_cooldowns, update_skill_cast
         update_skill_buffs(self, delta_time)
         update_skill_cooldowns(self, delta_time)
+        update_skill_cast(self, delta_time)  # BOSS 技能前摇归零结算（无前摇实例 no-op）
         # 附加效果结算
         self._update_debuffs(delta_time)
         # 阶段 3 精英词缀：狂暴半血提速 / 火墙近身灼烧 / 召唤周期召怪
@@ -1808,6 +1851,9 @@ class _RangedMonsterBase(arcade.SpriteSolidColor):
                 self.center_x, self.center_y, player.center_x, player.center_y, self._walls,
                 self._size, PLAYER_SIZE):
             self._attack_timer = self._attack_delay
+            # 攻击表现：开火闪白（kind="ranged" 只闪白不画刀光，用户决策 2026-10-17：
+            # 远程弹丸本身已 PROJECTILE_SNAPSHOT 同步可见，无需额外枪口光效）
+            _mark_attack_vfx(self, "ranged", player.center_x, player.center_y)
             # 攻击时触发技能提示 + 实际效果
             # 按距离分档 + 冷却取代原 50% 概率随机（用户需求 2026-09-26）：
             # pick_skill_index 按 dist 选距离档位技能，返回 None 表示该档技能冷却中，本次不放

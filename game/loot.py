@@ -15,8 +15,7 @@
 import random
 import arcade
 from config import (
-    ZOMBIE_LOOT_TABLE, SKELETON_LOOT_TABLE, MUMMY_LOOT_TABLE, CAMEL_LOOT_TABLE, BOSS_LOOT_TABLE,
-    SPACE_BOSS_LOOT_TABLE, DROP_PICKUP_RADIUS, DROP_LIFETIME, RUN_POTION_SLOTS,
+    LOOT_TABLE_BY_KEY, SKELETON_LOOT_TABLE, DROP_PICKUP_RADIUS, DROP_LIFETIME, RUN_POTION_SLOTS,
 )
 from entities.resource_defs import RESOURCES
 
@@ -74,20 +73,18 @@ class DropItem(arcade.SpriteSolidColor):
 
 
 def roll_loot(monster_type: str, x: float, y: float) -> list[DropItem]:
-    """根据怪物类型掷骰，返回掉落物列表"""
-    # 木乃伊系物品仅限沙漠怪物（木乃伊/骆驼/BOSS木乃伊）掉落；僵尸/骷髅（含 BOSS 变体）不掉落
-    is_desert = monster_type in ("mummy_melee", "mummy_ranged", "camel", "boss_mummy")
-    # 新怪物掉落表映射：木乃伊/骆驼/BOSS 各有专属掉落表（config.py 定义）
-    if monster_type in ("mummy_melee", "mummy_ranged"):
-        table = MUMMY_LOOT_TABLE
-    elif monster_type == "camel":
-        table = CAMEL_LOOT_TABLE
-    elif monster_type == "boss_space":
-        table = SPACE_BOSS_LOOT_TABLE  # 航天BOSS专属掉落表（更丰厚）
-    elif monster_type in ("boss_zombie", "boss_skeleton", "boss_mummy"):
-        table = BOSS_LOOT_TABLE
-    else:
-        table = ZOMBIE_LOOT_TABLE if monster_type == "zombie" else SKELETON_LOOT_TABLE
+    """按怪物的 loot_key 掷骰掉落，返回掉落物列表
+
+    monster_type 实为 MONSTER_METADATA 的 loot_key（调用方 entity_callbacks
+    传 meta["loot_key"]，如 "boss"/"space_boss"/"sniper"），掉落表统一查
+    config.LOOT_TABLE_BY_KEY——旧代码按类名分支与 loot_key 全不匹配，
+    导致 BOSS/木乃伊/航天兵/土匪全落骷髅表（阶段A 修复）。
+    """
+    # 木乃伊系专属物品仅限沙漠怪物（loot_key mummy/camel）掉落；
+    # 僵尸/骷髅（含 loot_key="boss" 的三个 BOSS 变体）不掉落这些物品
+    is_desert = monster_type in ("mummy", "camel")
+    # 查表回退骷髅表（与旧实现的未知键回退口径一致）
+    table = LOOT_TABLE_BY_KEY.get(monster_type, SKELETON_LOOT_TABLE)
     drops = []
     for item_type, item_id, prob, qty_min, qty_max in table:
         # 木乃伊系专属物品：非沙漠怪物（僵尸/骷髅等）跳过，不参与掉落

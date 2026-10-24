@@ -24,9 +24,30 @@ from config import (
     PROJECTILE_SPEED, PROJECTILE_SIZE, PROJECTILE_LIFETIME,
     ROCKET_TROOP_AOE_RADIUS,
     CRIT_DAMAGE_MULT, MELEE_HIT_BUFFER, PLAYER_EXPLOSION_RADIUS,
+    BOSS_UNDERLEVEL_PENALTY_PER_LEVEL, BOSS_UNDERLEVEL_MIN_MULT,
 )
 from .effects import particle_system, floating_texts  # 爆炸粒子效果 + 漂浮文字（暴击提示）
 from .batch_shapes import ShapeBatch  # 批量绘制：激光一次 draw call 提交（性能优化）
+
+
+def _underlevel_mult(monster, attacker) -> float:
+    """武器等级不足对 BOSS 的伤害折扣（阶段D：required_weapon_level 首次消费）
+
+    仅 required_weapon_level > 0 的怪物（当前 = 4 房内 BOSS + 火箭台 BOSS）生效；
+    每差 1 级 ×(1-BOSS_UNDERLEVEL_PENALTY_PER_LEVEL)，下界 BOSS_UNDERLEVEL_MIN_MULT。
+    - attacker 缺失（None）→ 1.0 不罚（环境波及等无主伤害不误伤）；
+      无 weapon_level 属性按 0 计（等级未知视同最低，不白给折扣）；
+    - 单机/主机本地读 player.weapon_level（gs 与实体由 setup/免费拾取双写），
+      联机客户端幽灵读主机在 _resolve_attack_event 从 ATTACK_EVENT 上报值写入的属性。
+    """
+    req = int(getattr(monster, "required_weapon_level", 0) or 0)
+    if req <= 0 or attacker is None:
+        return 1.0
+    lvl = int(getattr(attacker, "weapon_level", 0) or 0)
+    if lvl >= req:
+        return 1.0
+    return max(BOSS_UNDERLEVEL_MIN_MULT,
+               1.0 - (req - lvl) * BOSS_UNDERLEVEL_PENALTY_PER_LEVEL)
 
 
 class CombatSystem:
@@ -138,7 +159,8 @@ class CombatSystem:
             if angle_diff <= MELEE_ARC_DEGREES / 2:
                 # 记录击杀归属（等级经验：主机按 last_attacker_id 判断是否本端玩家击杀）
                 m.last_attacker_id = attacker_id
-                actual = m.take_damage(round(weapon_damage))
+                # 阶段D：武器等级不足 BOSS 门槛时伤害打折（普通怪 required_weapon_level=0 恒 1.0）
+                actual = m.take_damage(max(1, round(weapon_damage * _underlevel_mult(m, player))))
                 hit.append((m, actual))
                 # 近战命中施加武器效果（debuff 列表，如中毒/燃烧/冰冻/减速/眩晕）
                 for eid, lvl in (debuffs or []):
@@ -247,7 +269,9 @@ class CombatSystem:
                         # 穿透弹丸：只对未被击中的怪物造成伤害
                         if proj.special == "penetrating":
                             if m not in hit_set:
-                                actual = m.take_damage(proj.damage)
+                                # 阶段D：武器等级不足 BOSS 门槛时伤害打折（owner_player 为发射者）
+                                actual = m.take_damage(max(1, round(
+                                    proj.damage * _underlevel_mult(m, getattr(proj, "owner_player", None)))))
                                 hit_monsters.append((m, actual))
                                 hit_set.add(m)
                                 proj_hits.append((m, actual))
@@ -262,14 +286,18 @@ class CombatSystem:
                                     if dist <= explosion_radius and m2 not in hit_set:
                                         # 爆炸波及怪物同样记录归属（等级经验判定用）
                                         m2.last_attacker_id = proj.owner_net_id
-                                        actual = m2.take_damage(proj.damage)
+                                        # 阶段D：武器等级不足 BOSS 门槛时伤害打折
+                                        actual = m2.take_damage(max(1, round(
+                                            proj.damage * _underlevel_mult(m2, getattr(proj, "owner_player", None)))))
                                         hit_monsters.append((m2, actual))
                                         hit_set.add(m2)
                                         proj_hits.append((m2, actual))
                             self._pending_remove.append(proj)
                             break
                         else:
-                            actual = m.take_damage(proj.damage)
+                            # 阶段D：武器等级不足 BOSS 门槛时伤害打折
+                            actual = m.take_damage(max(1, round(
+                                proj.damage * _underlevel_mult(m, getattr(proj, "owner_player", None)))))
                             if m not in hit_set:
                                 hit_monsters.append((m, actual))
                                 hit_set.add(m)
@@ -454,7 +482,8 @@ class LaserBeam:
                 self._target_cooldowns[id(m)] = self._hit_interval
                 # 激光击杀归属记录（等级经验：主机按 last_attacker_id 判断是否本端玩家击杀）
                 m.last_attacker_id = self.owner_net_id
-                actual = m.take_damage(dmg)
+                # 阶段D：武器等级不足 BOSS 门槛时伤害打折（激光发射者 = self.player）
+                actual = m.take_damage(max(1, round(dmg * _underlevel_mult(m, self.player))))
                 # 激光附带 debuff 施加到被命中怪物（联机客户端装备附加效果，命中即生效）
                 for eid, lvl in self.debuffs:
                     if hasattr(m, "apply_debuff"):

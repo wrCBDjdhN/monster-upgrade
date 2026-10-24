@@ -24,11 +24,11 @@ AI 行为：
 
 
 import math
-from config import MAP_WIDTH, MAP_HEIGHT, PLAYER_SIZE
+from config import MAP_WIDTH, MAP_HEIGHT, PLAYER_SIZE, BOSS_PHASES, BOSS_BERSERK_DURATION
 from entities.monster_defs import (
-    BOSS_SKILLS, MONSTER_CONFIGS, get_boss_skill, get_boss_skill_cooldowns,
+    BOSS_SKILLS, BOSS_SUMMON_CONFIG, MONSTER_CONFIGS, get_boss_skill, get_boss_skill_cooldowns,
 )
-from game.monster_base import _WallGrid, Projectile, _MeleeMonsterBase, _RangedMonsterBase, _select_target, _has_line_of_sight, _ranged_attack_distance
+from game.monster_base import _WallGrid, Projectile, _MeleeMonsterBase, _RangedMonsterBase, _select_target, _has_line_of_sight, _ranged_attack_distance, _mark_attack_vfx
 
 # Re-export for backward compatibility
 from game.monster_base import _WallGrid, Projectile, _MeleeMonsterBase, _RangedMonsterBase
@@ -132,6 +132,109 @@ def _boss_summon_minions(boss, summon_types: list[tuple[str, int, int]], theme: 
             summoned.append(m)
 
     return summoned
+
+
+def _boss_state_init(monster, theme: str) -> None:
+    """BOSS 附加状态初始化（阶段B 收口）：召唤与转阶段的**运行态**字段
+
+    数值类字段（cooldown/血量阈值/召唤列表/提示文案）不在这里缓存——
+    _boss_tick 每帧现读 config，修复 4 个 Boss 类 __init__ 各自硬编码
+    重复值、而 BOSS_SUMMON_CONFIG 同名字段无人消费（改配置不生效）的问题。
+    """
+    monster._summon_timer = 0.0
+    monster._summon_count = 0
+    monster._summoned_phases = set()
+    monster._summon_callback = None
+    monster._theme = theme
+    monster._boss_phase_idx = 0  # 已进入的转阶段数（BOSS_PHASES 下标）
+
+
+def boss_phase_tick(monster, class_name: str) -> None:
+    """BOSS 转阶段强化（阶段B）：血量首次跌过阈值即进入该阶段并一次性应用强化
+
+    数据唯一来源 config.BOSS_PHASES[class_name]（阈值降序，每阶段只触发一次）：
+    - speed/damage：对「首次进阶段时快照的基准值」按已进入阶段的乘数累计连乘
+      重算（base × ∏mult）→ 重复调用结果一致、不漂移；
+    - cd：技能冷却倍率写 monster._skill_cd_mult，_boss_try_skill 置冷却时消费；
+    - berserk=True 的末阶段：复用 _skill_buff_* "berserk" 标记触发狂暴表现
+      （快照同步字段 + 光晕渲染现成，客户端零新协议），
+      _skill_buff_original 存强化后的攻击力 → 到期恢复值一致、不回退。
+    """
+    if not getattr(monster, "alive", False):
+        return
+    phases = BOSS_PHASES.get(class_name)
+    if not phases:
+        return
+    idx = getattr(monster, "_boss_phase_idx", 0)
+    if idx >= len(phases):
+        return
+    nxt = phases[idx]
+    if monster.hp / monster.max_hp > float(nxt["hp_below"]):
+        return
+    if idx == 0:
+        # 首次进阶段：快照基准（此前 speed/damage 未被本系统改过）
+        monster._boss_base_speed = monster.speed
+        monster._boss_base_damage = monster.damage
+    monster._boss_phase_idx = idx + 1
+    # 累计倍率 = 已进入各阶段的乘积
+    speed_mult = damage_mult = cd_mult = 1.0
+    for p in phases[:monster._boss_phase_idx]:
+        speed_mult *= float(p.get("speed_mult", 1.0) or 1.0)
+        damage_mult *= float(p.get("damage_mult", 1.0) or 1.0)
+        cd_mult *= float(p.get("cd_mult", 1.0) or 1.0)
+    monster.speed = monster._boss_base_speed * speed_mult
+    monster.damage = round(monster._boss_base_damage * damage_mult)
+    monster._skill_cd_mult = cd_mult
+    if nxt.get("berserk"):
+        monster._skill_buff_timer = BOSS_BERSERK_DURATION
+        monster._skill_buff_type = "berserk"
+        monster._skill_buff_original = monster.damage
+    from game.effects import floating_texts
+    floating_texts.add(monster.center_x, monster.center_y + 50,
+                       "狂暴!" if nxt.get("berserk") else "强化!",
+                       (255, 60, 60), life=1.5, font_size=16, vy=60)
+
+
+def _boss_tick(monster, class_name: str, delta_time: float) -> None:
+    """BOSS 每帧公共逻辑（阶段B 收口，替代 4 个 Boss 类 update 里的三段重复代码）
+
+    1) 技能冷却递减（_skill_timers）
+    2) 转阶段强化（boss_phase_tick）
+    3) 血量阈值召唤（cooldown/阈值/召唤列表/提示全部现读 BOSS_SUMMON_CONFIG）
+
+    调用口径：各 Boss.update 在 super().update(...) **之后**调用一次。
+    原实现召唤段本就在 super 之后；冷却递减移到 super 之后与 try_attack
+    （game_view 每帧先 update 后 try_attack）的相对顺序不变，无行为差异。
+    """
+    # 1) 技能冷却递减
+    for k in monster._skill_timers:
+        monster._skill_timers[k] = max(0.0, monster._skill_timers[k] - delta_time)
+    # 2) 转阶段强化（死亡/未达标 no-op）
+    boss_phase_tick(monster, class_name)
+    # 3) 血量阈值召唤
+    cfg = BOSS_SUMMON_CONFIG.get(class_name, {})
+    thresholds = cfg.get("phase_thresholds") or ()
+    if not monster.alive or monster._summon_count >= len(thresholds):
+        return
+    monster._summon_timer += delta_time
+    if monster._summon_timer < float(cfg.get("cooldown", 0.0) or 0.0):
+        return
+    hp_ratio = monster.hp / monster.max_hp
+    for threshold in thresholds:
+        if hp_ratio <= threshold and threshold not in monster._summoned_phases:
+            monster._summoned_phases.add(threshold)
+            monster._summon_timer = 0.0
+            monster._summon_count += 1
+            summoned = _boss_summon_minions(monster, cfg.get("summons", []), monster._theme)
+            if monster._summon_callback and summoned:
+                monster._summon_callback(monster, summoned)
+            # 召唤提示文字（文案/颜色取 BOSS_SUMMON_CONFIG，禁按类名硬编码分支）
+            from game.effects import floating_texts
+            floating_texts.add(monster.center_x, monster.center_y + 40,
+                               cfg.get("text", "召唤援军!"),
+                               cfg.get("text_color", (255, 80, 30)),
+                               life=1.0, font_size=14, vy=50)
+            break
 
 
 # ══════════════════════ BOSS 技能效果落地（数值唯一来源 = entities/monster_defs.BOSS_SKILLS）══════════════════════
@@ -258,22 +361,55 @@ def _boss_try_skill(monster, class_name: str, emitters: dict, player, players) -
     """BOSS 技能释放统一入口：按 BOSS_SKILLS 顺序逐个判定「冷却就绪 + 目标在射程内」
 
     emitters: {技能id: 释放函数}，函数签名 (player, players, cfg)
-    命中第一个可用技能即释放并返回 True（同一帧只放一个技能）。
+    命中第一个可用技能即进入释放流程并返回 True（同一帧只放一个技能）。
+
+    前摇（阶段A）：cfg.cast_time > 0 时先置预警（头顶提示 + AOE 范围圈，
+    写既有 _skill_prompt_* / _skill_vfx_* 字段 → 已入 MONSTER_SNAPSHOT 同步，
+    客户端零新协议可见），冷却在前摇开始即扣除；前摇归零才由
+    monster_utils.update_skill_cast 调 emitter 真正结算。
+    cast_time <= 0 的技能保持旧的立即释放行为。
     """
     if player is None or not getattr(monster, "alive", False):
         return False
+    # 已在前摇中：视为忙（调用方据此跳过普攻），不重复起手
+    if getattr(monster, "_skill_cast", None):
+        return True
     dist = math.hypot(player.center_x - monster.center_x, player.center_y - monster.center_y)
     for cfg in BOSS_SKILLS.get(class_name, []):
         skill_id = cfg.get("id")
         emitter = emitters.get(skill_id)
         if emitter is None:
             continue
+        # 阶段门槛（阶段C）：phases>0 表示需已转阶段数达到该值才解锁（未解锁跳过）
+        if getattr(monster, "_boss_phase_idx", 0) < int(cfg.get("phases", 0) or 0):
+            continue
         if monster._skill_timers.get(skill_id, 0.0) > 0:
             continue  # 冷却中
         if dist > float(cfg.get("range", 0) or 0):
             continue  # 目标不在射程内
-        monster._skill_timers[skill_id] = float(cfg.get("cooldown", 0.0) or 0.0)
-        emitter(player, players, cfg)
+        # 置冷却 = BOSS_SKILLS.cooldown × 转阶段 cd_mult（阶段B；未转阶段默认 1.0）
+        monster._skill_timers[skill_id] = (
+            float(cfg.get("cooldown", 0.0) or 0.0)
+            * float(getattr(monster, "_skill_cd_mult", 1.0)))
+        cast_time = float(cfg.get("cast_time", 0) or 0)
+        if cast_time <= 0:
+            emitter(player, players, cfg)
+            return True
+        # 前摇预警：快照 emitter/目标/配置，归零后由 update_skill_cast 结算
+        monster._skill_cast = {"left": cast_time, "emitter": emitter,
+                               "player": player, "players": players, "cfg": cfg}
+        # 头顶预警文字（计时器与前摇同步递减，提示恰好在结算瞬间消失）
+        monster._skill_prompt_text = f"{cfg.get('name', '')} 蓄力!"
+        monster._skill_prompt_color = (255, 96, 96)
+        monster._skill_prompt_timer = cast_time
+        # 脚底范围圈：仅 **以自身为圆心**的 AOE 技能画圈（半径取技能 aoe_radius）；
+        # aoe_center="target" 的落点在目标脚下、圈画在 BOSS 身上会误导，故只留头顶文字
+        radius = float(cfg.get("aoe_radius", 0) or 0)
+        if radius > 0 and str(cfg.get("aoe_center", "self")) != "target":
+            monster._skill_vfx_timer = cast_time
+            monster._skill_vfx_duration = cast_time
+            monster._skill_vfx_radius = radius
+            monster._skill_vfx_color = (255, 96, 96)
         return True
     return False
 
@@ -288,23 +424,18 @@ class BossZombie(_MeleeMonsterBase):
 
     def __init__(self, center_x=0, center_y=0):
         super().__init__(center_x=center_x, center_y=center_y, **MONSTER_CONFIGS["BossZombie"])
-        self._summon_timer = 0.0
-        self._summon_cooldown = 15.0
-        self._summon_phase_thresholds = [0.6, 0.3]
-        self._summoned_phases = set()
-        self._summon_count = 0
-        self._max_summons = len(self._summon_phase_thresholds)
-        self._summon_callback = None
-        self._theme = "forest"
+        _boss_state_init(self, "forest")
         # 技能系统：冷却计时器（冷却秒数取自 BOSS_SKILLS，本类不硬编码）
-        self._skill_timers = {"flame_charge": 0.0, "zombie_roar": 0.0}
+        # 计时器键按 BOSS_SKILLS 派生（阶段C：含阶段解锁新技能，本类不硬编码技能id）
+        self._skill_timers = {c["id"]: 0.0 for c in BOSS_SKILLS["BossZombie"]}
         self._skill_cooldowns = get_boss_skill_cooldowns("BossZombie")
 
     def _try_use_skill(self, player, dt, players=None) -> bool:
         """尝试释放技能，返回是否释放了技能（冷却/射程全部读 BOSS_SKILLS）"""
         return _boss_try_skill(
             self, "BossZombie",
-            {"flame_charge": self._emit_flame_charge, "zombie_roar": self._emit_zombie_roar},
+            {"flame_charge": self._emit_flame_charge, "zombie_roar": self._emit_zombie_roar,
+             "quake_slam": self._emit_quake_slam},
             player, players,
         )
 
@@ -332,6 +463,18 @@ class BossZombie(_MeleeMonsterBase):
                           "僵尸咆哮!", (255, 60, 60), life=0.8, font_size=14, vy=50)
         _boss_skill_strike(self, "BossZombie", "zombie_roar", player, players)
 
+    def _emit_quake_slam(self, player, players, cfg):
+        """震地猛击：重击地面震晕周围玩家（阶段C 新技能，phases=1 解锁）"""
+        from game.effects import particle_system, floating_texts
+        # 冲击尘土环
+        particle_system.emit(self.center_x, self.center_y, 26, (160, 110, 60),
+                           speed=170, life=0.5, size=6, spread=360)
+        particle_system.emit(self.center_x, self.center_y - 8, 18, (120, 80, 40),
+                           speed=90, life=0.7, size=8, spread=360, gravity=200)
+        floating_texts.add(self.center_x, self.center_y + 40,
+                          "震地猛击!", (255, 140, 60), life=0.8, font_size=14, vy=50)
+        _boss_skill_strike(self, "BossZombie", "quake_slam", player, players)
+
     def try_attack(self, player=None, players=None) -> bool:
         """BOSS 僵尸攻击：优先尝试技能释放，否则走近战基类攻击
 
@@ -350,31 +493,9 @@ class BossZombie(_MeleeMonsterBase):
 
     def update(self, player_x: float = 0.0, player_y: float = 0.0,
                delta_time: float = 0.0, players=None):
-        # 技能冷却递减
-        for k in self._skill_timers:
-            self._skill_timers[k] = max(0.0, self._skill_timers[k] - delta_time)
         super().update(player_x, player_y, delta_time, players)
-        if not self.alive or self._summon_count >= self._max_summons:
-            return
-        self._summon_timer += delta_time
-        if self._summon_timer < self._summon_cooldown:
-            return
-        hp_ratio = self.hp / self.max_hp
-        for threshold in self._summon_phase_thresholds:
-            if hp_ratio <= threshold and threshold not in self._summoned_phases:
-                self._summoned_phases.add(threshold)
-                self._summon_timer = 0.0
-                self._summon_count += 1
-                from entities.monster_defs import BOSS_SUMMON_CONFIG
-                cfg = BOSS_SUMMON_CONFIG.get("BossZombie", {})
-                summoned = _boss_summon_minions(self, cfg.get("summons", []), self._theme)
-                if self._summon_callback and summoned:
-                    self._summon_callback(self, summoned)
-                # 召唤提示文字
-                from game.effects import floating_texts
-                floating_texts.add(self.center_x, self.center_y + 40,
-                                  "召唤僵尸!", (255, 100, 50), life=1.0, font_size=14, vy=50)
-                break
+        # 阶段B 收口：技能冷却递减 + 转阶段强化 + 血量阈值召唤（原三段重复代码）
+        _boss_tick(self, "BossZombie", delta_time)
 
 
 class BossSkeleton(_RangedMonsterBase):
@@ -386,23 +507,18 @@ class BossSkeleton(_RangedMonsterBase):
 
     def __init__(self, center_x=0, center_y=0):
         super().__init__(center_x=center_x, center_y=center_y, **MONSTER_CONFIGS["BossSkeleton"])
-        self._summon_timer = 0.0
-        self._summon_cooldown = 12.0
-        self._summon_phase_thresholds = [0.6, 0.3]
-        self._summoned_phases = set()
-        self._summon_count = 0
-        self._max_summons = len(self._summon_phase_thresholds)
-        self._summon_callback = None
-        self._theme = "forest"
+        _boss_state_init(self, "forest")
         # 技能系统（冷却秒数取自 BOSS_SKILLS，本类不硬编码）
-        self._skill_timers = {"skeleton_rain": 0.0, "frost_nova": 0.0}
+        # 计时器键按 BOSS_SKILLS 派生（阶段C：含阶段解锁新技能，本类不硬编码技能id）
+        self._skill_timers = {c["id"]: 0.0 for c in BOSS_SKILLS["BossSkeleton"]}
         self._skill_cooldowns = get_boss_skill_cooldowns("BossSkeleton")
 
     def _try_use_skill(self, player, dt, players=None) -> bool:
         """尝试释放技能，返回是否释放了技能（冷却/射程全部读 BOSS_SKILLS）"""
         return _boss_try_skill(
             self, "BossSkeleton",
-            {"skeleton_rain": self._emit_skeleton_rain, "frost_nova": self._emit_frost_nova},
+            {"skeleton_rain": self._emit_skeleton_rain, "frost_nova": self._emit_frost_nova,
+             "bone_storm": self._emit_bone_storm},
             player, players,
         )
 
@@ -430,6 +546,19 @@ class BossSkeleton(_RangedMonsterBase):
                           "冰冻新星!", (120, 200, 255), life=0.8, font_size=14, vy=50)
         _boss_skill_strike(self, "BossSkeleton", "frost_nova", player, players)
 
+    def _emit_bone_storm(self, player, players, cfg):
+        """白骨旋风：环绕自身的骨片风暴（阶段C 新技能，phases=1 解锁）"""
+        from game.effects import particle_system, floating_texts
+        # 环状骨片（8 方向）
+        for i in range(8):
+            a = math.radians(i * 45)
+            particle_system.emit(self.center_x + math.cos(a) * 70,
+                               self.center_y + math.sin(a) * 70,
+                               4, (230, 230, 240), speed=120, life=0.4, size=4, spread=40)
+        floating_texts.add(self.center_x, self.center_y + 40,
+                          "白骨旋风!", (220, 220, 240), life=0.8, font_size=14, vy=50)
+        _boss_skill_strike(self, "BossSkeleton", "bone_storm", player, players)
+
     def try_attack(self, player=None, players=None) -> Projectile | None:
         """BOSS 骷髅攻击：优先尝试技能释放，否则走远程基类开火
 
@@ -448,30 +577,9 @@ class BossSkeleton(_RangedMonsterBase):
 
     def update(self, player_x: float = 0.0, player_y: float = 0.0,
                delta_time: float = 0.0, players=None):
-        for k in self._skill_timers:
-            self._skill_timers[k] = max(0.0, self._skill_timers[k] - delta_time)
         super().update(player_x, player_y, delta_time, players)
-        if not self.alive or self._summon_count >= self._max_summons:
-            return
-        self._summon_timer += delta_time
-        if self._summon_timer < self._summon_cooldown:
-            return
-        hp_ratio = self.hp / self.max_hp
-        for threshold in self._summon_phase_thresholds:
-            if hp_ratio <= threshold and threshold not in self._summoned_phases:
-                self._summoned_phases.add(threshold)
-                self._summon_timer = 0.0
-                self._summon_count += 1
-                from entities.monster_defs import BOSS_SUMMON_CONFIG
-                cfg = BOSS_SUMMON_CONFIG.get("BossSkeleton", {})
-                summoned = _boss_summon_minions(self, cfg.get("summons", []), self._theme)
-                if self._summon_callback and summoned:
-                    self._summon_callback(self, summoned)
-                # 召唤提示文字
-                from game.effects import floating_texts
-                floating_texts.add(self.center_x, self.center_y + 40,
-                                  "召唤骷髅!", (100, 150, 255), life=1.0, font_size=14, vy=50)
-                break
+        # 阶段B 收口：技能冷却递减 + 转阶段强化 + 血量阈值召唤（原三段重复代码）
+        _boss_tick(self, "BossSkeleton", delta_time)
 
 
 class BossMummy(_MeleeMonsterBase):
@@ -483,23 +591,18 @@ class BossMummy(_MeleeMonsterBase):
 
     def __init__(self, center_x=0, center_y=0):
         super().__init__(center_x=center_x, center_y=center_y, **MONSTER_CONFIGS["BossMummy"])
-        self._summon_timer = 0.0
-        self._summon_cooldown = 18.0
-        self._summon_phase_thresholds = [0.6, 0.3]
-        self._summoned_phases = set()
-        self._summon_count = 0
-        self._max_summons = len(self._summon_phase_thresholds)
-        self._summon_callback = None
-        self._theme = "desert"
+        _boss_state_init(self, "desert")
         # 技能系统（冷却秒数取自 BOSS_SKILLS，本类不硬编码）
-        self._skill_timers = {"poison_fog": 0.0, "mummy_grab": 0.0}
+        # 计时器键按 BOSS_SKILLS 派生（阶段C：含阶段解锁新技能，本类不硬编码技能id）
+        self._skill_timers = {c["id"]: 0.0 for c in BOSS_SKILLS["BossMummy"]}
         self._skill_cooldowns = get_boss_skill_cooldowns("BossMummy")
 
     def _try_use_skill(self, player, dt, players=None) -> bool:
         """尝试释放技能，返回是否释放了技能（冷却/射程全部读 BOSS_SKILLS）"""
         return _boss_try_skill(
             self, "BossMummy",
-            {"poison_fog": self._emit_poison_fog, "mummy_grab": self._emit_mummy_grab},
+            {"poison_fog": self._emit_poison_fog, "mummy_grab": self._emit_mummy_grab,
+             "scarab_swarm": self._emit_scarab_swarm},
             player, players,
         )
 
@@ -528,6 +631,20 @@ class BossMummy(_MeleeMonsterBase):
                           "缠绕!", (200, 180, 120), life=0.7, font_size=14, vy=60)
         _boss_skill_strike(self, "BossMummy", "mummy_grab", player, players)
 
+    def _emit_scarab_swarm(self, player, players, cfg):
+        """圣甲虫群：放出虫群噬咬目标并中毒（阶段C 新技能，phases=1 解锁）"""
+        from game.effects import particle_system, floating_texts
+        angle = math.atan2(player.center_y - self.center_y, player.center_x - self.center_x)
+        # 扇形虫群粒子飞向目标
+        for i in range(6):
+            a = angle + math.radians(i * 12 - 30)
+            particle_system.emit(self.center_x + math.cos(a) * 24,
+                               self.center_y + math.sin(a) * 24,
+                               5, (90, 140, 60), speed=200, life=0.5, size=3, spread=12)
+        floating_texts.add(player.center_x, player.center_y + 30,
+                          "圣甲虫群!", (140, 190, 80), life=0.8, font_size=14, vy=50)
+        _boss_skill_strike(self, "BossMummy", "scarab_swarm", player, players)
+
     def try_attack(self, player=None, players=None) -> bool:
         """BOSS 木乃伊攻击：优先尝试技能释放，否则走近战基类攻击
 
@@ -546,30 +663,9 @@ class BossMummy(_MeleeMonsterBase):
 
     def update(self, player_x: float = 0.0, player_y: float = 0.0,
                delta_time: float = 0.0, players=None):
-        for k in self._skill_timers:
-            self._skill_timers[k] = max(0.0, self._skill_timers[k] - delta_time)
         super().update(player_x, player_y, delta_time, players)
-        if not self.alive or self._summon_count >= self._max_summons:
-            return
-        self._summon_timer += delta_time
-        if self._summon_timer < self._summon_cooldown:
-            return
-        hp_ratio = self.hp / self.max_hp
-        for threshold in self._summon_phase_thresholds:
-            if hp_ratio <= threshold and threshold not in self._summoned_phases:
-                self._summoned_phases.add(threshold)
-                self._summon_timer = 0.0
-                self._summon_count += 1
-                from entities.monster_defs import BOSS_SUMMON_CONFIG
-                cfg = BOSS_SUMMON_CONFIG.get("BossMummy", {})
-                summoned = _boss_summon_minions(self, cfg.get("summons", []), self._theme)
-                if self._summon_callback and summoned:
-                    self._summon_callback(self, summoned)
-                # 召唤提示文字
-                from game.effects import floating_texts
-                floating_texts.add(self.center_x, self.center_y + 40,
-                                  "召唤木乃伊!", (180, 160, 100), life=1.0, font_size=14, vy=50)
-                break
+        # 阶段B 收口：技能冷却递减 + 转阶段强化 + 血量阈值召唤（原三段重复代码）
+        _boss_tick(self, "BossMummy", delta_time)
 
 
 class Sniper(_RangedMonsterBase):
@@ -628,6 +724,8 @@ class RocketTroop(_RangedMonsterBase):
                 self.center_x, self.center_y, player.center_x, player.center_y, self._walls,
                 self._size, PLAYER_SIZE):
             self._attack_timer = self._attack_delay
+            # 攻击表现：开火闪白（kind="ranged" 只闪白，弹丸经 PROJECTILE_SNAPSHOT 同步）
+            _mark_attack_vfx(self, "ranged", player.center_x, player.center_y)
             # 汇总弹丸附带效果：怪物自带 debuff + 武器携带效果
             combined_debuffs = []
             if self.debuff_id:
@@ -661,23 +759,18 @@ class BossSpace(_RangedMonsterBase):
 
     def __init__(self, center_x=0, center_y=0):
         super().__init__(center_x=center_x, center_y=center_y, **MONSTER_CONFIGS["BossSpace"])
-        self._summon_timer = 0.0
-        self._summon_cooldown = 20.0
-        self._summon_phase_thresholds = [0.7, 0.4, 0.1]
-        self._summoned_phases = set()
-        self._summon_count = 0
-        self._max_summons = len(self._summon_phase_thresholds)
-        self._summon_callback = None
-        self._theme = "space"
+        _boss_state_init(self, "space")
         # 技能系统（冷却秒数取自 BOSS_SKILLS，本类不硬编码）
-        self._skill_timers = {"laser_sweep": 0.0, "missile_barrage": 0.0}
+        # 计时器键按 BOSS_SKILLS 派生（阶段C：含阶段解锁新技能，本类不硬编码技能id）
+        self._skill_timers = {c["id"]: 0.0 for c in BOSS_SKILLS["BossSpace"]}
         self._skill_cooldowns = get_boss_skill_cooldowns("BossSpace")
 
     def _try_use_skill(self, player, dt, players=None) -> bool:
         """尝试释放技能，返回是否释放了技能（冷却/射程全部读 BOSS_SKILLS）"""
         return _boss_try_skill(
             self, "BossSpace",
-            {"laser_sweep": self._emit_laser_sweep, "missile_barrage": self._emit_missile_barrage},
+            {"laser_sweep": self._emit_laser_sweep, "missile_barrage": self._emit_missile_barrage,
+             "orbital_strike": self._emit_orbital_strike},
             player, players,
         )
 
@@ -709,32 +802,23 @@ class BossSpace(_RangedMonsterBase):
                           "导弹齐射!", (255, 130, 60), life=0.8, font_size=14, vy=50)
         _boss_skill_strike(self, "BossSpace", "missile_barrage", player, players)
 
+    def _emit_orbital_strike(self, player, players, cfg):
+        """轨道打击：轰击目标位置（阶段C 新技能，phases=1 解锁）"""
+        from game.effects import particle_system, floating_texts
+        # 光束落点闪光（以目标为圆心）
+        particle_system.emit(player.center_x, player.center_y, 20, (255, 240, 120),
+                           speed=140, life=0.6, size=5, spread=360)
+        particle_system.emit(player.center_x, player.center_y, 14, (255, 200, 80),
+                           speed=60, life=0.9, size=8, spread=360)
+        floating_texts.add(player.center_x, player.center_y + 40,
+                          "轨道打击!", (255, 230, 100), life=1.0, font_size=14, vy=60)
+        _boss_skill_strike(self, "BossSpace", "orbital_strike", player, players)
+
     def update(self, player_x: float = 0.0, player_y: float = 0.0,
                delta_time: float = 0.0, players=None):
-        for k in self._skill_timers:
-            self._skill_timers[k] = max(0.0, self._skill_timers[k] - delta_time)
         super().update(player_x, player_y, delta_time, players)
-        if not self.alive or self._summon_count >= self._max_summons:
-            return
-        self._summon_timer += delta_time
-        if self._summon_timer < self._summon_cooldown:
-            return
-        hp_ratio = self.hp / self.max_hp
-        for threshold in self._summon_phase_thresholds:
-            if hp_ratio <= threshold and threshold not in self._summoned_phases:
-                self._summoned_phases.add(threshold)
-                self._summon_timer = 0.0
-                self._summon_count += 1
-                from entities.monster_defs import BOSS_SUMMON_CONFIG
-                cfg = BOSS_SUMMON_CONFIG.get("BossSpace", {})
-                summoned = _boss_summon_minions(self, cfg.get("summons", []), self._theme)
-                if self._summon_callback and summoned:
-                    self._summon_callback(self, summoned)
-                # 召唤提示文字
-                from game.effects import floating_texts
-                floating_texts.add(self.center_x, self.center_y + 40,
-                                  "召唤援军!", (255, 80, 30), life=1.0, font_size=14, vy=50)
-                break
+        # 阶段B 收口：技能冷却递减 + 转阶段强化 + 血量阈值召唤（原三段重复代码）
+        _boss_tick(self, "BossSpace", delta_time)
 
     def try_attack(self, player=None, players=None) -> Projectile | None:
         """航天BOSS攻击：优先尝试技能，否则发射激光弹丸（带燃烧效果）"""
@@ -755,6 +839,8 @@ class BossSpace(_RangedMonsterBase):
                 self.center_x, self.center_y, player.center_x, player.center_y, self._walls,
                 self._size, PLAYER_SIZE):
             self._attack_timer = self._attack_delay
+            # 攻击表现：开火闪白（kind="ranged" 只闪白，弹丸经 PROJECTILE_SNAPSHOT 同步）
+            _mark_attack_vfx(self, "ranged", player.center_x, player.center_y)
             combined_debuffs = []
             if self.debuff_id:
                 combined_debuffs.append((self.debuff_id, 1))

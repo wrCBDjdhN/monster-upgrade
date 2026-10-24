@@ -4,6 +4,7 @@ import math
 import arcade
 from config import (
     WINDOW_WIDTH, WINDOW_HEIGHT, PLAYER_COLOR, PLAYER_SIZE,
+    ATTACK_FLASH_COLOR,  # 攻击闪白（本地玩家与远端幽灵共用同一颜色）
     EVAC_COLOR, DESERT_THEME,
     EVAC_BLOCK_HALF, EVAC_BAR_WIDTH, EVAC_BAR_HEIGHT, EVAC_STATE_COLORS,  # 阶段2 撤离点渲染
     SPACE_THEME, ACTION_TIME_SPACE, ACTION_TIME_FOREST, ACTION_TIME_DESERT,
@@ -34,6 +35,7 @@ from game.effects import particle_system, floating_texts
 from game.render_helpers import (
     draw_harvestable, draw_chest, draw_caravan_sign,
     draw_player_base_equipment, draw_player_weapon, draw_drop_icon,
+    draw_attack_swing,
 )
 from game.map_events import is_near_caravan
 from entities.weapon_defs import get_weapon_visual
@@ -483,7 +485,7 @@ def render_game(view):
         if view._player_hit_flash > 0:
             body_color = (255, 80, 80)
         elif view._player_attack_flash > 0:
-            body_color = (255, 255, 150)
+            body_color = ATTACK_FLASH_COLOR
         else:
             body_color = PLAYER_COLOR
         if pb is not None:
@@ -512,6 +514,10 @@ def render_game(view):
         if not view._in_view(ghost.center_x, ghost.center_y):
             continue  # 视口裁剪：图元数随房间玩家数线性增长，裁剪省绘制
         g_color = (100, 160, 220)  # 幽灵色（区别于本地玩家 PLAYER_COLOR 的绿色系）
+        # 远端玩家攻击闪白（联机互见）：_attack_flash 由 ATTACK_VFX 消息写入，
+        # 与本地玩家 _player_attack_flash 同款淡黄色（见 config.ATTACK_FLASH_COLOR）
+        if getattr(ghost, "_attack_flash", 0) > 0:
+            g_color = ATTACK_FLASH_COLOR
         if pb is not None:
             pb.rect(ghost.center_x, ghost.center_y, ghost.width, ghost.height, g_color)
         else:
@@ -530,6 +536,12 @@ def render_game(view):
         else:
             arcade.draw_rect_filled(arcade.XYWH(gbx + bar_w // 2, gby, bar_w, 5), arcade.color.DARK_RED)
             arcade.draw_rect_filled(arcade.XYWH(gbx + bar_w * g_ratio // 2, gby, bar_w * g_ratio, 5), arcade.color.GREEN)
+        # 远端玩家挥砍刀光（联机攻击特效互见）：元组内坐标是**攻击瞬间**攻击者位置
+        # 与目标点（非幽灵当前插值位置），计时器由 game_view._tick_ghost_attack_vfx 递减
+        gswing = getattr(ghost, "_attack_visual", None)
+        if gswing:
+            gvx, gvy, gmx, gmy, g_rng, g_timer = gswing
+            draw_attack_swing(gvx, gvy, gmx, gmy, g_rng, g_timer, batch=pb)
         # 幽灵头顶名称（名册驱动，经 _world_labels 世界坐标→屏幕坐标渲染）
         gname = getattr(ghost, "net_name", f"玩家{pid}")
         view._world_labels.append((ghost.center_x, ghost.center_y + PLAYER_SIZE + 18,
@@ -574,34 +586,11 @@ def render_game(view):
         # 救援文字
         view._world_labels.append((view.player.center_x, by - 12, "救援中...", arcade.color.CYAN, 10))
 
-    # 近战攻击范围可视化（挥砍刀光）
+    # 近战攻击范围可视化（挥砍刀光）：实现收口到 render_helpers.draw_attack_swing，
+    # 本地玩家 / 联机远端幽灵 / 怪物近战三处共用同一套绘制
     if view._attack_visual:
         px, py, mx, my, atk_range, timer = view._attack_visual
-        base_deg = math.degrees(math.atan2(my - py, mx - px))
-        total = 0.2
-        progress = max(0.0, min(1.0, (total - timer) / total))
-        sweep = -60.0 + 120.0 * progress
-        ghosts = (
-            (50.0, 4, (255, 200, 80, 35)),
-            (35.0, 6, (255, 220, 100, 60)),
-            (20.0, 9, (255, 235, 150, 100)),
-        )
-        for lag, bw, g_color in ghosts:
-            ga = math.radians(base_deg + sweep - lag)
-            gx = px + math.cos(ga) * atk_range
-            gy = py + math.sin(ga) * atk_range
-            if pb is not None:
-                pb.line(px, py, gx, gy, g_color, bw)
-            else:
-                arcade.draw_line(px, py, gx, gy, g_color, bw)
-        # 主刀刃
-        ma = math.radians(base_deg + sweep)
-        ex = px + math.cos(ma) * atk_range
-        ey = py + math.sin(ma) * atk_range
-        if pb is not None:
-            pb.line(px, py, ex, ey, (255, 255, 220, 240), 14)
-        else:
-            arcade.draw_line(px, py, ex, ey, (255, 255, 220, 240), 14)
+        draw_attack_swing(px, py, mx, my, atk_range, timer, batch=pb)
 
     # 玩家手持武器（观战模式不绘制：玩家已撤离/阵亡，武器残影会残留在撤离点，
     # 导致观战时人物看起来"不消失"）

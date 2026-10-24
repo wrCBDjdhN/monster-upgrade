@@ -25,7 +25,7 @@ from entities.mission_defs import (
 )
 
 # 局内战斗事件（唯一计数端 = 主机；客户端永不自计）
-IN_RUN_EVENTS = frozenset({"kill", "elite_kill", "harvest", "chest", "evac"})
+IN_RUN_EVENTS = frozenset({"kill", "elite_kill", "boss_kill", "harvest", "chest", "evac"})
 # 局外事件（各端本地 UI 触发，各端本地计数）
 OUT_RUN_EVENTS = frozenset({"forge", "reforge"})
 
@@ -50,7 +50,7 @@ def on_event(view, event: str, amount: int = 1, player_id: int | None = None) ->
 
     view：GameView / ForgeView / MarketView 任一（只需能取到 game_state，
            另有 player 精灵时走世界飘字，否则回落到视图自身 toast）。
-    event：MISSION_EVENT_KEYS 七种之一；未知键显式告警后忽略（禁静默）。
+    event：MISSION_EVENT_KEYS 八种之一；未知键显式告警后忽略（禁静默）。
     amount：本次次数（连杀可传 N；进度按 target 封顶由 db 层保证）。
     player_id：归属玩家的**联机传输 id**；缺省 = 本端玩家。
     """

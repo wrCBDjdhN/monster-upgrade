@@ -30,6 +30,7 @@ from config import (
     DOWNED_TIMEOUT, RESCUE_DISTANCE, RESCUE_DURATION, REVIVE_HP,
     # 阶段8 难度星级：评星条件表 + 单图星上限（数值口径唯一来源）
     MAP_STAR_CRITERIA, MAP_MAX_STARS,
+    ATTACK_FLASH_DURATION,  # 攻击闪白时长（全自动连发路径与手动点击同一口径）
 )
 from net.protocol import MsgType, build_ready_state_payload  # 联机消息类型枚举 + READY_STATE 载荷组装（②对局中客户端准备广播）
 from game.map_gen import generate_map
@@ -70,7 +71,7 @@ from game.rendering import render_game
 from game.input_handler import (
     handle_key_press, handle_key_release, handle_mouse_motion,
     handle_mouse_press, handle_mouse_release,
-    send_client_attack_event, current_weapon_range,
+    send_client_attack_event, send_host_attack_vfx, current_weapon_range,
 )
 
 # 怪物类映射自动生成：数据源 = MONSTER_CONFIGS（配置键即类名），刷怪键 = 类名转 snake_case，
@@ -107,6 +108,24 @@ def _tick_ghost_debuffs(entity, dt: float) -> None:
     recalc = getattr(entity, "_recalc_debuffs", None)
     if recalc is not None:
         recalc()
+
+
+def _tick_ghost_attack_vfx(entity, dt: float) -> None:
+    """幽灵攻击表现计时推进（刀光 _attack_visual / 闪白 _attack_flash）
+
+    - 为何需要：远端玩家幽灵（remote_players）不跑 Player.update，攻击表现计时器
+      若不本地递减，刀光/闪白会在幽灵身上永久停留（与 debuff/技能表现同问题）；
+    - 只递减表现计时，不动 HP/位置/战斗状态（纯表现层）；
+    - 元组结构与本地玩家一致：(px, py, mx, my, range, timer)，归零置 None。
+    """
+    flash = getattr(entity, "_attack_flash", 0)
+    if flash and flash > 0:
+        entity._attack_flash = max(0.0, flash - dt)
+    visual = getattr(entity, "_attack_visual", None)
+    if visual:
+        px, py, mx, my, rng, timer = visual
+        timer -= dt
+        entity._attack_visual = None if timer <= 0 else (px, py, mx, my, rng, timer)
 
 
 class _RemoteLaser:
@@ -371,6 +390,7 @@ class GameView(arcade.View):
         self._boss_instance = None  # BOSS 实例引用（setup 时创建，用于房间锁定判定，不触发 HP 血条）
         self._boss_door_sprite = None  # BOSS 房间门洞遮挡精灵（BOSS 存活时显示，死亡后移除）
         self._boss_room_locked = False  # BOSS 房间是否已锁定（玩家无法离开）
+        self._boss_level_warned = False  # 阶段D：进 BOSS 房武器等级不足提示是否已弹过（每局 setup 复位）
         # BOSS 介绍向导弹窗（进入 BOSS 房间时首次弹出，展示 4 页说明）
 
         # 联机客户端本地攻速节流计时器（客户端不再经 combat 冷却，判定已移交主机；
@@ -441,6 +461,8 @@ class GameView(arcade.View):
             "kills": 0, "elite_kills": 0, "boss_kills": 0,
             "carried_gold": 0, "evac": False,
         }
+        # 阶段D：进 BOSS 房装等不足提示复位（每局只弹一次）
+        self._boss_level_warned = False
 
         seed = gs.current_map_seed
         # 按所选地图主题生成（forest 森林 / desert 沙漠荒地）
@@ -684,6 +706,7 @@ class GameView(arcade.View):
             gs.current_weapon_kind = w["kind"]
             gs.current_weapon_id = w["id"]
             gs.current_weapon_item_id = w["item_id"]  # 存储item_id用于渲染
+            gs.weapon_level = int(w.get("level", 1) or 1)  # 阶段D：BOSS 装等判定用
             gs.weapon_damage = w["damage"]
             gs.weapon_speed = w["attack_speed"]
             # 从武器定义获取攻击距离（按中文名匹配）
@@ -720,6 +743,7 @@ class GameView(arcade.View):
             gs.current_weapon_kind = "melee"
             gs.current_weapon_id = None
             gs.current_weapon_item_id = None
+            gs.weapon_level = 0  # 阶段D：无武器（拳头）按 0 级计，对 BOSS 伤害打满折
             gs.weapon_damage = 8
             gs.weapon_speed = 0.5
             gs.weapon_range = 40
@@ -731,6 +755,11 @@ class GameView(arcade.View):
             gs.weapon_spread_angle = SPREAD_ANGLE_DEFAULT
             gs.weapon_aura_slow = False
             gs.weapon_aura_radius = 0
+
+        # 阶段D：武器等级双写到玩家实体（combat._underlevel_mult 读 attacker.weapon_level——
+        # 近战攻击者=player、弹丸=proj.owner_player、激光=laser.player，均指向本实体；
+        # 联机客户端幽灵的同名属性由主机在 _resolve_attack_event 从 ATTACK_EVENT 上报值写入）
+        self.player.weapon_level = int(getattr(gs, "weapon_level", 0) or 0)
 
         # ── 角色等级系统：应用永久加成（等级绑定职业，各端本地结算）──
         # 从 character_levels 表读取等级/经验/永久加成并缓存到 _level_data（HUD/升级面板共用）；
@@ -2105,6 +2134,11 @@ class GameView(arcade.View):
                     if self._hb_sent_at > 0:
                         self._net_rtt_ms = max(0.0, (time.time() - self._hb_sent_at) * 1000.0)
                         self._hb_sent_at = 0.0
+                elif msg_type == MsgType.ATTACK_VFX:
+                    # 主机广播的攻击表现（挥砍刀光/开火闪白，纯视觉，无伤害判定）：
+                    # 写到对应玩家幽灵的 _attack_visual/_attack_flash，由渲染层绘制，
+                    # 计时器在下方 remote_players 循环里本地递减（见 _tick_ghost_attack_vfx）
+                    self.net_sync.apply_attack_vfx(payload)
                 elif msg_type == MsgType.BUILD_RESULT:
                     # 主机建造仲裁结果（建造请求-应答）：放置成功/拒绝（材料不足/位置占用）
                     self.net_sync.apply_build_result(payload)
@@ -2190,6 +2224,15 @@ class GameView(arcade.View):
                     rm._skill_vfx_timer = max(0.0, rm._skill_vfx_timer - dt)
                 if getattr(rm, "_skill_buff_timer", 0) > 0:
                     rm._skill_buff_timer = max(0.0, rm._skill_buff_timer - dt)
+                # 攻击表现计时器本地递减（刀光/闪白，atk_vfx_* 快照字段下发）：
+                # 远端怪物同样不跑本地 update()，不递减则「刚挥砍」的刀光/闪白
+                # 在客户端永久停留（与 _skill_vfx_timer 同类问题，2026-10-17 修复）
+                if getattr(rm, "_atk_vfx_timer", 0) > 0:
+                    rm._atk_vfx_timer = max(0.0, rm._atk_vfx_timer - dt)
+            # 远端玩家幽灵的攻击表现计时递减（ATTACK_VFX 消息写入 _attack_visual/
+            # _attack_flash，幽灵不跑 Player.update，须此处本地递减，否则刀光/闪白不消失）
+            for ghost in self.remote_players.values():
+                _tick_ghost_attack_vfx(ghost, dt)
             # 阶段4 客户端：仅推进事件横幅计时（表现层）。
             # 空投落地仍由主机裁决并广播，update_event 内部已按 net_mode 守卫禁掉客户端
             # 本地落地，避免两端各自生成一批空投箱。
@@ -2248,6 +2291,9 @@ class GameView(arcade.View):
                 # 幽灵 debuff 时长推进（只递减，禁本地 DoT 结算——HP 权威值取该客户端
                 # 20Hz PLAYER_SNAPSHOT 上报的 hp，主机再扣一次就是双重扣血）
                 _tick_ghost_debuffs(ghost, dt)
+                # 客户端攻击表现（ATTACK_VFX→_resolve_attack_event 本地发射）在幽灵
+                # 身上播放，同样只递减表现计时（幽灵不跑 Player.update）
+                _tick_ghost_attack_vfx(ghost, dt)
                 # 已撤离/离开的玩家不是死亡：其幽灵 alive=False 是撤离观战所致
                 # （_send_player_snapshot 观战时上报 alive=False），不得误发倒地/死亡通知
                 if self._player_status.get(pid) in ("evac", "left", "dead"):
@@ -2470,6 +2516,19 @@ class GameView(arcade.View):
                     self._boss_room_locked = True
                     self.active_boss = boss  # 玩家进入 BOSS 房间才激活屏幕顶部 BOSS 血条
                     self._create_boss_door_block()
+                    # 阶段D进房提示：武器等级不足 BOSS 门槛时弹一次警告（每局一次）。
+                    # 不拦截进入——伤害打折由 combat._underlevel_mult 在主机权威结算，此处仅提示
+                    req_lvl = int(getattr(boss, "required_weapon_level", 0) or 0)
+                    if (req_lvl > 0 and not self._boss_level_warned
+                            and int(getattr(self.player, "weapon_level", 0) or 0) < req_lvl):
+                        self._boss_level_warned = True
+                        # floating_texts 用模块顶部全局导入（:58）——此处再写局部
+                        # import 会把整个 on_update 里的同名引用变成局部变量，
+                        # 导致排在前面的 floating_texts.update(dt) 抛 UnboundLocalError
+                        floating_texts.add(
+                            self.player.center_x, self.player.center_y + 40,
+                            f"武器等级不足! 需 Lv{req_lvl}+，对 BOSS 伤害将被削弱",
+                            (255, 96, 96), life=2.5, font_size=14, vy=50)
             elif not in_boss_room and self._boss_room_locked:
                 # 尝试离开 BOSS 房间：推回边界
                 # 计算最近的边界点并推回
@@ -2706,11 +2765,16 @@ class GameView(arcade.View):
                     spread_count=getattr(gs, 'weapon_spread_count', SPREAD_COUNT_DEFAULT),
                     spread_angle=getattr(gs, 'weapon_spread_angle', SPREAD_ANGLE_DEFAULT),
                 )
-                self._player_attack_flash = 0.1
+                self._player_attack_flash = ATTACK_FLASH_DURATION
                 self._attack_this_frame = True
                 self._attack_kind = "ranged"
                 self._last_attack_range = current_weapon_range(gs)
                 sound_manager.play_ranged_attack()
+                # 主机模式：连发开火表现广播给客户端（与手动点击同一口径）
+                send_host_attack_vfx(
+                    self, gs,
+                    "laser" if getattr(gs, 'weapon_special', '') == "laser" else "ranged",
+                    world_mx, world_my, current_weapon_range(gs))
 
         # 环境物受击判定 + 宝箱/水井/火箭台交互裁决 + 火箭台状态机与撤离裁决
         # （主机权威：破坏判定/开箱掉落/水井回血/BOSS生成/撤离成败全在主机；

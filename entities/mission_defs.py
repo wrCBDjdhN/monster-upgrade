@@ -8,9 +8,10 @@
 - 任务 DAILY_POOL：id / desc(中文) / event(事件类型键) / target(int 目标次数) / reward_gold(int) / reward_exp(int)
 - 成就 ACHIEVEMENTS：id / desc(中文) / event(事件类型键) / target(int) / reward_gold(int)
 
-事件类型键（仅这七种，与 db/missions.bump_* 的 event 参数一一对应）：
+事件类型键（仅这八种，与 db/missions.bump_* 的 event 参数一一对应）：
 - kill         击杀任意怪物（精英死亡同时计 kill 与 elite_kill；BOSS 亦计入 kill）
 - elite_kill   击杀精英怪
+- boss_kill    击杀 BOSS（BOSS 死亡同时计 kill 与 boss_kill，两事件并行、各按各自 target 封顶）
 - harvest      采集资源
 - chest        开启宝箱
 - evac         成功撤离
@@ -25,6 +26,7 @@ EXP_PER_LEVEL_BASE=100（任务经验奖励约合 0.5~3 级），金币奖励与
 MISSION_EVENT_KEYS = (
     "kill",        # 击杀任意怪物（精英同时计 elite_kill）
     "elite_kill",  # 击杀精英怪
+    "boss_kill",   # 击杀 BOSS（BOSS 同时计 kill 与 boss_kill，阶段D 新增第8键）
     "harvest",     # 采集资源
     "chest",       # 开启宝箱
     "evac",        # 成功撤离
@@ -66,6 +68,15 @@ DAILY_POOL: list[dict] = [
         "target": 5,
         "reward_gold": 600,
         "reward_exp": 300,
+    },
+    {
+        # 阶段D：BOSS 击杀日任务（单目标低梯度——BOSS 每局最多 4+1 只，target 宜小）
+        "id": "daily_boss_1",
+        "desc": "击杀 1 只 BOSS",
+        "event": "boss_kill",
+        "target": 1,
+        "reward_gold": 350,
+        "reward_exp": 175,
     },
     {
         "id": "daily_harvest_15",
@@ -169,6 +180,14 @@ ACHIEVEMENTS: list[dict] = [
         "event": "elite_kill",
         "target": 10,
         "reward_gold": 500,
+    },
+    {
+        # 阶段D：首次击败 BOSS 成就
+        "id": "ach_boss_first",
+        "desc": "首次击杀 1 只 BOSS",
+        "event": "boss_kill",
+        "target": 1,
+        "reward_gold": 300,
     },
     {
         "id": "ach_elite_50",

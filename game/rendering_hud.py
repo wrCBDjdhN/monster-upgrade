@@ -4,6 +4,7 @@
 角色等级 HUD、右上角小地图、屏幕顶部 BOSS 血条。
 """
 
+import math
 import arcade
 from config import (
     WINDOW_WIDTH, WINDOW_HEIGHT, MINIMAP_SIZE, MINIMAP_PADDING, MINIMAP_VIEW_RADIUS,
@@ -30,7 +31,7 @@ from config import (
 )
 from game.render_helpers import (
     draw_monster_base, draw_monster_armor, draw_monster_face, draw_monster_weapon,
-    draw_monster_body,
+    draw_monster_body, draw_attack_swing,
 )
 # 怪物武器颜色从 monster_defs.py 统一读取（原 MONSTER_WEAPON_COLOR 已并入 MONSTER_METADATA）
 from entities.monster_defs import MONSTER_METADATA, ELITE_AFFIXES
@@ -120,6 +121,25 @@ def _draw_monster(view, m, wb):
     if w_color is None:
         w_color = (180, 180, 180)
     draw_monster_weapon(m, m_size, w_color, wb)
+
+    # 怪物近战挥砍刀光（与玩家同款视觉，用户需求 2026-10-17）：
+    # - 本地怪物：_atk_vfx_* 由 monster_base._mark_attack_vfx 在 try_attack 成功时写入；
+    # - 远端怪物（联机客户端）：同名字段由 MONSTER_SNAPSHOT 的 atk_vfx_* 下发，
+    #   计时器在 game_view 客户端块本地递减（与 skill_vfx_* 同模式）；
+    # - 远程怪物 kind="ranged" 不画刀光（攻击闪白已由 draw_monster_body 表达，
+    #   弹丸本身经 PROJECTILE_SNAPSHOT 同步可见）；
+    # - 远端插值分支临时改写过 center_x/center_y，此处直接读即为插值后的绘制位置。
+    if getattr(m, "_atk_vfx_kind", None) == "melee":
+        _av_timer = getattr(m, "_atk_vfx_timer", 0.0)
+        _av_range = getattr(m, "_atk_vfx_range", 0.0)
+        if _av_timer > 0 and _av_range > 0:
+            _av_angle = getattr(m, "_atk_vfx_angle", 0.0)
+            draw_attack_swing(
+                m.center_x, m.center_y,
+                m.center_x + math.cos(_av_angle) * _av_range,
+                m.center_y + math.sin(_av_angle) * _av_range,
+                _av_range, _av_timer, batch=wb, tint=w_color,
+            )
 
     # 血条：BOSS 怪物不绘制头顶小血条（改由 draw_boss_hp_bar 在屏幕顶部绘制）
     is_boss = getattr(m, 'is_boss', False)
@@ -516,6 +536,10 @@ def draw_boss_hp_bar(view):
         hp_color = arcade.color.YELLOW
     else:
         hp_color = arcade.color.RED
+    # 边框：白色实心底衬（外扩 4px）——渲染铁律禁 draw_rect_outline 线框（会闪烁）
+    arcade.draw_rect_filled(
+        arcade.XYWH(bar_x, bar_y, bar_w + 4, bar_h + 4),
+        arcade.color.WHITE)
     # 背景（深灰）
     arcade.draw_rect_filled(
         arcade.XYWH(bar_x, bar_y, bar_w, bar_h),
@@ -526,10 +550,6 @@ def draw_boss_hp_bar(view):
         arcade.draw_rect_filled(
             arcade.XYWH(bar_x - bar_w // 2 + fill_w // 2, bar_y, fill_w, bar_h),
             hp_color)
-    # 边框（白色）
-    arcade.draw_rect_outline(
-        arcade.XYWH(bar_x, bar_y, bar_w, bar_h),
-        arcade.color.WHITE, border_width=2)
     # BOSS 名称 + 血量百分比（用 _MONSTER_NAMES 中文映射，MONSTER_METADATA 无 name 键）
     boss_cls = boss.__class__.__name__
     boss_name = _MONSTER_NAMES.get(boss_cls, boss_cls)

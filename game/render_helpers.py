@@ -15,6 +15,7 @@ import math
 import arcade
 
 from config import EVENT_AIRDROP_CHEST_COLOR, EVENT_AIRDROP_CHEST_TRIM, EVENT_CARAVAN_COLOR, EVENT_CARAVAN_SIGN_SIZE
+from config import ATTACK_FLASH_COLOR, ATTACK_VFX_DURATION  # 攻击表现（闪白/刀光）常量
 from game.batch_shapes import ShapeBatch
 
 
@@ -39,8 +40,19 @@ def draw_monster_armor(m, size, armor_color, batch=None):
 
 
 def draw_monster_body(m, batch=None):
-    """用不透明实心方块绘制怪物本体（替代 draw_sprite）。受击时整体变白。"""
-    body_color = (255, 255, 255) if getattr(m, '_hit_flash', 0) > 0 else m.color
+    """用不透明实心方块绘制怪物本体（替代 draw_sprite）。
+
+    颜色优先级：受击闪白 > 攻击闪淡黄 > 怪物主题色。
+    攻击闪（_atk_vfx_timer > 0）是「怪物刚出手」的表现反馈，与玩家攻击闪白同款
+    （见 config.ATTACK_FLASH_COLOR）；字段由 monster_base._mark_attack_vfx 写入、
+    联机时经 MONSTER_SNAPSHOT 的 atk_vfx_* 字段同步到远端幽灵。
+    """
+    if getattr(m, '_hit_flash', 0) > 0:
+        body_color = (255, 255, 255)
+    elif getattr(m, '_atk_vfx_timer', 0) > 0:
+        body_color = ATTACK_FLASH_COLOR
+    else:
+        body_color = m.color
     if batch is not None:
         batch.rect(m.center_x, m.center_y, m.width, m.height, body_color)
     else:
@@ -173,6 +185,62 @@ def draw_harvestable(h, batch=None):
             arcade.draw_polygon_filled(pts, (255, 255, 255) if flash else (150, 150, 155))
             arcade.draw_rect_filled(arcade.XYWH(cx - 2, cy - 2, 6, 6),
                                     (255, 255, 255) if flash else (120, 120, 125))
+
+
+# ===================== 攻击表现（挥砍刀光 / 攻击闪） =====================
+
+def _lerp_rgb(a, b, w: float):
+    """两个 RGB 三元组按权重 w 线性插值（w=0 取 a，w=1 取 b），用于刀光残影提亮。"""
+    return (
+        int(a[0] + (b[0] - a[0]) * w),
+        int(a[1] + (b[1] - a[1]) * w),
+        int(a[2] + (b[2] - a[2]) * w),
+    )
+
+
+def draw_attack_swing(px, py, mx, my, atk_range, timer, batch=None, tint=None):
+    """近战挥砍刀光：以 (px,py) 为圆心、atk_range 为半径的三重残影弧线 + 主刀刃。
+
+    三处复用同一实现（原为 rendering.py 玩家专属绘制，抽取收口）：
+    - 本地玩家：rendering.py 玩家层（tint=None → 默认金黄刀光）；
+    - 联机远端幽灵：rendering.py 幽灵循环（同默认金黄，与本人看到的一致）；
+    - 怪物近战：rendering_hud._draw_monster（tint=武器色，观感与玩家同款）。
+
+    px/py：挥砍起点（攻击者位置）；mx/my：挥砍目标点（决定基准方向角）；
+    atk_range：刀光半径（近战射程）；timer：剩余时间（秒，递减到 0 自动不画）；
+    tint：基础色（残影起点色，主刀刃在此基础上提亮）；batch：绘制批次（ShapeBatch）。
+
+    进度由 (ATTACK_VFX_DURATION - timer) 推出，扫过 -60° → +60° 的 120° 扇面；
+    渲染铁律遵守既有刀光口径（batch.line 半透明矢量层，与原实现一致）。
+    """
+    if atk_range <= 0 or timer <= 0:
+        return
+    total = ATTACK_VFX_DURATION
+    base_deg = math.degrees(math.atan2(my - py, mx - px))
+    progress = max(0.0, min(1.0, (total - timer) / total))
+    sweep = -60.0 + 120.0 * progress
+    tr, tg, tb = tint if tint else (255, 200, 80)
+    blade = (min(255, tr + 55), min(255, tg + 55), min(255, tb + 70))
+    # (滞后角, 线宽, 亮度权重, 透明度)：越靠前的残影越暗越淡，形成运动拖尾
+    ghosts = ((50.0, 4, 0.0, 35), (35.0, 6, 0.5, 60), (20.0, 9, 1.0, 100))
+    for lag, bw, w, alpha in ghosts:
+        gcolor = _lerp_rgb((tr, tg, tb), blade, w) + (alpha,)
+        ga = math.radians(base_deg + sweep - lag)
+        gx = px + math.cos(ga) * atk_range
+        gy = py + math.sin(ga) * atk_range
+        if batch is not None:
+            batch.line(px, py, gx, gy, gcolor, bw)
+        else:
+            arcade.draw_line(px, py, gx, gy, gcolor, bw)
+    # 主刀刃（最亮最粗）
+    ma = math.radians(base_deg + sweep)
+    ex = px + math.cos(ma) * atk_range
+    ey = py + math.sin(ma) * atk_range
+    main_color = blade + (240,)
+    if batch is not None:
+        batch.line(px, py, ex, ey, main_color, 14)
+    else:
+        arcade.draw_line(px, py, ex, ey, main_color, 14)
 
 
 # ===================== 玩家装备 =====================

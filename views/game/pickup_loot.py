@@ -154,6 +154,8 @@ class PickupLootManager:
             gs.current_weapon_kind = wdef.get("kind", "melee")
             gs.current_weapon_id = d.item_id
             gs.current_weapon_item_id = d.item_id   # 供渲染视觉
+            gs.weapon_level = int(getattr(d, "level", 1) or 1)  # 阶段D：BOSS 装等判定用（局内拾取武器等级）
+            self.gv.player.weapon_level = gs.weapon_level       # 双写到玩家实体（combat 打折读 attacker.weapon_level）
             gs.weapon_damage = wdef.get("damage", 8)
             gs.weapon_speed = wdef.get("attack_speed", 1.0)
             gs.weapon_range = lookup_weapon_range(gs.current_weapon_kind, d.item_id)

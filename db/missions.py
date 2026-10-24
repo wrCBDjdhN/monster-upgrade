@@ -18,7 +18,7 @@ db/database.py 的 init_db() 创建：
     PRIMARY KEY (player_id, achievement_id)
 
 事件类型键（与 entities/mission_defs.MISSION_EVENT_KEYS 一致）：
-    kill / elite_kill / harvest / chest / evac / forge / reforge
+    kill / elite_kill / boss_kill / harvest / chest / evac / forge / reforge
 
 本层只管进度与奖励数据，**不改玩家金币/经验**——claim_* 返回奖励字段，由上层（Task 6.2
 mission_tracker / Task 6.3 任务板）负责发奖。CRUD 模式仿 db/codex.py：

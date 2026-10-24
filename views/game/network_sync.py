@@ -236,6 +236,20 @@ class NetworkSyncManager:
         if attacker is not self.gv.player:
             attacker.crit_chance = float(payload.get("crit_chance", 0.0))
             attacker.equip_lifesteal = float(payload.get("equip_lifesteal", 0.0))
+            # 阶段D：武器等级写到幽灵（BOSS required_weapon_level 不足打折在主机 combat 结算，
+            # 客户端禁本地仲裁不违反——伤害本就客户端上报、主机权威调整）
+            attacker.weapon_level = int(payload.get("weapon_level", 0) or 0)
+        # 攻击表现中继（2026-10-17 联机攻击特效互见）：主机权威裁决通过后，把这次攻击
+        # 的刀光/闪白表现广播给**其他**客户端（exclude 发起者——发起端本地已有表现，
+        # 转发会重复绘制）。主机自己也给该幽灵本地置表现：主机是渲染端，不置则主机看不到
+        # 客户端的刀光（只画特效不播音效，用户决策）。
+        # kind 由主机权威武器表判定（wdef），不采信客户端自报字段。
+        vfx_kind = "melee" if kind == "melee" else (
+            "laser" if wdef.get("special") == "laser" else "ranged")
+        self._emit_attack_vfx_locally(attacker, vfx_kind, angle, wrange)
+        self.broadcast_attack_vfx(attacker_id, vfx_kind, angle, wrange,
+                                  x=attacker.center_x, y=attacker.center_y,
+                                  exclude=attacker_id)
         # 存活怪物列表（主机权威怪物，客户端攻击由主机裁决命中）
         monsters = [m for m in self.gv.monsters if hasattr(m, "alive") and m.alive]
         if kind == "melee":
@@ -322,6 +336,92 @@ class NetworkSyncManager:
                 spread_count=wdef.get("spread_count", SPREAD_COUNT_DEFAULT),
                 spread_angle=wdef.get("spread_angle", SPREAD_ANGLE_DEFAULT),
             )
+
+    # ── 攻击表现（ATTACK_VFX）：联机时互相看见对方的攻击（2026-10-17）──────────
+    # 只做视觉同步，不参与任何伤害/命中裁决；远端表现**不播音效**（用户决策：
+    # 避免多人混战时音效叠加嘈杂）。
+
+    def broadcast_attack_vfx(self, attacker_id: int, kind: str, angle: float,
+                             atk_range: float, x: float, y: float,
+                             exclude: int | None = None) -> None:
+        """主机→客户端广播一次攻击表现（仅 host 模式有效；solo 下 net_server 为 None 零开销）。
+
+        attacker_id：攻击者玩家 id（客户端收到自己 id 时忽略，见 apply_attack_vfx）；
+        kind："melee"=刀光+闪白，"ranged"/"laser"=开火闪白；
+        angle：攻击方向（弧度）；atk_range：刀光半径（近战射程）；
+        x/y：攻击瞬间攻击者世界坐标（刀光圆心，不用幽灵快照滞后位置）；
+        exclude：排除的玩家 id（攻击发起者本地已有表现，避免重复绘制）。
+        """
+        gs = self.gv.window.game_state
+        if gs.net_mode != "host" or gs.net_server is None:
+            return  # solo 模式：无网络对象，直接返回（零开销）
+        gs.net_server.broadcast(MsgType.ATTACK_VFX, {
+            "attacker_id": attacker_id,
+            "kind": kind,
+            "x": x,
+            "y": y,
+            "angle": angle,
+            "range": atk_range,
+        }, exclude=exclude)
+
+    def _emit_attack_vfx_locally(self, entity, kind: str, angle: float,
+                                 atk_range: float) -> None:
+        """在本地实体（幽灵/本地玩家）上置一次攻击表现（主机渲染端本地消费）。
+
+        entity：玩家实体（remote_players 幽灵或 self.player）；
+        写入 _attack_visual（刀光元组，与本地玩家 attack_visual 同结构）+
+        _attack_flash（闪白计时器）。渲染层见 rendering.py 幽灵循环/本地玩家分支。
+        """
+        if entity is None:
+            return
+        from config import ATTACK_VFX_DURATION, ATTACK_FLASH_DURATION
+        if entity is self.gv.player:
+            # 防御性路径（attacker_id == 主机本端 id，正常不经 _resolve_attack_event）：
+            # 本地玩家的表现字段挂在 GameView 上（view._attack_visual /
+            # view._player_attack_flash），不是挂在 Player 实体上，须写对地方
+            self.gv._player_attack_flash = ATTACK_FLASH_DURATION
+            if kind == "melee":
+                px, py = entity.center_x, entity.center_y
+                tx = px + math.cos(angle) * atk_range
+                ty = py + math.sin(angle) * atk_range
+                self.gv._attack_visual = (px, py, tx, ty, atk_range, ATTACK_VFX_DURATION)
+            return
+        entity._attack_flash = ATTACK_FLASH_DURATION
+        if kind == "melee":
+            px, py = entity.center_x, entity.center_y
+            tx = px + math.cos(angle) * atk_range
+            ty = py + math.sin(angle) * atk_range
+            entity._attack_visual = (px, py, tx, ty, atk_range, ATTACK_VFX_DURATION)
+
+    def apply_attack_vfx(self, payload: dict) -> None:
+        """客户端应用主机 ATTACK_VFX：在对应幽灵上播放刀光/闪白（纯表现）。
+
+        - attacker_id == 本人 → 忽略（本人本地已有表现，主机不该发给本人；
+          防御性收口，正常路径主机已 exclude）；
+        - 幽灵缺失时懒创建（_ensure_ghost，与 SKILL_USE 等路径同口径）；
+        - 只写表现字段，不动 HP/位置/战斗状态（禁客户端本地仲裁）。
+        """
+        gs = self.gv.window.game_state
+        attacker_id = payload.get("attacker_id")
+        if attacker_id is None:
+            return
+        my_id = getattr(gs, "net_player_id", None)
+        if my_id is not None and attacker_id == my_id:
+            return  # 本人攻击：本地已有表现，忽略（防重复绘制）
+        ghost = self.gv.remote_players.get(attacker_id)
+        if ghost is None:
+            ghost = self._ensure_ghost(attacker_id)
+        kind = payload.get("kind", "ranged")
+        angle = float(payload.get("angle", 0.0) or 0.0)
+        atk_range = float(payload.get("range", 0.0) or 0.0)
+        x = float(payload.get("x", ghost.center_x) or ghost.center_x)
+        y = float(payload.get("y", ghost.center_y) or ghost.center_y)
+        from config import ATTACK_VFX_DURATION, ATTACK_FLASH_DURATION
+        ghost._attack_flash = ATTACK_FLASH_DURATION
+        if kind == "melee":
+            tx = x + math.cos(angle) * atk_range
+            ty = y + math.sin(angle) * atk_range
+            ghost._attack_visual = (x, y, tx, ty, atk_range, ATTACK_VFX_DURATION)
 
     def _resolve_skill_use(self, sender_id: int, payload: dict) -> None:
         """主机权威裁决客户端的技能释放（SKILL_USE）：技能效果收敛主机
@@ -2637,6 +2737,12 @@ class NetworkSyncManager:
                 # 自身 buff（狂暴/骨盾/战术撤退）：客户端据此画 buff 标记与倒计时条
                 "skill_buff_type": getattr(m, "_skill_buff_type", None),
                 "skill_buff_timer": float(getattr(m, "_skill_buff_timer", 0.0) or 0.0),
+                # 攻击表现（2026-10-17）：近战刀光/开火闪白，客户端据此画怪物攻击特效
+                # （本地怪物由 monster_base.update 递减，远端怪物客户端本地递减）
+                "atk_vfx_kind": getattr(m, "_atk_vfx_kind", None),
+                "atk_vfx_timer": float(getattr(m, "_atk_vfx_timer", 0.0) or 0.0),
+                "atk_vfx_angle": float(getattr(m, "_atk_vfx_angle", 0.0) or 0.0),
+                "atk_vfx_range": float(getattr(m, "_atk_vfx_range", 0.0) or 0.0),
             })
         return snapshot
 
@@ -2808,6 +2914,13 @@ class NetworkSyncManager:
             # 同时服务本地怪物与远端幽灵，禁再开一套 net_ 前缀
             rm._skill_buff_type = entry.get("skill_buff_type")
             rm._skill_buff_timer = float(entry.get("skill_buff_timer", 0.0) or 0.0)
+            # ── 攻击表现字段（挥砍刀光/开火闪白，2026-10-17）────────────────
+            # 与 skill_buff 同模式：同名属性直写（渲染层一套代码同时服务本地怪物与
+            # 远端幽灵），旧主机不下发时 None/0 → 渲染层不画，不会崩。
+            rm._atk_vfx_kind = entry.get("atk_vfx_kind")
+            rm._atk_vfx_timer = float(entry.get("atk_vfx_timer", 0.0) or 0.0)
+            rm._atk_vfx_angle = float(entry.get("atk_vfx_angle", 0.0) or 0.0)
+            rm._atk_vfx_range = float(entry.get("atk_vfx_range", 0.0) or 0.0)
         if monster_list and not self._warned_old_monster_snapshot:
             # net 层铁律：禁静默丢字段——主机快照缺新字段时显式告警一次（非每帧刷屏）
             if "attack_cd_ratio" not in monster_list[0] or "shield" not in monster_list[0]:

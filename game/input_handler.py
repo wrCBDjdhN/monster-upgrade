@@ -4,7 +4,10 @@ import math
 import time
 import random
 import arcade
-from config import EVENT_PANEL_CLOSE_HIT_SLOP, WINDOW_WIDTH, WINDOW_HEIGHT
+from config import (
+    EVENT_PANEL_CLOSE_HIT_SLOP, WINDOW_WIDTH, WINDOW_HEIGHT,
+    ATTACK_FLASH_DURATION, ATTACK_VFX_DURATION,  # 攻击表现（闪白/刀光）时长
+)
 from game.sound_manager import sound_manager
 from game.effects import particle_system, floating_texts
 from entities.effects_defs import DEBUFF_POOL
@@ -88,7 +91,31 @@ def send_client_attack_event(view, gs, world_x: float, world_y: float) -> bool:
         "equip_lifesteal": getattr(view.player, "equip_lifesteal", 0.0),  # 装备吸血（幽灵无此属性，需客户端上报）
         "timestamp": time.monotonic() * 1000.0,  # 单调时钟毫秒，供主机去重/延迟测量
         "attack_speed": max(0.1, float(getattr(gs, 'weapon_speed', 1.0))),  # 连发/激光武器以客户端攻速为准
+        "weapon_level": int(getattr(gs, "weapon_level", 0) or 0),  # 当前武器等级（主机写到幽灵，BOSS 装等打折判定用）
     }))
+    return True
+
+
+def send_host_attack_vfx(view, gs, kind: str, world_x: float, world_y: float,
+                         atk_range: float) -> bool:
+    """主机本地攻击 → 广播 ATTACK_VFX 给全部客户端（联机攻击特效互见，2026-10-17）
+
+    - kind："melee"=刀光+闪白；"ranged"/"laser"=开火闪白；
+    - 主机自己本地已有表现（_attack_visual/_player_attack_flash），本函数只负责
+      把表现同步给客户端，不重复置本地表现；
+    - solo 模式（net_mode!="host" 或无 net_server）直接返回，零开销；
+    - 客户端路径不调用本函数：客户端攻击经 ATTACK_EVENT 由主机裁决后中继广播
+      （见 network_sync._resolve_attack_event），避免双份消息。
+    """
+    if getattr(gs, "net_mode", "solo") != "host" or gs.net_server is None:
+        return False
+    angle = math.atan2(world_y - view.player.center_y, world_x - view.player.center_x)
+    host_id = getattr(gs, "net_player_id", None)
+    if host_id is None:
+        host_id = 0  # 大厅未接入前的约定：主机固定玩家 id=0（与幽灵创建口径一致）
+    view.net_sync.broadcast_attack_vfx(
+        host_id, kind, angle, atk_range,
+        x=view.player.center_x, y=view.player.center_y)
     return True
 
 
@@ -573,7 +600,7 @@ def handle_mouse_press(view, x, y, button, modifiers):
                 # 吸血剑：近战命中按实际伤害比例回血（攻击者=本地玩家）
                 lifesteal=getattr(gs, 'weapon_lifesteal', 0.0),
             )
-            view._player_attack_flash = 0.1
+            view._player_attack_flash = ATTACK_FLASH_DURATION
             view._attack_this_frame = True
             sound_manager.play_attack()
 
@@ -590,7 +617,9 @@ def handle_mouse_press(view, x, y, button, modifiers):
 
             # 记录攻击用于范围可视化
             view._attack_visual = (view.player.center_x, view.player.center_y,
-                                   world_x, world_y, weapon_range, 0.2)
+                                   world_x, world_y, weapon_range, ATTACK_VFX_DURATION)
+            # 主机模式：把本次近战刀光广播给客户端（联机互见；solo 下函数内零开销）
+            send_host_attack_vfx(view, gs, "melee", world_x, world_y, weapon_range)
 
             # 命中怪物反馈
             if hit:
@@ -630,9 +659,14 @@ def handle_mouse_press(view, x, y, button, modifiers):
                     spread_count=getattr(gs, 'weapon_spread_count', 1),
                     spread_angle=getattr(gs, 'weapon_spread_angle', 0.0),
                 )
-            view._player_attack_flash = 0.1
+            view._player_attack_flash = ATTACK_FLASH_DURATION
             view._attack_this_frame = True
             sound_manager.play_ranged_attack()
+            # 主机模式：把本次开火表现（闪白）广播给客户端（弹丸本身已 PROJECTILE_SNAPSHOT 同步）
+            send_host_attack_vfx(
+                view, gs,
+                "laser" if getattr(gs, 'weapon_special', '') == "laser" else "ranged",
+                world_x, world_y, weapon_range)
 
 
 def handle_mouse_release(view, x, y, button, modifiers):

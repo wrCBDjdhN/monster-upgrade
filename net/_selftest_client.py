@@ -66,7 +66,7 @@ EVAC_STATE_KEYS = ("x", "y", "state", "hp", "max_hp", "defend_left", "wave_no")
 # 任务/成就事件键全集：镜像 entities/mission_defs.MISSION_EVENT_KEYS
 # （net 自检不 import entities/game，避免与游戏层耦合；键集变更需同步此处）
 MISSION_EVENT_KEYS = (
-    "kill", "elite_kill", "harvest", "chest", "evac", "forge", "reforge",
+    "kill", "elite_kill", "boss_kill", "harvest", "chest", "evac", "forge", "reforge",
 )
 
 

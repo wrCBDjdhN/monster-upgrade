@@ -253,7 +253,7 @@ def init_db():
 # ── Re-exports（保持向后兼容） ──
 
 # 玩家管理
-from db.players import get_or_create_player, get_gold, add_gold, spend_gold  # noqa: F401, E402
+from db.players import get_or_create_player, get_gold, add_gold, spend_gold, ensure_starter_backpack  # noqa: F401, E402
 
 # 武器管理
 from db.weapons import create_weapon, add_weapon, get_weapons, upgrade_weapon, sell_weapon, weapon_sell_price, delete_weapon, reforge_weapon  # noqa: F401, E402
@@ -288,6 +288,9 @@ def clear_run_equipment(pid: int, weapon_db_id: int | None = None) -> None:
     - weapons 表：删除指定武器行
     - equipment 表：删除 is_equipped=1 的全部行（头盔/护甲/背包）
     - potions 表：删除该玩家全部药水行
+    清装后兜底：若背包被删光（equipment 无任何背包行）则补发 small_bag
+    （防「无背包不能拾取资源 → 永远攒不够撤离激活材料 → 无限死亡循环」死锁，
+    见 db.players.ensure_starter_backpack；武器/头盔/护甲/药水照丢，惩罚主体不变）。
     """
     from db.connection import _conn
     with _conn() as c:
@@ -295,6 +298,9 @@ def clear_run_equipment(pid: int, weapon_db_id: int | None = None) -> None:
             c.execute("DELETE FROM weapons WHERE id=? AND player_id=?", (weapon_db_id, pid))
         c.execute("DELETE FROM equipment WHERE player_id=? AND is_equipped=1", (pid,))
         c.execute("DELETE FROM potions WHERE player_id=?", (pid,))
+    # 兜底放在事务提交之后：equip_item 自带连接，嵌套在上方事务内会撞 SQLite 写锁
+    # （与 get_or_create_player 的赠送同一约定）
+    ensure_starter_backpack(pid)
 
 # 角色管理（购买解锁持久化）
 from db.characters import get_unlocked_characters, is_character_unlocked, unlock_character  # noqa: F401, E402

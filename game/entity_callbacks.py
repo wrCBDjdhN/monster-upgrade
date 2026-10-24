@@ -12,6 +12,7 @@ from config import (
     ELITE_EXP_MULT, ELITE_GOLD_BONUS, ELITE_MIN_WEAPON_LEVEL, ELITE_LABEL_COLOR,
     BLESSING_CHEST_CHANCE, BLESSING_ELITE_GUARANTEE,
     MONSTER_THEME_EQUIP,
+    BOSS_BONUS_MIN_LEVEL, BOSS_WEAPON_LEVEL_RANGE, BOSS_GEAR_LEVEL_RANGE,
     WINDOW_WIDTH, WINDOW_HEIGHT,
 )
 # 怪物元数据（武器颜色/掉落表键名/死亡粒子颜色）统一从 monster_defs.py 读取
@@ -85,9 +86,10 @@ def _award_kill_exp(view, monster):
     - client：on_monster_death 不在客户端运行（怪物由快照驱动），不在此发放。
     - 经验值 = EXP_KILL_BASE ×（BOSS 则 ×EXP_BOSS_MULT）。
 
-    阶段6.2 任务进度（kill / elite_kill）也在此**经验守卫之前**发：
-    口径（用户拍板 2026-09-26）= 死亡一律发 kill，精英在此之外**另发** elite_kill
-    （两事件并行，各按各自 target 封顶）；BOSS 不另发事件，其死亡已由 kill 覆盖。
+    阶段6.2 任务进度（kill / elite_kill / boss_kill）也在此**经验守卫之前**发：
+    口径（用户拍板 2026-09-26）= 死亡一律发 kill，精英在此之外**另发** elite_kill、
+    BOSS 另发 boss_kill（阶段D 第8键；精英/BOSS 均计入普通 kill，
+    两事件并行，各按各自 target 封顶）。
     归属取 monster.last_attacker_id（主机权威攻击者），主机把客户端击杀的进度
     单播给归属客户端（防双计铁律见 game/mission_tracker.py）；
     放在守卫前是为了让「客户端击杀」也计入任务——经验是各端本地补发，任务必须统一由主机裁决。
@@ -98,25 +100,29 @@ def _award_kill_exp(view, monster):
     """
     attacker = int(getattr(monster, "last_attacker_id", 0) or 0)
     # 阶段6.2 任务/成就进度（用户口径 2026-09-26：精英与 BOSS 均计入普通 kill——
-    # 死亡一律发 kill，精英另发 elite_kill（两事件并行，各按各自 target 封顶））
+    # 死亡一律发 kill，精英另发 elite_kill、BOSS 另发 boss_kill（阶段D 第8键，
+    # 两事件并行，各按各自 target 封顶））
     from game.mission_tracker import on_event as mission_on_event
     is_elite = bool(getattr(monster, "is_elite", False))
+    is_boss = bool(getattr(monster, "is_boss", False))
     mission_on_event(view, "kill", 1, attacker)
     if is_elite:
         mission_on_event(view, "elite_kill", 1, attacker)
+    if is_boss:
+        mission_on_event(view, "boss_kill", 1, attacker)
     # 阶段8 星级：与上面任务事件同点累加。kills 为**总击杀**（精英/BOSS 也计入总击杀，
     # 另在 elite_kills / boss_kills 里各记一次），这样「击杀 ≥N」条件按总击杀口径判定。
     record_run_stat(view, "kills", 1)
     if is_elite:
         record_run_stat(view, "elite_kills", 1)
-    if getattr(monster, "is_boss", False):
+    if is_boss:
         record_run_stat(view, "boss_kills", 1)
     gs = view.window.game_state
     if getattr(gs, "net_mode", "solo") == "host":
         # 主机：仅本端玩家击杀发放（客户端攻击者 id 为 1~3，非 0 时跳过）
         if attacker != 0:
             return
-    amount = EXP_KILL_BASE * (EXP_BOSS_MULT if getattr(monster, "is_boss", False) else 1)
+    amount = EXP_KILL_BASE * (EXP_BOSS_MULT if is_boss else 1)
     # 阶段3 精英词缀怪：经验再 ×ELITE_EXP_MULT（与 BOSS 倍率叠加，BOSS 不会被刷成精英）
     if getattr(monster, "is_elite", False):
         amount = int(amount * ELITE_EXP_MULT)
@@ -130,6 +136,9 @@ def _on_rocket_boss_defeated(view, boss, pad):
     # 等级经验：火箭台 BOSS 击杀经验（与普通 BOSS 同规则 EXP_BOSS_MULT；
     # 该死亡回调不走 on_monster_death，需在此单独发放）
     _award_kill_exp(view, boss)
+    # 阶段D 祝福：火箭台 BOSS 不走 on_monster_death（无 _grant_boss_bonus 装备加奖，
+    # 其掉落本就丰厚——武器+护甲+头盔+金币+矿石），此处仅补「boss」保底祝福
+    grant_blessing_trigger(view, "boss", 1.0)
     # 图鉴解锁：火箭台 BOSS 击败解锁对应条目（player_id 解析与经验发放同一模式）
     gs = view.window.game_state
     if getattr(gs, "player_id", None):
@@ -225,6 +234,43 @@ def _grant_elite_bonus(view, monster, loot):
     # （击杀经验处 = 击杀计数唯一口径，归属取 last_attacker_id，与经验同源不再重复计数）
 
 
+def _grant_boss_bonus(view, monster, loot):
+    """阶段D BOSS 击杀加奖：必掉 1 件 Lv≥BOSS_BONUS_MIN_LEVEL 护甲**或**头盔 + 保底祝福
+
+    与精英加奖（_grant_elite_bonus）同口径：在既有掉落之上加奖，不改原概率。
+    - 装备只掉 1 件：护甲池/头盔池随机择一（BOSS 自身已穿全套 20~30 级装备并随掉落，
+      加奖件补的是「更高下界保底」而非堆量）；等级下界 BOSS_BONUS_MIN_LEVEL、
+      上界取主题 gear_level 上限（与精英同模式）；
+    - 祝福固定保底触发（source="boss"）——BOSS 是本局最高价值目标，回报不打折。
+    火箭台 BOSS 不走 on_monster_death（掉落本就丰厚：武器+护甲+头盔+金币+矿石），
+    其祝福在 _on_rocket_boss_defeated 单独补发，不调用本函数。
+    """
+    theme = view.map_data.get("theme", "forest")
+    eq_cfg = MONSTER_THEME_EQUIP.get(theme, MONSTER_THEME_EQUIP["forest"])
+    from game.monster_utils import _weighted_choice
+    # 护甲池/头盔池随机择一掉一件（某池缺失时退化为掉另一池；两池皆空则跳过装备）
+    pools = []
+    if eq_cfg.get("armor_pool"):
+        pools.append(("armor", eq_cfg["armor_pool"], ARMORS))
+    if eq_cfg.get("helmet_pool"):
+        pools.append(("helmet", eq_cfg["helmet_pool"], HELMETS))
+    if pools:
+        slot, pool, defs = pools[random.randrange(len(pools))]
+        item_id = _weighted_choice(pool)
+        level_cap = max(BOSS_BONUS_MIN_LEVEL, eq_cfg["gear_level"][-1])
+        lvl = random.randint(BOSS_BONUS_MIN_LEVEL, level_cap)
+        d = DropItem(monster.center_x, monster.center_y, slot, item_id, 1, level=lvl)
+        d.color = defs.get(item_id, {}).get("color", (150, 150, 150))
+        loot.append(d)
+    # BOSS 击杀提示（金色 + 粒子，区别于精英的紫色词缀色）
+    floating_texts.add(monster.center_x, monster.center_y + 40, "BOSS 击杀!",
+                       (255, 215, 0), life=2.0, font_size=16, vy=60)
+    particle_system.emit(monster.center_x, monster.center_y, 30, (255, 215, 0),
+                         speed=200, life=0.9, size=5, gravity=60)
+    # 阶段5 祝福：BOSS 击杀保底触发一次待选（面板由 GameView 下一帧统一弹出）
+    grant_blessing_trigger(view, "boss", 1.0)
+
+
 def on_monster_death(view, monster):
     """怪物死亡回调"""
     # 新手教程：记录击杀数（游戏内引导推进用）
@@ -298,6 +344,10 @@ def on_monster_death(view, monster):
     # elite_drop（计划约定的「必掉」标记），避免只判其一导致奖励漏发
     if getattr(monster, "is_elite", False) or getattr(monster, "elite_drop", False):
         _grant_elite_bonus(view, monster, loot)
+    # 阶段D BOSS 加奖：必掉 1 件 Lv≥BOSS_BONUS_MIN_LEVEL 护甲或头盔 + 保底祝福
+    # （同样在 scatter 之前并入 loot；火箭台 BOSS 不走本回调，祝福在 _on_rocket_boss_defeated 补发）
+    if getattr(monster, "is_boss", False):
+        _grant_boss_bonus(view, monster, loot)
 
     # 分散掉落物位置，避免重叠
     scatter_drops(loot, monster.center_x, monster.center_y, obstacles=view.obstacle_list)
@@ -509,10 +559,11 @@ def handle_rocket_pad_interaction(view):
                     from game.monsters import BossSpace
                     from game.monster_utils import assign_monster_weapon, assign_monster_armor, assign_monster_helmet
                     boss = BossSpace(center_x=pad.center_x, center_y=pad.center_y + 60)
-                    # 为BOSS分配武器和装备（航天主题）
-                    assign_monster_weapon(boss, level=15, theme="space")
-                    assign_monster_armor(boss, level=15, theme="space")
-                    assign_monster_helmet(boss, level=15, theme="space")
+                    # 为BOSS分配武器和装备（航天主题；等级按 config 范围随机——
+                    # 原硬编码 15 低于 BOSS 装等范围 20~30，与 game_view.setup 房内 BOSS 口径漂移）
+                    assign_monster_weapon(boss, level=random.randint(*BOSS_WEAPON_LEVEL_RANGE), theme="space")
+                    assign_monster_armor(boss, level=random.randint(*BOSS_GEAR_LEVEL_RANGE), theme="space")
+                    assign_monster_helmet(boss, level=random.randint(*BOSS_GEAR_LEVEL_RANGE), theme="space")
                     boss.set_on_death(lambda b, p=pad: _on_rocket_boss_defeated(view, b, p))
                     # 注入召唤回调：BOSS 召唤小怪时直接加入游戏怪物列表
                     def _on_boss_summon(boss_ref, summoned_list, _view=view):

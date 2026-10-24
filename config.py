@@ -45,6 +45,11 @@ RANGED_KEEP_MIN = 120          # 远程怪物最小保持距离
 RANGED_KEEP_MAX = 200          # 远程怪物最大保持距离
 DEBUFF_TICK_INTERVAL = 0.5     # debuff 结算周期（秒）
 HIT_FLASH_DURATION = 0.15      # 受击闪白时长（秒）
+# 攻击表现（挥砍刀光 / 攻击闪白）：玩家、联机远端幽灵、怪物三方共用同一套时长，
+# 此前 0.2/0.1 硬编码散落在 input_handler 与 rendering 两处，统一收口到这里
+ATTACK_VFX_DURATION = 0.2      # 近战挥砍刀光时长（秒）
+ATTACK_FLASH_DURATION = 0.1    # 攻击瞬间本体闪白时长（秒）
+ATTACK_FLASH_COLOR = (255, 255, 150)  # 攻击闪白颜色（淡黄，区别于受击闪白/红）
 CHEST_WELL_INTERACT_RANGE = 40 # 宝箱/水井交互距离
 
 # ── 怪物数值定义（hp/damage/speed/color 等）已统一迁移到 entities/monster_defs.py ──
@@ -430,11 +435,58 @@ ROCKET_TROOP_LOOT_TABLE = [
     ("gold",     None,     0.25, 12, 25),
 ]
 
-# BOSS 航天兵掉落：丰厚资源+金币
-BOSS_SPACE_LOOT_TABLE = [
-    ("resource",  "ore",             0.60, 3, 5),
-    ("gold",      None,              1.00, 50, 80),
-]
+# 掉落表按 loot_key 查表（阶段A 掉落 Bug 修复）：
+# 键 = entities/monster_defs.MONSTER_METADATA 的 loot_key，
+# 值 = 上面定义的掉落表。game/loot.roll_loot 只查此表——
+# 旧实现按 "boss_zombie"/"boss_space" 等类名分支，与实际传入的 loot_key
+# 全不匹配，导致 BOSS/木乃伊/航天兵/土匪全落骷髅表（此处为唯一映射口径）。
+# 说明：原 BOSS_SPACE_LOOT_TABLE（与 SPACE_BOSS_LOOT_TABLE 重复且无任何消费方）已删除。
+LOOT_TABLE_BY_KEY = {
+    "zombie": ZOMBIE_LOOT_TABLE,
+    "skeleton": SKELETON_LOOT_TABLE,
+    "mummy": MUMMY_LOOT_TABLE,
+    "camel": CAMEL_LOOT_TABLE,
+    "boss": BOSS_LOOT_TABLE,
+    "sniper": SNIPER_LOOT_TABLE,
+    "assault": ASSAULT_LOOT_TABLE,
+    "bandit": BANDIT_LOOT_TABLE,
+    "rocket_troop": ROCKET_TROOP_LOOT_TABLE,
+    "space_boss": SPACE_BOSS_LOOT_TABLE,
+}
+
+# ── BOSS 阶段强化（阶段B）──
+# 血量首次跌到 hp_below 以下即进入该阶段（阈值降序、每阶段只触发一次；
+# 阈值与 entities/monster_defs.BOSS_SUMMON_CONFIG 的 phase_thresholds 对齐 →
+# 转阶段与召唤同刻发生，形成清晰的阶段节点）。
+# 进入阶段后按「已进入各阶段的乘数**累计连乘**」重算强化：
+#   speed_mult / damage_mult  对首次进阶段时快照的基准值 × ∏mult（不漂移）
+#   cd_mult                   技能冷却倍率，写 monster._skill_cd_mult 由
+#                             monsters._boss_try_skill 置冷却时消费
+# berserk=True 的末阶段：触发狂暴表现（复用 _skill_buff_* "berserk" 标记，
+# 快照同步字段与光晕渲染现成，客户端零新协议）。
+BOSS_PHASES: dict[str, list[dict]] = {
+    "BossZombie": [
+        {"hp_below": 0.6, "speed_mult": 1.1,  "damage_mult": 1.2,  "cd_mult": 0.9},
+        {"hp_below": 0.3, "speed_mult": 1.15, "damage_mult": 1.2,  "cd_mult": 0.8, "berserk": True},
+    ],
+    "BossSkeleton": [
+        {"hp_below": 0.6, "speed_mult": 1.1,  "damage_mult": 1.15, "cd_mult": 0.9},
+        {"hp_below": 0.3, "speed_mult": 1.15, "damage_mult": 1.2,  "cd_mult": 0.8, "berserk": True},
+    ],
+    "BossMummy": [
+        {"hp_below": 0.6, "speed_mult": 1.05, "damage_mult": 1.2,  "cd_mult": 0.9},
+        {"hp_below": 0.3, "speed_mult": 1.1,  "damage_mult": 1.25, "cd_mult": 0.8, "berserk": True},
+    ],
+    "BossSpace": [
+        {"hp_below": 0.7, "speed_mult": 1.1,  "damage_mult": 1.15, "cd_mult": 0.9},
+        {"hp_below": 0.4, "speed_mult": 1.15, "damage_mult": 1.2,  "cd_mult": 0.8},
+        {"hp_below": 0.1, "speed_mult": 1.2,  "damage_mult": 1.3,  "cd_mult": 0.7, "berserk": True},
+    ],
+}
+# 狂暴标记持续秒数：取超大值 = 本局永久（远超单场 BOSS 战时长）。
+# update_skill_buffs 到期会把 damage 恢复为 _skill_buff_original，
+# 而该值快照的正是强化后的攻击力 → 即便到期也不回退。
+BOSS_BERSERK_DURATION = 9999.0
 
 # ── 火箭发射台 ──
 ROCKET_PAD_SIZE = 32               # 发射台精灵大小
@@ -631,6 +683,16 @@ ELITE_DAMAGE_MULT = 1.5       # 精英伤害倍率
 ELITE_GOLD_BONUS = 3          # 精英死亡金币倍率
 ELITE_MIN_WEAPON_LEVEL = 10   # 精英必掉武器/装备的最低等级
 ELITE_EXP_MULT = 2            # 精英死亡经验倍率
+
+# ── 阶段D：BOSS 装等门槛消费（entities/monster_defs 的 required_weapon_level 首次生效）──
+# 玩家武器等级 < BOSS.required_weapon_level 时，对**该 BOSS** 的伤害倍率 =
+# max(BOSS_UNDERLEVEL_MIN_MULT, 1 - 差值 × BOSS_UNDERLEVEL_PENALTY_PER_LEVEL)；
+# 武器等级 ≥ 门槛或怪物无门槛（普通怪恒 0）→ 1.0 不打折。
+# 武器等级口径 = gs.weapon_level（DB w["level"] 或局内拾取 d.level），联机由客户端
+# 经 ATTACK_EVENT.payload.weapon_level 上报、主机写到幽灵身上（权威调整在主机，不违反客户端禁仲裁）
+BOSS_UNDERLEVEL_PENALTY_PER_LEVEL = 0.15  # 武器等级每差 1 级，对 BOSS 伤害 ×(1-0.15)
+BOSS_UNDERLEVEL_MIN_MULT = 0.3            # 伤害倍率下界（等级差再大也保底 30% 伤害）
+BOSS_BONUS_MIN_LEVEL = 15                 # BOSS 必掉装备（护甲/头盔）的最低等级
 
 # 词缀·狂暴：半血一次性提速提伤
 ELITE_FRENZY_HP_THRESHOLD = 0.5   # 触发阈值（当前血量 / 最大血量）

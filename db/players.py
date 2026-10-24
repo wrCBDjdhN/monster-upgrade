@@ -45,6 +45,31 @@ def _grant_starter_backpack(pid: int) -> None:
         print(f"[警告] 新玩家赠送小布袋失败（pid={pid}）：{e}")
 
 
+def ensure_starter_backpack(pid: int) -> None:
+    """防死锁兜底：equipment 表无任何背包行时补发并装备 small_bag（用户报告 2026-10-24）
+
+    两处调用：
+    - get_or_create_player：新玩家创建后（必无背包，否则首局无解死锁）；
+    - db.database.clear_run_equipment：死亡/撤离失败清装后——清装会删掉已装备背包，
+      若玩家尚未解锁市场（无法购买）、宝箱背包又只是随机掉（main_pool 普通一员，
+      forest 每箱仅约 7.9%），就会复现「无背包 → 不能拾取资源 → 永远攒不够撤离
+      激活材料 → 无限死亡循环」的死锁。背包是「游戏进行权」而非强度道具，
+      故清装后保底一只（武器/头盔/护甲/药水照丢，死亡惩罚主体不变）。
+
+    判定口径：只看 equipment 表是否有背包行（含未装备行）——玩家仓库里还有
+    背包时不去装备界面穿上即可，不白送。补发失败只告警（沿用 _grant_starter_backpack
+    的容错口径），不得抛出打断清装流程。
+    """
+    from db.connection import _conn
+    with _conn() as c:
+        n = c.execute(
+            "SELECT COUNT(*) FROM equipment WHERE player_id=? AND slot='backpack'",
+            (pid,)).fetchone()[0]
+    if n > 0:
+        return
+    _grant_starter_backpack(pid)
+
+
 def get_gold(pid: int) -> int:
     """获取玩家金币"""
     with _conn() as c:
