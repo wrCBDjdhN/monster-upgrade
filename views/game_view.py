@@ -1474,7 +1474,7 @@ class GameView(arcade.View):
             if point.state == "secured":
                 self._evac_prompt("撤离点已守住！前往读条撤离", color=arcade.color.GREEN)
             elif point.state == "destroyed":
-                self._evac_prompt("撤离点被摧毁！按 E 消耗资源修复", color=arcade.color.RED)
+                self._evac_prompt("撤离点被摧毁！按 E 修复重守", color=arcade.color.RED)
             self._evac_last_state = point.state
         # 低血量告警：仅在跨过 30% 阈值那一刻提示一次
         ratio = (point.hp / point.max_hp) if point.max_hp else 0.0
@@ -1508,12 +1508,16 @@ class GameView(arcade.View):
                 f"防守中：剩余 {point.defend_left:.0f} 秒（第 {point.wave_no} 波）",
                 color=arcade.color.YELLOW)
             return
-        # dormant / destroyed 需消耗资源：单次动作，先消费按键再结算
+        # dormant / destroyed 需消耗资源（新手教程局免材料）：单次动作，先消费按键再结算
         self._chest_key_pressed = False
         # 激活与修复同价（config.evac_activate_cost 按地图主题取值，三图分造价 2026-09-26）
         cost = evac_activate_cost(self.map_data.get("theme", "forest"))
         gs = self.window.game_state
-        if not self._pay_resource_cost(gs, cost):
+        # 新手教程局免材料激活/修复：玩家允许不携带背包进入，无背包拾不到资源，
+        # 否则教程会卡在撤离点（用户决策 2026-10-31；普通局仍按 config 造价扣资源）
+        tut = getattr(gs, "tutorial", None)
+        tutorial_run = tut is not None and tut.active and tut.stage == 3
+        if not tutorial_run and not self._pay_resource_cost(gs, cost):
             self._evac_prompt(f"资源不足，需要 {self._evac_cost_text(cost)}",
                               color=arcade.color.RED)
             return
@@ -2793,7 +2797,7 @@ class GameView(arcade.View):
                 self._handle_well_interaction()
                 # 火箭发射台交互（靠近按E）
                 self._handle_rocket_pad_interaction()
-                # 阶段2 防守撤离点交互（dormant 激活 / destroyed 修复，均消耗资源）
+                # 阶段2 防守撤离点交互（dormant 激活 / destroyed 修复；新手教程局免材料）
                 self._handle_evac_point_interaction()
 
             # 火箭发射台状态机更新

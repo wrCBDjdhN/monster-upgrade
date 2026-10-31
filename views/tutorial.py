@@ -287,9 +287,12 @@ def draw_in_game_tutorial(view, tc):
         # 终态：主行讲建造，副行按撤离点**真实状态**分步指引（dormant→defending
         # →secured / destroyed），跟着战况走直到撤离完成——满足「指引直到撤离」。
         # 教程事实错误修正（2026-09-26）：原文案「站上去读条 3 秒即可撤离」是 v1
-        # 规则。现行机制 = 蓝色方块撤离点须靠近按 E 消耗材料激活 → 进入防守波次
+        # 规则。现行机制 = 蓝色方块撤离点须靠近按 E 激活 → 进入防守波次
         # （倒计时防守）→ 守住后站上点**按住** E 读条撤离（EvacState 需 holding
-        # 才推进读条）；撤离点被打成废墟可按 E 消耗材料修复重守。
+        # 才推进读条）；撤离点被打成废墟可按 E 修复重守。
+        # 教程局免材料（用户决策 2026-10-31）：玩家可不携带背包进入，拾不到资源，
+        # 故教程局激活/修复不扣材料；普通局造价照实展示，避免教程教错规则。
+        cost_label = evac_cost_label(theme)
         ep = getattr(view, "evac_point", None)
         st = getattr(ep, "state", None)
         if st == "defending":
@@ -299,9 +302,11 @@ def draw_in_game_tutorial(view, tc):
             evac_line = (f"撤离点已守住！站到点上按住 {k_atk} 读条 "
                          f"{evac_hold_seconds()} 秒完成撤离")
         elif st == "destroyed":
-            evac_line = f"撤离点被摧毁！靠近废墟按 {k_atk} 消耗 {evac_cost_label(theme)} 修复重守"
+            evac_line = (f"撤离点被摧毁！靠近废墟按 {k_atk} 修复重守"
+                         f"（教程局免材料；普通局需 {cost_label}）")
         else:  # dormant（含 None 兜底）
-            evac_line = f"撤离：找到蓝色方块，靠近按 {k_atk} 消耗 {evac_cost_label(theme)} 激活"
+            evac_line = (f"撤离：找到蓝色方块，靠近按 {k_atk} 激活"
+                         f"（教程局免材料；普通局需 {cost_label}）")
         tut_banner(view, f"按 {k_build} 进入建造模式：{k_num} 选建筑、左键放置、ESC 退出",
                    tc, "tut_banner_build",
                    sub=evac_line)
