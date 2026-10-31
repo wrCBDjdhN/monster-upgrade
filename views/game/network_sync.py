@@ -2758,8 +2758,11 @@ class NetworkSyncManager:
         - 弹丸/激光首次序列化时惰性分配单调 proj_id（存储在对象上，存活期不变），
           与 setup() 初始弹丸共用同一个单调计数器，保证全房唯一；消亡后 id 不回收；
         - 载荷键名严格遵循 net/protocol.py MESSAGE_SCHEMAS["PROJECTILE_SNAPSHOT"]：
-          proj_id / owner_id / x / y / vx / vy / damage / debuff（弹丸）；
+          proj_id / owner_kind / owner_id / x / y / vx / vy / damage / debuff（弹丸）；
           proj_id / owner_id / x / y / angle / damage / length / width / duration（激光）。
+        - owner_kind 区分弹丸归属命名空间：怪物弹丸 owner_id=怪物 net_id，玩家弹丸
+          owner_id=玩家 id；客户端只跳过 owner_kind=player 且 owner_id=自己的弹丸
+          （两者 id 都从 1 开始，只比 owner_id 会撞号漏显同号怪物的弹丸）。
         """
         snapshot = []
         # 怪物弹丸（骷髅等远程怪物的权威弹丸）
@@ -2772,6 +2775,8 @@ class NetworkSyncManager:
                 p.proj_id = proj_id
             snapshot.append({
                 "proj_id": proj_id,
+                # 怪物弹丸归属怪物 net_id，与玩家 id 是两套命名空间，客户端靠 owner_kind 区分
+                "owner_kind": "monster",
                 "owner_id": getattr(p, "owner_net_id", 0),
                 "x": p.center_x,
                 "y": p.center_y,
@@ -2782,7 +2787,8 @@ class NetworkSyncManager:
                 "color": list(getattr(p, "color", (255, 100, 50))[:3]),
             })
         # 玩家弹丸（修复主机子弹客户端不可见：主机本地攻击与客户端上报攻击生成的
-        # 权威弹丸都进快照；客户端按 owner_id==自己 跳过本地表现弹丸，其余照常渲染）
+        # 权威弹丸都进快照；客户端按 owner_kind=player 且 owner_id==自己 跳过本地表现弹丸，
+        # 其余照常渲染）
         for p in self.gv.combat.projectiles:
             proj_id = getattr(p, "proj_id", None)
             if proj_id is None:
@@ -2791,6 +2797,7 @@ class NetworkSyncManager:
                 p.proj_id = proj_id
             snapshot.append({
                 "proj_id": proj_id,
+                "owner_kind": "player",
                 "owner_id": getattr(p, "owner_net_id", 0),
                 "x": p.center_x,
                 "y": p.center_y,
@@ -2943,8 +2950,9 @@ class NetworkSyncManager:
         - 已有 proj_id → 原位更新位置（主机权威，纯视觉跟随，不做客户端物理/插值）；
         - 本端存在但快照缺失的 proj_id → 弹丸已在主机消亡（超时/碰墙/命中玩家），
           删除即命中消失。vx/vy/damage/debuff 以 net_* 前缀保存在弹丸对象上供后续任务扩展。
-        - owner_id == 本端玩家 id 的弹丸跳过：那是本端自己发射的纯表现弹丸（本地已渲染），
-          重复渲染会造成双重弹丸（修复主机子弹同步后引入的双重渲染问题）；
+        - owner_kind=player 且 owner_id == 本端玩家 id 的弹丸跳过：那是本端自己发射的
+          纯表现弹丸（本地已渲染），重复渲染会造成双重弹丸；怪物弹丸（owner_kind=monster，
+          owner_id=怪物 net_id）必须渲染——两者 id 都从 1 开始，只看 owner_id 会撞号漏显；
         - lasers 列表：维护远端激光表现对象（owner_id==自己 的激光同样跳过，本地已有表现）。
         """
         gs = self.gv.window.game_state
@@ -2955,8 +2963,12 @@ class NetworkSyncManager:
             proj_id = entry.get("proj_id")
             if proj_id is None:
                 continue  # 非法条目：无 proj_id 无法同步，跳过
-            # 自己发射的弹丸：本地已有纯表现弹丸（input_handler 本地生成），跳过避免双重渲染
-            if my_id is not None and entry.get("owner_id") == my_id:
+            # 自己发射的弹丸：本地已有纯表现弹丸（input_handler 本地生成），跳过避免双重渲染。
+            # 必须同时校验 owner_kind=player：怪物弹丸的 owner_id 是怪物 net_id（同样从 1 开始），
+            # 与客户端玩家 id 撞号，只看 owner_id 会把同号怪物的弹丸误判为自己发射而漏显。
+            # 缺省按 player 处理（旧主机无该字段时保持原行为）。
+            if (entry.get("owner_kind", "player") == "player"
+                    and my_id is not None and entry.get("owner_id") == my_id):
                 continue
             snapshot_ids.add(proj_id)
             rp = self.gv._remote_proj_map.get(proj_id)
