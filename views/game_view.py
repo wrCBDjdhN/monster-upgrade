@@ -2,7 +2,6 @@
 
 import math
 import random
-import copy
 import re  # 怪物类名 → snake_case 刷怪键转换
 import time  # 联机 ATTACK_EVENT 时间戳（毫秒）
 import arcade
@@ -78,6 +77,7 @@ from game.input_handler import (
 # is_boss 分流到 BOSS 表。新增怪物只需同步 monster_defs.py 与 monsters.py，无需再改本文件。
 from entities.monster_defs import MONSTER_CONFIGS
 import game.monsters as monsters
+import logging
 
 
 def _spawn_key(class_name: str) -> str:
@@ -419,10 +419,15 @@ class GameView(arcade.View):
         # 联机：房间结束已广播/已处理标记（主机撤离/死亡/超时广播 ROOM_ENDED 防重复；
         # 客户端收到后回大厅，避免后续帧再次触发同一路径）
         self._room_ended_handled = False
-        # 世界坐标标签列表（在HUD阶段绘制）：[(world_x, world_y, text, color, font_size)]
+        # 世界坐标标签列表（在HUD阶段绘制）：
+        # [(稳定key, world_x, world_y, text, color, font_size, tier)]
+        # key 必须来自实体身份（禁列表下标，否则实体进出视野会让标签缓存整体失效）；
+        # tier=0 关键信息 / tier=1 细项（远处自动降级隐藏，见 config.PERF_LABEL_*）
         self._world_labels: list = []
-        # 怪物精灵列表缓存（弹丸碰撞检测用，每帧在 on_update 中构建）
+        # 怪物精灵列表缓存（弹丸碰撞检测用）：仅在怪物增删/死亡时重建，
+        # 不再每帧 clear+重建（原实现每帧 O(怪物数) 分配 + id 去重 set）
         self._monster_sprite_list = arcade.SpriteList()
+        self._monster_sprite_n = -1
         # 行动时间倒计时（forest=8min, desert=10min, space=15min，数值见 config.ACTION_TIME_*）
         self._action_time_remaining = None  # None=无限，float=剩余秒数
         # 角色等级数据缓存（等级/经验/待选升级/永久加成）：setup 读取、经验发放时刷新，
@@ -1020,7 +1025,7 @@ class GameView(arcade.View):
         # 之后每次新触发都会被 on_update 的守卫挡掉，祝福再也弹不出来。
         self._blessing_panel_open = False
         if source:
-            print(f"[Blessing] 触发待选：来源={source}，累计 {self.blessing_pending} 次")
+            logging.debug(f"[Blessing] 触发待选：来源={source}，累计 {self.blessing_pending} 次")
         return True
 
     def _current_weapon_name(self) -> str:
@@ -1559,7 +1564,7 @@ class GameView(arcade.View):
             "x": self.player.center_x,
             "y": self.player.center_y,
         }))
-        print(f"[Client] 请求撤离点 {action}")
+        logging.debug(f"[Client] 请求撤离点 {action}")
 
     def _clear_evac_defense(self) -> None:
         """本局失败/结束清理：撤离点失活 + 所有怪物解除对撤离点的锁定
@@ -1648,7 +1653,7 @@ class GameView(arcade.View):
         state = payload.get("state")
         if state not in ("dormant", "defending", "secured", "destroyed"):
             # 状态非法：显式记录而非静默忽略（net 层铁律）
-            print(f"[Client] EVAC_POINT_STATE 非法 state={state!r}，忽略")
+            logging.debug(f"[Client] EVAC_POINT_STATE 非法 state={state!r}，忽略")
             return
         point = self.evac_point
         if point is None:
@@ -1712,27 +1717,27 @@ class GameView(arcade.View):
 
         action = payload.get("action")
         if action not in ("activate", "repair"):
-            print(f"[Host] EVAC_POINT_ACTION 非法 action={action!r}（player={sender_id}），忽略")
+            logging.debug(f"[Host] EVAC_POINT_ACTION 非法 action={action!r}（player={sender_id}），忽略")
             _reply(False, "无效的撤离点操作")
             return
         point = self.evac_point
         if point is None:
-            print(f"[Host] 撤离点尚未建立，忽略 {action} 请求（player={sender_id}）")
+            logging.debug(f"[Host] 撤离点尚未建立，忽略 {action} 请求（player={sender_id}）")
             _reply(False, "撤离点尚未建立")
             return
         req_x, req_y = payload.get("x"), payload.get("y")
         if req_x is None or req_y is None:
-            print(f"[Host] EVAC_POINT_ACTION 缺坐标，忽略（player={sender_id}）")
+            logging.debug(f"[Host] EVAC_POINT_ACTION 缺坐标，忽略（player={sender_id}）")
             _reply(False, "请求缺少坐标")
             return
         if math.hypot(float(req_x) - point.x, float(req_y) - point.y) > EVAC_INTERACT_RANGE:
-            print(f"[Host] 撤离点超距（>{EVAC_INTERACT_RANGE}px），拒绝 {action}（player={sender_id}）")
+            logging.debug(f"[Host] 撤离点超距（>{EVAC_INTERACT_RANGE}px），拒绝 {action}（player={sender_id}）")
             self._broadcast_evac_point_state(force=True)
             _reply(False, "距离撤离点太远")
             return
         expected_state = "dormant" if action == "activate" else "destroyed"
         if point.state != expected_state:
-            print(f"[Host] 撤离点状态 {point.state} 不匹配 {action}（需 {expected_state}），拒绝"
+            logging.debug(f"[Host] 撤离点状态 {point.state} 不匹配 {action}（需 {expected_state}），拒绝"
                   f"（player={sender_id}）")
             self._broadcast_evac_point_state(force=True)
             _reply(False, "撤离点当前状态不允许该操作")
@@ -1745,7 +1750,7 @@ class GameView(arcade.View):
             resource = {}
         for item_id, need in cost.items():
             if int(resource.get(item_id, 0) or 0) < int(need):
-                print(f"[Host] 玩家 {sender_id} 资源不足（缺 {item_id}x{need}），拒绝 {action}")
+                logging.debug(f"[Host] 玩家 {sender_id} 资源不足（缺 {item_id}x{need}），拒绝 {action}")
                 self._broadcast_evac_point_state(force=True)
                 # 问题2 修复：回执与主机本地提示同口径——报全量需求清单而非仅首个
                 # 缺失项，客户端浮字才能看到「需要哪些资源各多少」（与 1441 行一致）
@@ -1874,20 +1879,33 @@ class GameView(arcade.View):
     def _hud_text(self, key, text, x, y, color, size=12, anchor_x="left",
                   anchor_y="baseline", bold=False):
         """复用持久 arcade.Text 对象：仅当字符串变化时才重绘纹理，
-        避免每帧 draw_text 重建纹理造成卡顿。"""
+        避免每帧 draw_text 重建纹理造成卡顿。
+
+        缓存判据包含 anchor：原先漏了 anchor，同一 key 换对齐方式会画出错位文字。
+        每 300 帧清理一次长期未用的 key：长局中实体 key 不断新增，若不清理会
+        只增不减地堆积 arcade.Text（内存与字形纹理双泄漏）。
+        """
         t = self._hud_texts.get(key)
         if t is None or t._hud_key_size != size or t._hud_key_color != color \
-                or t._hud_key_bold != bold:
+                or t._hud_key_bold != bold \
+                or t._hud_key_anchor != (anchor_x, anchor_y):
             t = arcade.Text(text, x, y, color, size,
                             anchor_x=anchor_x, anchor_y=anchor_y, bold=bold)
             t._hud_key_size = size
             t._hud_key_color = color
             t._hud_key_bold = bold
+            t._hud_key_anchor = (anchor_x, anchor_y)
             self._hud_texts[key] = t
         if t.value != text:
             t.value = text
         t.position = (x, y)
+        t._hud_used_frame = self._frame
         t.draw()
+        if self._frame % 300 == 0:
+            stale = [k for k, v in self._hud_texts.items()
+                     if self._frame - getattr(v, "_hud_used_frame", -300) > 300]
+            for k in stale:
+                del self._hud_texts[k]
 
     def _in_view(self, x, y, margin=80):
         """视口裁剪：仅绘制相机可见范围内的物体，减少每帧图元提交数。
@@ -1937,7 +1955,7 @@ class GameView(arcade.View):
         if sender_id not in self._full_state_sent:
             self._full_state_sent.add(sender_id)
             gs.net_server.send_to(sender_id, MsgType.FULL_STATE, self._serialize_full_state())
-            print(f"[GameView] 晚期加入玩家 {sender_id}：已发送全量状态")
+            logging.debug(f"[GameView] 晚期加入玩家 {sender_id}：已发送全量状态")
         if inbound.get("msg_type") == MsgType.ATTACK_EVENT.name:
             self._resolve_attack_event(
                 sender_id, inbound.get("payload") or {})
@@ -1981,7 +1999,7 @@ class GameView(arcade.View):
         elif inbound.get("msg_type") == MsgType.MISSION_PROGRESS.name:
             # 阶段6.2 防御分支：MISSION_PROGRESS 语义为「主机→客户端」单向单播，
             # 客户端上报同名消息一律显式忽略并记日志（禁静默忽略 + 防伪造他人进度）
-            print(f"[GameView] 忽略客户端 {sender_id} 上报的 MISSION_PROGRESS"
+            logging.debug(f"[GameView] 忽略客户端 {sender_id} 上报的 MISSION_PROGRESS"
                   "（该消息仅主机→客户端单向）")
         elif inbound.get("msg_type") == MsgType.READY.name:
             # 对局中客户端准备上报（②修复）：房主仍在对局、客户端死亡回房点准备时，
@@ -1996,14 +2014,14 @@ class GameView(arcade.View):
                                         build_ready_state_payload(
                                             gs.net_server.player_info(),
                                             gs.net_ready_state, gs.player_name))
-                print(f"[GameView] 玩家 {sender_id} 准备状态: {ready}")
+                logging.debug(f"[GameView] 玩家 {sender_id} 准备状态: {ready}")
         elif inbound.get("msg_type") == MsgType.HEARTBEAT.name:
             # 心跳回显：原样回给该客户端，客户端据此计算 RTT（保活同理）
             gs.net_server.send_to(sender_id, MsgType.HEARTBEAT, inbound.get("payload") or {})
         else:
             # 11.1 接线核查：未识别的客户端消息显式记录（net 层铁律：禁静默忽略）。
             # 仍继续走 _ensure_ghost：无论消息类型，该玩家的幽灵实体都必须建好。
-            print(f"[GameView] 主机收到未接线消息 "
+            logging.debug(f"[GameView] 主机收到未接线消息 "
                   f"{inbound.get('msg_type')!r}（玩家 {sender_id}），仅保证幽灵存在")
         # 其他客户端消息：确保该玩家幽灵已创建（多目标 AI 与 PLAYER_SNAPSHOT 需要）
         self._ensure_ghost(sender_id)
@@ -2188,7 +2206,7 @@ class GameView(arcade.View):
                 else:
                     # 11.1 接线核查：未知消息必须显式记录（net 层铁律：禁静默忽略）。
                     # 正常不应走到这里——decode 已拦未知类型名，此处兜底防枚举扩展后漏接线。
-                    print(f"[GameView] 客户端收到未接线消息 {msg_type.name}，已忽略")
+                    logging.debug(f"[GameView] 客户端收到未接线消息 {msg_type.name}，已忽略")
             # 客户端本地攻速节流计时器递减（判定已移交主机，不经 combat 冷却）
             self._net_fire_cd = max(0.0, self._net_fire_cd - dt)
             # 远端怪物受击闪白计时衰减（远端怪物不进本地 AI/update，不自行递减）
@@ -2320,7 +2338,7 @@ class GameView(arcade.View):
                             "player_id": pid,
                             "x": ghost.center_x, "y": ghost.center_y,
                         }, exclude=pid)
-                        print(f"[GameView] 玩家 {pid} 倒地，等待救援（{DOWNED_TIMEOUT}秒超时）")
+                        logging.debug(f"[GameView] 玩家 {pid} 倒地，等待救援（{DOWNED_TIMEOUT}秒超时）")
                     # 已倒地（_downed_notified 已置位）：倒计时推进与超时真死统一由
                     # spectate._update_downed_timers 负责（倒计时唯一实现处）。此前
                     # 此处与 on_update 的倒地循环各减一次，导致主机侧远端幽灵的倒计时
@@ -2331,7 +2349,7 @@ class GameView(arcade.View):
             for pid in list(self._player_status.keys()):
                 if pid != 0 and pid not in online_ids and self._player_status.get(pid) not in ("evac", "dead", "left"):
                     self._player_status[pid] = "left"
-                    print(f"[GameView] 玩家 {pid} 已离开房间，标记 left")
+                    logging.debug(f"[GameView] 玩家 {pid} 已离开房间，标记 left")
 
             # 倒地真死收口（口径 A）：场上已不存在任何"非本人且存活"的玩家时，倒地者
             # 不再等 60 秒超时，立即按正常死亡结算（丢失本局携带物 + 进观战/失败口径）。
@@ -2669,13 +2687,19 @@ class GameView(arcade.View):
         # 客户端只保留弹丸运动表现，命中由攻击事件→主机判定→广播伤害结果驱动）
         # TODO(联机): 主机权威逻辑，客户端跳过
         if gs.net_mode != "client":
-            # 弹丸命中怪物（复用精灵列表，避免每帧新建）
-            self._monster_sprite_list.clear()
-            seen_ids = set()  # 防止同一怪物对象被重复添加（respawn 时可能出现）
-            for m in self.monsters:
-                if hasattr(m, 'alive') and m.alive and id(m) not in seen_ids:
-                    self._monster_sprite_list.append(m)
-                    seen_ids.add(id(m))
+            # 弹丸命中怪物（精灵列表按需重建：仅在怪物增删/有死亡时重建）
+            _need_rebuild = (
+                len(self.monsters) != self._monster_sprite_n
+                or any(not getattr(m, 'alive', False) for m in self._monster_sprite_list)
+            )
+            if _need_rebuild:
+                self._monster_sprite_list.clear()
+                seen_ids = set()  # 防止同一怪物对象被重复添加（respawn 时可能出现）
+                for m in self.monsters:
+                    if hasattr(m, 'alive') and m.alive and id(m) not in seen_ids:
+                        self._monster_sprite_list.append(m)
+                        seen_ids.add(id(m))
+                self._monster_sprite_n = len(self.monsters)
             hit_list = self.combat.check_monster_hits(self._monster_sprite_list)
             # 激光命中检测（陨星炮：对路径上的怪物持续造成伤害）
             hit_list.extend(self.combat.check_laser_hits(self._monster_sprite_list))
@@ -2900,11 +2924,16 @@ class GameView(arcade.View):
             from game.map_events import scale_event_drops
             scale_event_drops(self)
 
-            # 掉落物更新
-            for d in self.drops[:]:
+            # 掉落物更新（就地写指针压缩：原先对列表副本遍历 + list.remove，
+            # 过期集中时是 O(D²)，且每帧多一次列表拷贝）
+            write = 0
+            for i in range(len(self.drops)):
+                d = self.drops[i]
                 d.update(dt)
-                if d.expired:
-                    self.drops.remove(d)
+                if not d.expired:
+                    self.drops[write] = d
+                    write += 1
+            del self.drops[write:]
 
             # 联机主机：为新生成的掉落物分配网络 id 并广播 drop_spawn（MAP_CHANGE extra 携带列表，
             # 客户端据此建本地视觉掉落物；solo 模式无 net_id 分配，不走广播）
@@ -2933,7 +2962,13 @@ class GameView(arcade.View):
             self._broadcast_map_changes()
 
         # 按E拾取（带效果）
-        old_carried = copy.deepcopy(gs.run_carried) if hasattr(gs, 'run_carried') else {}
+        # 只复制一层（run_carried 的值均为 int/tuple 的扁平 dict）：语义等价 deepcopy，
+        # 成本低一个数量级，避免每帧对整包携带物做递归深拷贝
+        old_carried = (
+            {k: (dict(v) if isinstance(v, dict) else v)
+             for k, v in gs.run_carried.items()}
+            if hasattr(gs, 'run_carried') else {}
+        )
         picked, skipped_full, skipped_no_bag = (False, False, False)
         # 观战守卫：观战期屏蔽拾取——否则 input_handler 早退导致 _chest_key_pressed 无法复位，
         # 幽灵持续上报 PICKUP_REQUEST（修复客户端观战崩溃）

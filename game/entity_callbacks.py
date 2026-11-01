@@ -22,6 +22,7 @@ from game.loot import DropItem, roll_loot
 from game.sound_manager import sound_manager
 from game.effects import particle_system, floating_texts
 from game.render_helpers import draw_drop_icon
+import logging
 
 
 # 阶段8 星级：单局统计可累加的计数键（carried_gold/evac 不在击杀路径累加，
@@ -38,7 +39,7 @@ def record_run_stat(view, key: str, amount: int = 1) -> None:
     未知键显式告警后忽略（禁静默写脏键）。
     """
     if key not in RUN_STAT_COUNTERS:
-        print(f"[星级] record_run_stat 收到未知统计键 {key!r}，已忽略（合法键：{RUN_STAT_COUNTERS}）")
+        logging.debug(f"[星级] record_run_stat 收到未知统计键 {key!r}，已忽略（合法键：{RUN_STAT_COUNTERS}）")
         return
     gs = getattr(getattr(view, "window", None), "game_state", None)
     if gs is None or getattr(gs, "net_mode", "solo") == "client":

@@ -1146,3 +1146,16 @@ MONSTER_NAV_MOVE_EPS = 0.5             # 「几乎没动」的位移阈值（像
 # 不放宽任何碰撞判定。
 MONSTER_NAV_UNSTICK_SEARCH_RING = 4
 
+
+# ── 渲染性能预算（game/effects.py + game/rendering*.py 消费）──
+# 用户反馈（2026-10-31）：怪物/特效/文字一多就严重卡顿。
+# 以下为每帧渲染预算，超限按「离玩家最近优先」保留，短时间大量特效不再拖垮帧率。
+PERF_WORLD_LABEL_MAX = 120        # 世界坐标文字标签每帧最多绘制条数（超限丢最远的）
+PERF_LABEL_FULL_DIST = 320.0      # 距玩家 ≤ 该值：显示完整标签（名字/武器/护甲/头盔）
+PERF_LABEL_NAME_DIST = 640.0      # 距玩家 ≤ 该值：只显示名字；更远的文字标签不绘制
+PERF_PARTICLE_MAX = 600           # 活跃粒子上限（超限从最老的开始丢弃）
+PERF_PARTICLE_SEG = 8             # 粒子圆分段数（原 24，顶点数降至 1/3，视觉几乎无差别）
+PERF_FLOAT_TEXT_MAX = 60          # 活跃飘字上限（超限丢弃最老的）
+PERF_FLOAT_TEXT_OFFSET_SCAN = 8   # 飘字避让只比对最近 N 条（乱战时避免 O(T²)）
+PERF_SAMPLE_INTERVAL = 2.0        # --stats 探针打印间隔（秒）
+

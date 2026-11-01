@@ -23,6 +23,7 @@ from entities.mission_defs import (
     DAILY_BY_ID,
     ACHIEVEMENT_BY_ID,
 )
+import logging
 
 # 局内战斗事件（唯一计数端 = 主机；客户端永不自计）
 IN_RUN_EVENTS = frozenset({"kill", "elite_kill", "boss_kill", "harvest", "chest", "evac"})
@@ -55,7 +56,7 @@ def on_event(view, event: str, amount: int = 1, player_id: int | None = None) ->
     player_id：归属玩家的**联机传输 id**；缺省 = 本端玩家。
     """
     if event not in MISSION_EVENT_KEYS:
-        print(f"[任务] on_event 收到未知事件键 {event!r}，已忽略（合法键：{MISSION_EVENT_KEYS}）")
+        logging.debug(f"[任务] on_event 收到未知事件键 {event!r}，已忽略（合法键：{MISSION_EVENT_KEYS}）")
         return
     gs = _game_state(view)
     if gs is None or not getattr(gs, "player_id", None):
@@ -83,7 +84,7 @@ def apply_remote_progress(view, player_id, event: str, amount: int = 1) -> None:
       双保险下即便收到也按同一 bump 口径写库，不会出现同端重复计数路径）。
     """
     if event not in MISSION_EVENT_KEYS:
-        print(f"[任务] MISSION_PROGRESS 收到未知事件键 {event!r}，已忽略")
+        logging.debug(f"[任务] MISSION_PROGRESS 收到未知事件键 {event!r}，已忽略")
         return
     gs = _game_state(view)
     if gs is None or not getattr(gs, "player_id", None):

@@ -89,18 +89,20 @@ class ShapeBatch:
         """Solid circle centered at (cx, cy) with radius r (fanned triangles).
 
         使用 numpy 预计算三角函数表，比逐点 math.cos/sin 快 3-5 倍。
+        整个圆合成 **一个** Shape（三角形扇 = seg 个三角形连续展开）：
+        原先每个扇形各 new 一个 Shape，粒子多时（600/帧）会生成数千个对象并各做一次
+        颜色转换，是 draw 阶段的主要开销；合并后顶点完全一致、视觉零变化。
         """
         col = _rgba(color)
         cos_t, sin_t = _get_trig_table(seg)
-        prev_x = cx + r
-        prev_y = cy
-        for i in range(1, seg + 1):
-            cur_x = cx + cos_t[i] * r
-            cur_y = cy + sin_t[i] * r
-            self._list.append(_sl.Shape(
-                ((cx, cy), (prev_x, prev_y), (cur_x, cur_y)),
-                (col, col, col), mode=_TRIANGLE_MODE))
-            prev_x, prev_y = cur_x, cur_y
+        pts = []
+        cols = []
+        for i in range(seg):
+            pts.append((cx, cy))
+            pts.append((cx + cos_t[i] * r, cy + sin_t[i] * r))
+            pts.append((cx + cos_t[i + 1] * r, cy + sin_t[i + 1] * r))
+            cols.extend((col, col, col))
+        self._list.append(_sl.Shape(tuple(pts), tuple(cols), mode=_TRIANGLE_MODE))
 
     def tri(self, p1, p2, p3, color):
         """Solid triangle."""

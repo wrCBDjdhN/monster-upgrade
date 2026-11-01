@@ -41,6 +41,7 @@ from websockets.exceptions import ConnectionClosed
 
 from net.protocol import MsgType, decode, encode
 from net.thread_bridge import NetBridge
+import logging
 
 __all__ = ["NetServer", "Room", "PlayerSlot"]
 
@@ -198,7 +199,7 @@ class NetServer:
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=STOP_TIMEOUT)
             if thread.is_alive():
-                print(
+                logging.debug(
                     f"[NetServer] 警告: stop() 后线程 {thread.name} 未在 "
                     f"{STOP_TIMEOUT}s 内退出"
                 )
@@ -259,7 +260,7 @@ class NetServer:
         except BaseException as exc:
             # 启动失败（端口占用等）或运行期异常：记录，供 start()/自检感知
             self._last_error = exc
-            print(f"[NetServer] 服务器异常退出: {exc!r}")
+            logging.debug(f"[NetServer] 服务器异常退出: {exc!r}")
         finally:
             try:
                 # 取消残留任务（如 stop 瞬间尚未完成的发送任务），避免警告
@@ -348,7 +349,7 @@ class NetServer:
         if player is None:
             # 单播目标离线：显式告警（禁静默忽略）。静默 return 会让主线程
             # 永远等不到 BUILD_RESULT / MISSION_PROGRESS 等应答而无从排查
-            print(
+            logging.debug(
                 f"[NetServer] 警告: 单播目标不存在 player_id={player_id} "
                 f"msg={msg_type.name}（玩家已离线或 id 非法），消息已丢弃"
             )
@@ -410,7 +411,7 @@ class NetServer:
                     msg_type, payload = decode(raw)
                 except ValueError as exc:
                     # 非法帧：单帧忽略不踢人，但必须显式告警（禁静默忽略）
-                    print(
+                    logging.debug(
                         f"[NetServer] 警告: 收到非法帧（player_id={player_id} "
                         f"name={name!r}），已丢弃该帧: {exc}"
                     )
@@ -420,7 +421,7 @@ class NetServer:
                 # 现单播 ROOM_ERROR 给请求者（实装 ROOM_ERROR，避免死消息）
                 if msg_type == MsgType.JOIN:
                     self.send_room_error(player_id, "已在房间中，忽略重复加入")
-                    print(
+                    logging.debug(
                         f"[NetServer] 警告: 拒绝重复加入 player_id={player_id} "
                         f"name={name!r}"
                     )
@@ -441,13 +442,13 @@ class NetServer:
                 "peer_id": player_id,
                 "reason": "connection_closed",
             })
-            print(f"[NetServer] 玩家断开: id={player_id} name={name!r}（已广播 DISCONNECT）")
+            logging.debug(f"[NetServer] 玩家断开: id={player_id} name={name!r}（已广播 DISCONNECT）")
             if self._on_disconnect is not None:
                 try:
                     self._on_disconnect(player_id, "connection_closed")
                 except Exception as exc:
                     # 回调异常不得影响服务器线程，但必须显式告警（禁静默吞异常）
-                    print(f"[NetServer] 警告: on_disconnect 回调异常（已忽略）: {exc!r}")
+                    logging.debug(f"[NetServer] 警告: on_disconnect 回调异常（已忽略）: {exc!r}")
 
     async def _handshake(
         self, connection: ServerConnection
@@ -464,12 +465,12 @@ class NetServer:
                 connection.recv(), timeout=HANDSHAKE_TIMEOUT
             )
         except (TimeoutError, ConnectionClosed) as exc:
-            print(f"[NetServer] 警告: 握手首帧超时或对端关闭（{HANDSHAKE_TIMEOUT}s），断开: {exc!r}")
+            logging.debug(f"[NetServer] 警告: 握手首帧超时或对端关闭（{HANDSHAKE_TIMEOUT}s），断开: {exc!r}")
             return None, None
         try:
             msg_type, payload = decode(raw)
         except ValueError as exc:
-            print(f"[NetServer] 警告: 握手首帧解码失败，拒绝连接: {exc}")
+            logging.debug(f"[NetServer] 警告: 握手首帧解码失败，拒绝连接: {exc}")
             return None, None
         # 客户端可先发 HELLO 身份握手（校验协议版本），再发 JOIN
         if msg_type == MsgType.HELLO:
@@ -481,12 +482,12 @@ class NetServer:
                     connection.recv(), timeout=HANDSHAKE_TIMEOUT
                 )
             except (TimeoutError, ConnectionClosed) as exc:
-                print(f"[NetServer] 警告: HELLO 后的 JOIN 帧超时或对端关闭，断开: {exc!r}")
+                logging.debug(f"[NetServer] 警告: HELLO 后的 JOIN 帧超时或对端关闭，断开: {exc!r}")
                 return None, None
             try:
                 msg_type, payload = decode(raw)
             except ValueError as exc:
-                print(f"[NetServer] 警告: JOIN 帧解码失败，拒绝连接: {exc}")
+                logging.debug(f"[NetServer] 警告: JOIN 帧解码失败，拒绝连接: {exc}")
                 return None, None
         if msg_type != MsgType.JOIN:
             await self._reject(connection, "非法加入流程")
@@ -524,7 +525,7 @@ class NetServer:
             "slot": slot,
             "room_id": self.room.room_id,
         })
-        print(
+        logging.debug(
             f"[NetServer] 玩家加入: id={player_id} name={name!r} slot={slot} "
             f"room={self.room.room_id} "
             f"（{len(self.room.players)}/{self.room.max_players}）"
@@ -533,7 +534,7 @@ class NetServer:
 
     async def _reject(self, connection: ServerConnection, reason: str) -> None:
         """回 JOIN_REJECT 并关闭连接（握手失败统一出口）。"""
-        print(f"[NetServer] 拒绝入座: reason={reason!r}")
+        logging.debug(f"[NetServer] 拒绝入座: reason={reason!r}")
         await self._safe_send(connection, MsgType.JOIN_REJECT, {"reason": reason})
         try:
             await connection.close()
@@ -592,7 +593,7 @@ class NetServer:
                             query_type, _payload = decode(data.decode("utf-8"))
                         except ValueError as exc:
                             # UDP 坏帧 / 未知类型：显式告警（禁静默忽略）
-                            print(
+                            logging.debug(
                                 f"[NetServer] 警告: 收到非法 UDP 发现包（来自 {addr}），"
                                 f"已忽略: {exc}"
                             )
@@ -605,7 +606,7 @@ class NetServer:
                                         addr,
                                     )
                                 except OSError as exc:
-                                    print(
+                                    logging.debug(
                                         f"[NetServer] 警告: 回复 ROOM_BROADCAST 失败"
                                         f"（peer={addr}）: {exc!r}"
                                     )

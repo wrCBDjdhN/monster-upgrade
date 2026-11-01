@@ -304,6 +304,9 @@ class ForgeView(ScrollView):
         """
         pid = self.window.game_state.player_id
         gold = get_gold(pid)
+        # 金币缓存：on_draw 曾每帧查库（每次新建 sqlite 连接），改为 _refresh_recipes /
+        # 点击后脏标记刷新，on_draw 常态只读内存
+        self._gold_cache = gold
         wh = {it["item_id"]: int(it["quantity"]) for it in get_warehouse(pid)}
         rows = []
         for r in FORGE_RECIPES:
@@ -510,7 +513,11 @@ class ForgeView(ScrollView):
     def on_draw(self):
         self.clear()
         pid = self.window.game_state.player_id
-        gold = get_gold(pid)
+        # 脏标记驱动：点击后下一帧重读金币，其余帧只读 _refresh_recipes 写入的缓存
+        if getattr(self, "_cache_dirty", False):
+            self._gold_cache = get_gold(pid)
+            self._cache_dirty = False
+        gold = getattr(self, "_gold_cache", 0)
         offset = self.scroll_offset
 
         # === 固定头部 ===
@@ -645,6 +652,8 @@ class ForgeView(ScrollView):
             self._draw_toasts()
 
     def on_mouse_press(self, x, y, button, modifiers):
+        # 任何点击都可能成交/退款：置脏，下一帧重读金币缓存（避免 on_draw 每帧查库）
+        self._cache_dirty = True
         # 动画中禁止所有点击
         if self._forge_opening:
             return

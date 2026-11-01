@@ -172,6 +172,11 @@ class StartView(arcade.View):
         self.window.background_color = arcade.color.DARK_SLATE_GRAY
         # 设施等级刷新（阶段10：从设施页建造/升级后返回，按钮🔒与 Lv.N 立即生效）
         self._refresh_facilities()
+        # 携带武器缓存：on_draw 曾每帧查库（每次新建 sqlite 连接）。开始界面每次进入
+        # 都会重入 on_show_view（从背包/市场/仓库返回），刷新一次即可，on_draw 只读内存。
+        from db.database import get_weapons
+        _pid = self.window.game_state.player_id
+        self._weapons_cache = get_weapons(_pid) if _pid else []
         # 新手教程：回大厅时若未完成（撤离失败/中途返回/关游戏重开），从头开始
         tut = getattr(self.window.game_state, "tutorial", None)
         if tut is not None and tut.active:
@@ -202,8 +207,8 @@ class StartView(arcade.View):
         # 当前装备显示
         equipped_text = "无"
         if gs.player_id and gs.equipped_weapon_id:
-            from db.database import get_weapons
-            weapons = get_weapons(gs.player_id)
+            # 读 on_show_view 写入的缓存，不再每帧查库
+            weapons = getattr(self, "_weapons_cache", [])
             for w in weapons:
                 if w["id"] == gs.equipped_weapon_id:
                     kind_label = "近战" if w["kind"] == "melee" else "远程"

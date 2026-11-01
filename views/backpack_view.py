@@ -47,7 +47,20 @@ class BackpackView(ScrollView):
         self._discard_dialog_btn_all = None  # "全部丢弃" 按钮
         self._discard_dialog_btn_confirm = None  # "确认" 按钮
         self._discard_dialog_btn_cancel = None  # "取消" 按钮
+        # 仓库药水缓存：on_draw / _build_content 曾每次查库（db 每次调用新建 sqlite 连接）。
+        # 首次读取时查一次；丢弃/使用药水（点击或按键）后置脏，下次读取重读。
+        self._db_potions_cache: list = []
+        self._potions_dirty = True
         self._build_content()
+
+    def _db_potions(self) -> list:
+        """仓库药水列表（脏标记驱动：置脏后下一次读取才查库，常态读内存）"""
+        if self._potions_dirty:
+            from db.database import get_potions
+            pid = self.window_ref.game_state.player_id
+            self._db_potions_cache = get_potions(pid) if pid else []
+            self._potions_dirty = False
+        return self._db_potions_cache
 
     # Bug 7 fix: 主机开背包时转发 on_update，防止客户端因快照停止而冻结
     def on_update(self, delta_time):
@@ -104,8 +117,7 @@ class BackpackView(ScrollView):
 
         # 药水（标题 + 合并列表）
         run_potions = getattr(gs, 'run_potions', {})
-        from db.database import get_potions
-        db_potions = get_potions(gs.player_id) if gs.player_id else []
+        db_potions = self._db_potions()
         all_potions_count = len(run_potions) + len(db_potions)
         y -= 32  # 标题
         if all_potions_count > 0:
@@ -119,6 +131,8 @@ class BackpackView(ScrollView):
         return (25, 30, 40)
 
     def on_mouse_press(self, x, y, button, modifiers):
+        # 任何点击都可能丢弃/使用药水：置脏，下一帧重读药水缓存
+        self._potions_dirty = True
         if button == arcade.MOUSE_BUTTON_LEFT:
             sound_manager.play_ui()
             # 丢弃对话框激活时，优先处理对话框按钮
@@ -282,6 +296,8 @@ class BackpackView(ScrollView):
 
     def on_key_press(self, key, modifiers):
         """处理键盘输入（丢弃对话框数字输入）"""
+        # 数字键可能直接使用药水：置脏，下一帧重读药水缓存
+        self._potions_dirty = True
         if not self._discard_dialog_active:
             return
         max_qty = self._discard_dialog_item[3] if self._discard_dialog_item else 1
@@ -906,7 +922,7 @@ class BackpackView(ScrollView):
         self._tc.text("pot_title", "药水:", 50, y, arcade.color.WHITE, 16)
         y -= 32
         run_potions = getattr(gs, 'run_potions', {})
-        db_potions = get_potions(gs.player_id) if gs.player_id else []
+        db_potions = self._db_potions()
         if run_potions or db_potions:
             from entities.equipment_defs import POTIONS
             # 先显示本局药水（cyan 标识，不占容量，热键优先）

@@ -16,10 +16,13 @@ GameState 是各 View 共享的运行时状态，包含：
 - net_mode: 联机模式(solo=单机 / host=主机 / client=客户端)
 """
 
+import sys
+import time
 import arcade
 from config import (
     WINDOW_WIDTH, WINDOW_HEIGHT, WINDOW_TITLE,
     WINDOW_RESIZABLE, FULLSCREEN,
+    PERF_SAMPLE_INTERVAL,  # --stats 探针打印间隔
 )
 from pyglet.math import Mat4
 from arcade.camera.default import ViewportProjector
@@ -282,6 +285,81 @@ class GameState:
         self.warehouse_overflow: dict | None = None
 
 
+# ── --stats 性能探针的模块级状态 ──
+_stats_times: dict[str, list[float]] = {"update": [], "draw": []}
+_stats_warned = False  # 探针异常只提示一次，避免刷屏
+
+
+def _install_stats_probe(window):
+    """性能探针（仅 `python main.py --stats` 时启用，正常启动零开销）
+
+    用户反馈「怪物/特效/文字一多就卡顿」，本探针用于量化改动前后差异：
+    - 用类方法包装给 GameView.on_update / on_draw 打点（不侵入 game_view.py）
+    - 每 PERF_SAMPLE_INTERVAL 秒打印一行：FPS、两段平均耗时、同屏负载计数
+    - 探针自身异常绝不影响游戏运行（只提示一次）
+    """
+    import pyglet
+    from views.game_view import GameView
+
+    _orig_update = GameView.on_update
+    _orig_draw = GameView.on_draw
+
+    def _wrap(name, fn):
+        """包装单个方法：记录最近 240 帧耗时（超出丢弃前半，防止长局内存增长）"""
+        def _inner(self, *args, **kwargs):
+            t0 = time.perf_counter()
+            try:
+                return fn(self, *args, **kwargs)
+            finally:
+                buf = _stats_times[name]
+                buf.append(time.perf_counter() - t0)
+                if len(buf) > 240:
+                    del buf[:120]
+        return _inner
+
+    GameView.on_update = _wrap("update", _orig_update)
+    GameView.on_draw = _wrap("draw", _orig_draw)
+
+    from game.effects import particle_system, floating_texts
+
+    def _avg(name):
+        """样本平均耗时（毫秒）；无样本返回 0"""
+        buf = _stats_times[name]
+        return (sum(buf) / len(buf) * 1000.0) if buf else 0.0
+
+    def _count(obj, attr):
+        """宽容计数：属性不存在或不可 len() 时返回 '-'"""
+        val = getattr(obj, attr, None)
+        try:
+            return len(val)
+        except TypeError:
+            return "-"
+
+    def _report(_dt):
+        global _stats_warned
+        try:
+            view = window.current_view
+            parts = [
+                f"fps={pyglet.clock.get_fps():5.1f}",
+                f"update={_avg('update'):6.2f}ms",
+                f"draw={_avg('draw'):6.2f}ms",
+                f"mobs={_count(view, 'monsters')}",
+                f"drops={_count(view, 'drops')}",
+                f"hud_texts={_count(view, '_hud_texts')}",
+                f"particles={len(particle_system.particles)}",
+                f"float_texts={len(floating_texts.texts)}",
+            ]
+            print("[stats] " + " ".join(parts))
+            for buf in _stats_times.values():
+                buf.clear()
+        except Exception as exc:  # 探针异常不影响游戏
+            if not _stats_warned:
+                _stats_warned = True
+                print(f"[stats] 探针异常，已跳过后续统计: {exc}")
+
+    pyglet.clock.schedule_interval(_report, PERF_SAMPLE_INTERVAL)
+
+
 def main():
     """游戏主入口
     
@@ -289,6 +367,10 @@ def main():
     """
     window = GameWindow()
     window.game_state = GameState()
+
+    # 可选性能探针：`python main.py --stats`（不带参数时行为与性能完全不变）
+    if "--stats" in sys.argv:
+        _install_stats_probe(window)
 
     # 首次启动教程：读取 DB 教程完成标记（tutorial_done），未完成则启用教程
     from db.database import init_db, get_or_create_player

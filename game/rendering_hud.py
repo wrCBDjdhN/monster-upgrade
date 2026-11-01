@@ -94,9 +94,9 @@ def _draw_monster(view, m, wb):
                 (br, bg, bb, MONSTER_SKILL_BUFF_GLOW_ALPHA))
             # 头顶增益名：颜色取同一张表，保证「看到的颜色 = 名字对应的增益」
             view._world_labels.append((
-                m.center_x, m.center_y - m_size - 16,
+                f"m{id(m)}_buff", m.center_x, m.center_y - m_size - 16,
                 MONSTER_SKILL_BUFF_NAMES.get(buff_type, buff_type),
-                buff_color, 10))
+                buff_color, 10, 0))
     # 护甲颜色：远端怪物优先取主机广播的 net_armor_color（修复远端怪物无护甲），
     # 本地怪物回退读携带护甲 dict
     if getattr(m, 'net_armor_color', None):
@@ -230,7 +230,8 @@ def _draw_monster(view, m, wb):
         affix_name = ELITE_AFFIXES.get(affix_id, {}).get("name", affix_id)
         monster_name = f"[{affix_name}]{monster_name}"
         label_color = ELITE_LABEL_COLOR
-    view._world_labels.append((m.center_x, label_y, monster_name, label_color, 10))
+    view._world_labels.append((f"m{id(m)}_name", m.center_x, label_y,
+                               monster_name, label_color, 10, 0))
     label_y += 13
     # 武器名标签：优先取快照同步的 net_weapon（远端怪物）→ 实际携带武器名 → 类名映射兜底
     net_weapon = getattr(m, 'net_weapon', None)
@@ -240,7 +241,8 @@ def _draw_monster(view, m, wb):
         weapon_name = m.weapon.get("name", "武器")
     else:
         weapon_name = _WEAPON_NAMES.get(m_cls, "武器")
-    view._world_labels.append((m.center_x, label_y, weapon_name, (200, 200, 200), 9))
+    view._world_labels.append((f"m{id(m)}_weapon", m.center_x, label_y,
+                               weapon_name, (200, 200, 200), 9, 1))
     label_y += 12
     # 护甲/头盔名标签：远端怪物优先取主机广播的 net_armor/net_helmet（修复远端无装备标签），
     # 本地怪物读携带装备 dict
@@ -248,13 +250,15 @@ def _draw_monster(view, m, wb):
     if armor_name is None and hasattr(m, 'armor') and m.armor:
         armor_name = m.armor.get("name", "护甲")
     if armor_name:
-        view._world_labels.append((m.center_x, label_y, armor_name, (180, 180, 220), 9))
+        view._world_labels.append((f"m{id(m)}_armor", m.center_x, label_y,
+                                   armor_name, (180, 180, 220), 9, 1))
         label_y += 12
     helmet_name = getattr(m, 'net_helmet', None)
     if helmet_name is None and hasattr(m, 'helmet') and m.helmet:
         helmet_name = m.helmet.get("name", "头盔")
     if helmet_name:
-        view._world_labels.append((m.center_x, label_y, helmet_name, (180, 220, 180), 9))
+        view._world_labels.append((f"m{id(m)}_helmet", m.center_x, label_y,
+                                   helmet_name, (180, 220, 180), 9, 1))
 
 
 def _draw_skill_prompt(view, m):
@@ -268,7 +272,8 @@ def _draw_skill_prompt(view, m):
         return
     # 文字在怪物头顶上方浮动（随 timer 逐渐上移，使用1.5秒计算）
     prompt_y = m.center_y + 30 + (1.5 - prompt_timer) * 20
-    view._world_labels.append((m.center_x, prompt_y, text, color, 14))
+    view._world_labels.append((f"m{id(m)}_prompt", m.center_x, prompt_y,
+                               text, color, 14, 0))
 
 
 def draw_action_timer(view):

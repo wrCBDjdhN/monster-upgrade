@@ -24,6 +24,7 @@ from entities.character_defs import CHARACTERS, CHARACTER_ORDER  # 房间内选�
 from views.text_cache import TextCache  # 持久 Text 对象缓存，替代 draw_text
 from views.lobby_tutorial import LobbyTutorial  # 教程辅助模块（页面构建 + 覆盖层绘制）
 from game.sound_manager import sound_manager
+import logging
 
 
 class LobbyView(arcade.View):
@@ -542,14 +543,14 @@ class LobbyView(arcade.View):
                     if pid is not None and gs.net_ready_state.get(pid) != ready:
                         gs.net_ready_state[pid] = ready
                         self._broadcast_ready_state()
-                        print(f"[LobbyView] 玩家 {pid} 准备状态: {ready}")
+                        logging.debug(f"[LobbyView] 玩家 {pid} 准备状态: {ready}")
                 elif inbound.get("msg_type") == "SET_CHARACTER":
                     # 客户端选角上报：更新主机权威角色映射（ROOM_START 打包下发全房）
                     pid = (inbound.get("payload") or {}).get("player_id")
                     cid = (inbound.get("payload") or {}).get("character_id")
                     if pid is not None and cid:
                         gs.net_characters[pid] = cid
-                        print(f"[LobbyView] 玩家 {pid} 选择角色: {cid}")
+                        logging.debug(f"[LobbyView] 玩家 {pid} 选择角色: {cid}")
                 elif inbound.get("msg_type") == "HEARTBEAT":
                     # 心跳回显（3b，与 GameView._handle_host_inbound HEARTBEAT 分支同口径）：
                     # 后台对局存在时转交（保持幽灵确保链路），否则直接回显——
@@ -566,7 +567,7 @@ class LobbyView(arcade.View):
                     gv._handle_host_inbound(inbound)
                 else:
                     # 显式记录（net 层铁律：禁静默忽略未知/错上下文消息）
-                    print(f"[LobbyView] 忽略非房间消息 "
+                    logging.debug(f"[LobbyView] 忽略非房间消息 "
                           f"{inbound.get('msg_type')!r}（当前无进行中的对局）")
             # ②c 末尾转发后台对局：若本帧内对局收口，_broadcast_room_ended 会新建
             # 房间页替换本视图，本视图剩余代码仅执行这一次即随旧视图丢弃，无害。
@@ -654,7 +655,7 @@ class LobbyView(arcade.View):
                     # 防日志刷屏；本页只消费房间握手消息，游戏内消息留待 GameView 处理
                     if msg_type.name not in self._warned_unknown:
                         self._warned_unknown.add(msg_type.name)
-                        print(f"[Lobby] 客户端等待页忽略未消费消息: {msg_type.name}")
+                        logging.debug(f"[Lobby] 客户端等待页忽略未消费消息: {msg_type.name}")
             # 断线感知：连接意外中断 → 回 menu 提示
             if self.client.is_disconnected:
                 if not self._error:

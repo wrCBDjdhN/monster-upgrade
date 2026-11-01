@@ -20,10 +20,27 @@ from config import (
     BUILD_PANEL_TITLE_SIZE, BUILD_PANEL_TEXT_SIZE, BUILD_PANEL_KEY_SIZE, BUILD_PANEL_HINT_SIZE,
     BUILD_PANEL_BG, BUILD_PANEL_ROW_BG, BUILD_PANEL_ROW_HL, BUILD_PANEL_KEY_BG,
     BUILD_PANEL_TEXT, BUILD_PANEL_TEXT_HL, BUILD_PANEL_TEXT_DIM, BUILD_PANEL_TEXT_WARN,
+    # 渲染性能预算（用户反馈 2026-10-31：文字/特效一多就卡顿）
+    PERF_WORLD_LABEL_MAX, PERF_LABEL_FULL_DIST, PERF_LABEL_NAME_DIST,
 )
 
 # 可破坏环境物中文名映射
 _HARVEST_NAMES = {"tree": "树木", "ore": "矿石", "stone": "石头", "cactus": "仙人掌"}
+
+# 火箭发射台状态文案（提模块级：原先在 render_game 内每帧重建 dict）
+_PAD_STATE_TEXT = {
+    "idle": ("火箭发射台", "按E激活", (255, 255, 100)),
+    "activated": ("发射台已激活", "BOSS即将出现!", (255, 200, 50)),
+    "boss_spawned": ("发射台", "BOSS出现! 击败它!", (255, 80, 30)),
+    "boss_defeated": ("发射台已瘫痪", "7=炸毁 8=启用撤离", (100, 255, 100)),
+}
+
+# 玩家 debuff 中文名（提模块级：原先在 draw_level_hud 内每帧重建 dict）
+_DEBUFF_NAMES = {
+    "poison": "中毒", "burn": "燃烧", "freeze": "冰冻",
+    "slow": "减速", "stun": "眩晕", "vulnerable": "易伤",
+    "bleed": "流血", "armor_break": "破甲", "leech": "虹吸",
+}
 from game.batch_shapes import ShapeBatch
 from game.monsters import (
     Zombie, Skeleton, MummyMelee, MummyRanged, Camel,
@@ -219,33 +236,32 @@ def render_game(view):
             else:
                 arcade.draw_rect_filled(arcade.XYWH(bx + bar_w // 2, by, bar_w, 3), arcade.color.DARK_RED)
                 arcade.draw_rect_filled(arcade.XYWH(bx + bar_w * hp_ratio // 2, by, bar_w * hp_ratio, 3), arcade.color.GREEN)
-            # 资源名称标签
+            # 资源名称标签（tier=1 细项：中距离自动隐藏）
             h_name = _HARVEST_NAMES.get(h.resource_type, h.resource_type)
-            view._world_labels.append((h.center_x, h.center_y + 25, h_name, (200, 255, 200), 9))
+            view._world_labels.append((f"h{id(h)}_name", h.center_x, h.center_y + 25,
+                                       h_name, (200, 255, 200), 9, 1))
 
     # 火箭发射台（传入 wb 批次，随世界层一起绘制，避免被随后刷新的地板/房间覆盖）
-    _PAD_STATE_TEXT = {
-        "idle": ("火箭发射台", "按E激活", (255, 255, 100)),
-        "activated": ("发射台已激活", "BOSS即将出现!", (255, 200, 50)),
-        "boss_spawned": ("发射台", "BOSS出现! 击败它!", (255, 80, 30)),
-        "boss_defeated": ("发射台已瘫痪", "7=炸毁 8=启用撤离", (100, 255, 100)),
-    }
     for pad in getattr(view, 'rocket_pads', []):
         pad.draw(wb)
         info = _PAD_STATE_TEXT.get(pad.state)
         if info:
             title, desc, color = info
-            view._world_labels.append((pad.center_x, pad.center_y - 30, title, color, 11))
-            view._world_labels.append((pad.center_x, pad.center_y - 44, desc, (255, 255, 255), 9))
+            view._world_labels.append((f"pad{id(pad)}_title", pad.center_x,
+                                       pad.center_y - 30, title, color, 11, 0))
+            view._world_labels.append((f"pad{id(pad)}_desc", pad.center_x,
+                                       pad.center_y - 44, desc, (255, 255, 255), 9, 1))
         elif pad.state == "evacuating":
             # 撤离中：从 pad 对象读取倒计时
             remaining = int(pad.get_countdown())
             mins = remaining // 60
             secs = remaining % 60
-            view._world_labels.append((pad.center_x, pad.center_y - 30,
-                                       "发射台运行中", (0, 255, 100), 11))
-            view._world_labels.append((pad.center_x, pad.center_y - 44,
-                                       f"剩余撤离时间: {mins}:{secs:02d}", (255, 255, 255), 9))
+            view._world_labels.append((f"pad{id(pad)}_title", pad.center_x,
+                                       pad.center_y - 30, "发射台运行中", (0, 255, 100), 11, 0))
+            view._world_labels.append((f"pad{id(pad)}_desc", pad.center_x,
+                                       pad.center_y - 44,
+                                       f"剩余撤离时间: {mins}:{secs:02d}",
+                                       (255, 255, 255), 9, 1))
 
     # 宝箱
     for chest in view.chests:
@@ -256,25 +272,29 @@ def render_game(view):
                               chest.center_y - view.player.center_y)
             if dist < 60:
                 if getattr(chest, "is_airdrop", False):
-                    view._world_labels.append((chest.center_x, chest.center_y - 20,
-                                              "按E打开空投箱", (255, 190, 90), 10))
+                    view._world_labels.append((f"chest{id(chest)}_hint", chest.center_x,
+                                               chest.center_y - 20,
+                                               "按E打开空投箱", (255, 190, 90), 10, 0))
                 else:
-                    view._world_labels.append((chest.center_x, chest.center_y - 20,
-                                              "按E打开", (255, 220, 80), 10))
+                    view._world_labels.append((f"chest{id(chest)}_hint", chest.center_x,
+                                               chest.center_y - 20,
+                                               "按E打开", (255, 220, 80), 10, 0))
 
     # 阶段4 商队交互点：青色实心招牌 + 「按E交易」世界标签（弹层由 HUD 层绘制）
     caravan_point = getattr(view, "caravan_point", None)
     if caravan_point is not None and view._in_view(caravan_point.center_x, caravan_point.center_y):
         draw_caravan_sign(caravan_point, wb)
         sign_y = caravan_point.center_y + EVENT_CARAVAN_SIGN_SIZE / 2 + 22
-        view._world_labels.append((caravan_point.center_x, sign_y,
-                                  EVENT_CARAVAN_SIGN_TEXT, EVENT_CARAVAN_COLOR, 11))
+        view._world_labels.append((f"caravan{id(caravan_point)}_sign",
+                                   caravan_point.center_x, sign_y,
+                                   EVENT_CARAVAN_SIGN_TEXT, EVENT_CARAVAN_COLOR, 11, 0))
         # 客户端不执行商队交易（主机权威），故只靠近时才提示，主机/单机才提示按E
         near = is_near_caravan(view)
         if near and getattr(view.window.game_state, "net_mode", "solo") != "client":
             label = "按E交易（↑↓选择 E购买）" if view._caravan_panel_open else "按E交易"
-            view._world_labels.append((caravan_point.center_x, sign_y - 16,
-                                      label, (255, 236, 140), 10))
+            view._world_labels.append((f"caravan{id(caravan_point)}_hint",
+                                       caravan_point.center_x, sign_y - 16,
+                                       label, (255, 236, 140), 10, 0))
 
     # 掉落物（资源 + 怪物掉落）—— 图标化 + 文字标签
     for d in view.drops:
@@ -283,7 +303,9 @@ def render_game(view):
             drop_name = get_drop_display_name(d)
             if d.quantity > 1:
                 drop_name = f"{drop_name}x{d.quantity}"
-            view._world_labels.append((d.center_x, d.center_y - 16, drop_name, arcade.color.WHITE, 9))
+            view._world_labels.append((f"drop{id(d)}_name", d.center_x,
+                                       d.center_y - 16, drop_name,
+                                       arcade.color.WHITE, 9, 1))
 
     # 阶段2 防守撤离：主撤离点（不透明实心方块 + 血条 + 倒计时标签）
     # 渲染铁律：一律实心填充，禁线框/空心绘制
@@ -327,7 +349,8 @@ def render_game(view):
             label = "撤离点已摧毁 (按E修复)"
         else:
             label = "撤离点 (按E激活)"
-        view._world_labels.append((ex, ey - EVAC_BLOCK_HALF - 10, label, block_color, 11))
+        view._world_labels.append((f"evac{id(evac_point)}_state", ex,
+                                   ey - EVAC_BLOCK_HALF - 10, label, block_color, 11, 0))
     # 〔已删除〕v1 旧撤离绿圈残留：新系统由上方 EvacPoint 方块渲染，旧圈无交互
 
     # 水井（沙漠地图：灰色圆井口 + 井沿矩形）
@@ -340,12 +363,12 @@ def render_game(view):
         else:
             arcade.draw_circle_filled(wx_, wy_, 16, (110, 120, 130))
             arcade.draw_circle_filled(wx_, wy_, 10, (40, 45, 55))
-        view._world_labels.append((wx_, wy_ - 24, "水井", (180, 220, 255), 10))
+        view._world_labels.append(("well_name", wx_, wy_ - 24, "水井", (180, 220, 255), 10, 0))
         # 靠近水井时显示按E提示（与宝箱「按E打开」提示一致，提示交互可用）
         dist = math.hypot(wx_ - view.player.center_x, wy_ - view.player.center_y)
         if dist < 60:
-            view._world_labels.append((wx_, wy_ + 24,
-                                      "按E使用", (180, 220, 255), 10))
+            view._world_labels.append(("well_hint", wx_, wy_ + 24,
+                                       "按E使用", (180, 220, 255), 10, 0))
 
     # 金字塔 BOSS 建筑塔尖标记（装饰性，建筑本体由 walls 渲染）
     boss_spawn = view.map_data.get("boss_spawn")
@@ -357,7 +380,7 @@ def render_game(view):
         else:
             arcade.draw_polygon_filled(tri, (200, 160, 90))
         # minimap 图例标签：Boss 房间标记
-        view._world_labels.append((bx_, by_ - 50, "Boss", (255, 215, 0), 12))
+        view._world_labels.append(("boss_mark", bx_, by_ - 50, "Boss", (255, 215, 0), 12, 0))
 
     # 怪物（本地权威 + 联机远端快照）
     for m in view.monsters:
@@ -544,8 +567,9 @@ def render_game(view):
             draw_attack_swing(gvx, gvy, gmx, gmy, g_rng, g_timer, batch=pb)
         # 幽灵头顶名称（名册驱动，经 _world_labels 世界坐标→屏幕坐标渲染）
         gname = getattr(ghost, "net_name", f"玩家{pid}")
-        view._world_labels.append((ghost.center_x, ghost.center_y + PLAYER_SIZE + 18,
-                                   gname, arcade.color.LIGHT_BLUE, 9))
+        view._world_labels.append((f"ghost{id(ghost)}_name", ghost.center_x,
+                                   ghost.center_y + PLAYER_SIZE + 18,
+                                   gname, arcade.color.LIGHT_BLUE, 9, 0))
 
     # 倒地玩家渲染（联机模式）：半透明橙色 + 倒计时 + 救援提示
     downed_players = getattr(view, "_downed_players", {})
@@ -565,9 +589,11 @@ def render_game(view):
         # 倒计时文字（头顶）
         timer_text = f"救援 {int(timer)}s"
         timer_color = arcade.color.GREEN if timer > 20 else (arcade.color.ORANGE if timer > 10 else arcade.color.RED)
-        view._world_labels.append((dx, dy + PLAYER_SIZE + 18, timer_text, timer_color, 10))
+        view._world_labels.append((f"downed{pid}_timer", dx, dy + PLAYER_SIZE + 18,
+                                   timer_text, timer_color, 10, 0))
         # "需要救援" 提示
-        view._world_labels.append((dx, dy - PLAYER_SIZE - 10, "需要救援!", arcade.color.ORANGE, 9))
+        view._world_labels.append((f"downed{pid}_help", dx, dy - PLAYER_SIZE - 10,
+                                   "需要救援!", arcade.color.ORANGE, 9, 0))
 
     # 救援进度条（本地玩家正在救援时显示）
     if getattr(view, "_rescuing", False) and view._rescue_target is not None:
@@ -584,7 +610,8 @@ def render_game(view):
             arcade.draw_rect_filled(arcade.XYWH(bx + bar_w // 2, by, bar_w, bar_h), arcade.color.DARK_GRAY)
             arcade.draw_rect_filled(arcade.XYWH(bx + bar_w * progress // 2, by, bar_w * progress, bar_h), arcade.color.CYAN)
         # 救援文字
-        view._world_labels.append((view.player.center_x, by - 12, "救援中...", arcade.color.CYAN, 10))
+        view._world_labels.append(("rescue_progress", view.player.center_x,
+                                   by - 12, "救援中...", arcade.color.CYAN, 10, 0))
 
     # 近战攻击范围可视化（挥砍刀光）：实现收口到 render_helpers.draw_attack_swing，
     # 本地玩家 / 联机远端幽灵 / 怪物近战三处共用同一套绘制
@@ -609,11 +636,11 @@ def render_game(view):
         except Exception:
             pb = None
 
-    # 粒子效果
-    particle_system.draw()
+    # 粒子效果（传入 view 做视野裁剪，屏幕外粒子不再提交顶点）
+    particle_system.draw(view)
 
-    # 漂浮文字
-    floating_texts.draw()
+    # 漂浮文字（同样视野裁剪）
+    floating_texts.draw(view)
 
     # 撤离读条（观战模式不绘制：玩家已撤离，撤离进度条不应残留在原地）
     if not getattr(view, "_spectating", False):
@@ -626,14 +653,36 @@ def render_game(view):
     # BOSS 血条（屏幕顶部，仅当 BOSS 激活时显示）
     draw_boss_hp_bar(view)
 
-    # 绘制世界坐标标签
+    # 绘制世界坐标标签（稳定 key 缓存 + 距离分级 + 总量上限）
+    # 原实现 key 用 f"wl_{i}" 列表下标：实体进出视野会让下标整体平移，
+    # 几乎所有 arcade.Text 每帧都重建并重绘字形纹理 —— 文字一多就卡顿的主因。
+    # 现改为「实体身份 key」（生产者负责）+ 按距离分级 + 超预算才排序截断。
     cam = view.controller.camera.position
-    # 复用持久 Text 缓存（key 用 f"wl_{i}" 索引，替代每帧 draw_text 消除 PerformanceWarning）
-    for i, (wx, wy, text, color, font_size) in enumerate(view._world_labels):
+    player = getattr(view, "player", None)
+    _labels = view._world_labels
+    if player is not None:
+        px, py = player.center_x, player.center_y
+        usable = []
+        for item in _labels:
+            key, wx, wy, text, color, font_size, tier = item
+            dist = math.hypot(wx - px, wy - py)
+            if dist > PERF_LABEL_NAME_DIST:
+                continue  # 太远：文字一律不画（远距离时细项本来也看不清）
+            if dist > PERF_LABEL_FULL_DIST and tier == 1:
+                continue  # 中距离：只保留关键信息（名字/交互提示），细项降级隐藏
+            usable.append((dist, key, wx, wy, text, color, font_size))
+        if len(usable) > PERF_WORLD_LABEL_MAX:
+            # 仅在超预算时才排序（每帧多一次 sort 不划算），超限丢最远的
+            usable.sort(key=lambda it: it[0])
+            del usable[PERF_WORLD_LABEL_MAX:]
+    else:
+        # 玩家未就绪（极早期帧）：不分级、全量绘制，保持原行为
+        usable = [(0.0,) + item for item in _labels]
+    for _dist, key, wx, wy, text, color, font_size in usable:
         sx = wx - cam.x + WINDOW_WIDTH / 2
         sy = wy - cam.y + WINDOW_HEIGHT / 2
         if -50 < sx < WINDOW_WIDTH + 50 and -50 < sy < WINDOW_HEIGHT + 50:
-            view._hud_text(f"wl_{i}", text, sx, sy, color, font_size,
+            view._hud_text(key, text, sx, sy, color, font_size,
                            anchor_x="center", anchor_y="center", bold=True)
     view._world_labels.clear()
 
@@ -802,11 +851,7 @@ def render_game(view):
 
     # 玩家 debuff 显示（含剩余时间）：补全 effects_defs.DEBUFF_POOL 与怪物技能全部 ID，
     # 避免状态行回落英文 ID（原仅 5 个，vulnerable/bleed/armor_break/leech 会显示英文）
-    _DEBUFF_NAMES = {
-        "poison": "中毒", "burn": "燃烧", "freeze": "冰冻",
-        "slow": "减速", "stun": "眩晕", "vulnerable": "易伤",
-        "bleed": "流血", "armor_break": "破甲", "leech": "虹吸",
-    }
+    # _DEBUFF_NAMES 已提模块级（原每帧重建 dict）
     _active_debuffs = getattr(view.player, "debuffs", None)
     if _active_debuffs:
         # 逐条显示效果名 + 剩余秒数（duration 由 _update_debuffs 每帧递减）

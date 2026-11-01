@@ -233,6 +233,14 @@ class WarehouseView(ScrollView):
         self._wh_level = get_warehouse_level(pid)
         self._wh_total_cap = get_warehouse_capacity(pid)
         self._wh_used_cap = warehouse_used_capacity(pid)
+        # 用户反馈 2026-10-31：on_draw 曾每帧发起 4 次 sqlite 连接（get_gold/get_warehouse/
+        # get_weapons/get_facility_level）导致界面掉帧。统一在 _rebuild 刷新缓存
+        # （进页面/切换 Tab/卖出/升级仓库后都会调用 _rebuild），on_draw 只读内存。
+        self._wh_items = wh
+        self._wh_weapons = get_weapons(pid)
+        self._wh_equipment = get_equipment_inventory(pid)
+        self._wh_gold = get_gold(pid)
+        self._wh_sell_bonus = market_sell_bonus(get_facility_level(pid, MARKET_FACILITY_ID))
         y = WINDOW_HEIGHT - 160  # 内容区起点（下方为 Tab 栏，与 on_draw 一致）
         if self._tab == "资源":
             for item in wh:
@@ -245,11 +253,13 @@ class WarehouseView(ScrollView):
         self.content_height = self._calc_content_height()
 
     def _calc_content_height(self) -> float:
-        """动态计算实际内容高度（按当前 Tab 分类）"""
-        pid = self.window.game_state.player_id
-        wh = get_warehouse(pid)
-        weapons = get_weapons(pid)
-        equipment = get_equipment_inventory(pid)
+        """动态计算实际内容高度（按当前 Tab 分类）
+
+        数据一律读 _rebuild 写入的缓存，禁止在此查库（本方法在滚轮事件里也会调用）。
+        """
+        wh = self._wh_items
+        weapons = self._wh_weapons
+        equipment = self._wh_equipment
 
         header_height = 160  # 顶部标题区域 + Tab 栏
         if self._tab == "资源":
@@ -281,12 +291,13 @@ class WarehouseView(ScrollView):
         self.clear()
         gs = self.window.game_state
         pid = gs.player_id
-        gold = get_gold(pid)
-        wh = get_warehouse(pid)
-        weapons = get_weapons(pid)
+        # 只读 _rebuild 写入的缓存，不再每帧查库（见 _rebuild 注释）
+        gold = self._wh_gold
+        wh = self._wh_items
+        weapons = self._wh_weapons
         offset = self.scroll_offset
         # 阶段10：市场设施售出回收加成（Lv0/Lv1 = 0.0 → 与旧口径完全一致）
-        sell_bonus = market_sell_bonus(get_facility_level(pid, MARKET_FACILITY_ID))
+        sell_bonus = self._wh_sell_bonus
 
         # 固定头部
         self._tc.text("header_title", "仓 库", WINDOW_WIDTH // 2, WINDOW_HEIGHT - 50,

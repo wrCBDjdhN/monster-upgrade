@@ -11,6 +11,34 @@ import random
 import numpy as np
 import arcade
 from .batch_shapes import ShapeBatch  # 批量绘制：粒子一次 draw call 提交（性能优化）
+from config import (  # 渲染性能预算（用户反馈 2026-10-31：特效一多就卡顿）
+    PERF_PARTICLE_MAX, PERF_PARTICLE_SEG,
+    PERF_FLOAT_TEXT_MAX, PERF_FLOAT_TEXT_OFFSET_SCAN,
+    WINDOW_WIDTH, WINDOW_HEIGHT,
+)
+
+# 视野裁剪边距（像素）：屏幕外该距离内的粒子/飘字仍绘制，避免边缘弹出感
+_CULL_MARGIN = 80
+
+
+def _view_bounds(view):
+    """返回相机可见世界矩形 (x0, x1, y0, y1)；view/相机不可用时返回 None（不裁剪）。
+
+    粒子与飘字本身没有 view 引用，由渲染层把 view 传进来做视野裁剪，
+    避免屏幕外特效仍然提交顶点（大量特效时这是主要浪费）。
+    """
+    if view is None:
+        return None
+    cam = getattr(getattr(view, "controller", None), "camera", None)
+    if cam is None:
+        return None
+    try:
+        cx, cy = cam.position
+    except Exception:
+        return None
+    hw, hh = WINDOW_WIDTH / 2, WINDOW_HEIGHT / 2
+    return (cx - hw - _CULL_MARGIN, cx + hw + _CULL_MARGIN,
+            cy - hh - _CULL_MARGIN, cy + hh + _CULL_MARGIN)
 
 
 # ── 粒子对象池 ──
@@ -93,19 +121,29 @@ class ParticleSystem:
         # 截断已死粒子
         del self.particles[write:]
 
-    def draw(self):
-        """批量绘制全部粒子（ShapeBatch 一次 draw call，替代逐粒子立即模式绘制）"""
+    def draw(self, view=None):
+        """批量绘制全部粒子（ShapeBatch 一次 draw call，替代逐粒子立即模式绘制）
+
+        view 非空时按相机视野裁剪屏幕外粒子（大量特效时省下大量顶点提交）。
+        """
         if not self.particles:
             return
+        bounds = _view_bounds(view)
         batch = ShapeBatch()
         for p in self.particles:
             alpha = p.alpha
             if alpha <= 0:
                 continue
+            if bounds is not None:
+                x0, x1, y0, y1 = bounds
+                if not (x0 <= p.x <= x1 and y0 <= p.y <= y1):
+                    continue
             color = (p.color[0], p.color[1], p.color[2], alpha)
             size = int(p.size * (p.life / p.max_life))
             if size > 0:
-                batch.circle(p.x, p.y, size, color)
+                # 分段数从 24 降到 PERF_PARTICLE_SEG：单个粒子顶点数降至 1/3，
+                # 视觉上小圆点几乎无差别，粒子上千时帧率提升明显
+                batch.circle(p.x, p.y, size, color, seg=PERF_PARTICLE_SEG)
         batch.draw()
 
     def emit(self, x, y, count, color, speed=100, life=0.5, size=3, gravity=0, spread=360, angle=None):
@@ -116,6 +154,15 @@ class ParticleSystem:
         """
         if count <= 0:
             return
+        # 活跃粒子上限：超限先丢弃最老的粒子（归还对象池）。
+        # 防止「怪物成片死亡/连锁爆炸」瞬间发射上千粒子把帧率拖垮。
+        if count > PERF_PARTICLE_MAX:
+            count = PERF_PARTICLE_MAX
+        overflow = len(self.particles) + count - PERF_PARTICLE_MAX
+        if overflow > 0:
+            for dead in self.particles[:overflow]:
+                _release_particle(dead)
+            del self.particles[:overflow]
         # numpy 批量生成角度和偏移（一次调用替代 count 次 random）
         if angle is None:
             angles = np.random.uniform(0, math.radians(spread), count)
@@ -248,20 +295,39 @@ class FloatingTextManager:
                 write += 1
         del self._recent_positions[write:]
 
-    def draw(self):
+    def draw(self, view=None):
+        """绘制全部飘字；view 非空时按相机视野裁剪屏幕外文字（省 draw call）"""
+        bounds = _view_bounds(view)
         for t in self.texts:
+            if bounds is not None:
+                x0, x1, y0, y1 = bounds
+                if not (x0 <= t.x <= x1 and y0 <= t.y <= y1):
+                    continue
             t.draw()
 
     def _find_offset(self, x: float, y: float) -> float:
-        """查找当前位置的垂直偏移量，避免文字重叠"""
+        """查找当前位置的垂直偏移量，避免文字重叠
+
+        只比对最近 PERF_FLOAT_TEXT_OFFSET_SCAN 条：乱战时一帧可能 add 几十条，
+        全量线性扫描会退化成 O(T²)。极端重叠时最多轻微重合，可调大该常量。
+        """
         offset = 0
-        for rx, ry, _ in self._recent_positions:
+        recent = self._recent_positions
+        start = max(0, len(recent) - PERF_FLOAT_TEXT_OFFSET_SCAN)
+        for i in range(start, len(recent)):
+            rx, ry, _ = recent[i]
             if abs(rx - x) < 30 and abs(ry - (y + offset)) < 15:
                 offset += self._overlap_offset
         return offset
 
     def add(self, x, y, text, color=(255, 255, 255), life=1.0, font_size=14, vy=50):
         """添加漂浮文字（对象池复用 + 自动避免重叠）"""
+        # 活跃飘字上限：超限先丢弃最老的（归还对象池），避免刷屏式伤害数字堆积
+        overflow = len(self.texts) + 1 - PERF_FLOAT_TEXT_MAX
+        if overflow > 0:
+            for dead in self.texts[:overflow]:
+                _release_float_text(dead)
+            del self.texts[:overflow]
         offset = self._find_offset(x, y)
         ft = _acquire_float_text()
         ft.reset(x, y + offset, text, color, life, font_size, vy)

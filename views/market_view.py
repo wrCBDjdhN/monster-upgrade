@@ -138,8 +138,21 @@ class MarketView(ScrollView):
         self._facility_level = 0
         # 资源回购数量步进状态 {resource_id: 数量}（Lv3 解锁后生效，构造时先备好键）
         self._res_qty = {rid: 1 for rid in MARKET_RESOURCE_PRICES}
+        # 金币/当前装备缓存：on_draw 曾每帧 2 次 sqlite 连接（每次新建连接）导致掉帧。
+        # 现改为「任何点击/按键后置脏 → 下一帧重读一次」，on_draw 常态只读内存。
+        self._gold_cache = 0
+        self._equip_cache: dict = {}
+        self._cache_dirty = True
         self._refresh_facility_level()
+        self._refresh_player_cache()
         self._build_content()
+
+    def _refresh_player_cache(self):
+        """重读金币与当前装备（进页面 / 点击或按键后调用，避免每帧查库）"""
+        pid = self.window.game_state.player_id
+        self._gold_cache = get_gold(pid)
+        self._equip_cache = get_equipment(pid)
+        self._cache_dirty = False
 
     def _refresh_facility_level(self):
         """重读市场设施等级（进入界面 / 从设施页返回时调用，避免每帧查库）"""
@@ -150,6 +163,7 @@ class MarketView(ScrollView):
         """每次进入刷新设施等级与货架价格（可能在设施页升级过）"""
         super().on_show_view()
         self._refresh_facility_level()
+        self._refresh_player_cache()
         self._build_content()
 
     def facility_status_text(self) -> str:
@@ -647,8 +661,11 @@ class MarketView(ScrollView):
     def on_draw(self):
         self.clear()
         pid = self.window.game_state.player_id
-        gold = get_gold(pid)
-        equip = get_equipment(pid)
+        # 脏标记驱动：点击/按键后下一帧重读一次金币与装备，其余帧只读内存缓存
+        if self._cache_dirty:
+            self._refresh_player_cache()
+        gold = self._gold_cache
+        equip = self._equip_cache
         offset = self.scroll_offset
 
         # === 固定头部 ===
@@ -907,6 +924,8 @@ class MarketView(ScrollView):
                 self._tc, self.tut_next_hover)
 
     def on_mouse_press(self, x, y, button, modifiers):
+        # 任何点击都可能成交：置脏，下一帧重读金币/装备缓存（避免 on_draw 每帧查库）
+        self._cache_dirty = True
         # 动画中禁止所有点击
         if self._box_opening:
             return
@@ -1089,6 +1108,8 @@ class MarketView(ScrollView):
 
     def on_key_press(self, symbol, modifiers):
         """弹窗键盘交互：Esc 取消、Enter 确认、输入态下支持数字与退格"""
+        # 键盘也可能成交（Enter 确认批量购买）：置脏，下一帧重读缓存
+        self._cache_dirty = True
         # 新手教程激活：ESC 立即跳过并标记完成（优先于批量弹窗的 Esc 取消）
         tut = getattr(self.window.game_state, "tutorial", None)
         if tut is not None and tut.active:

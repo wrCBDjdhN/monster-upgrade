@@ -20,6 +20,7 @@ from game.entity_callbacks import (
 )
 from config import EXP_EVAC, LIFESTEAL_DEFAULT, SPREAD_COUNT_DEFAULT, SPREAD_ANGLE_DEFAULT, ROCKET_PAD_INTERACT_RANGE, CHEST_WELL_INTERACT_RANGE
 from net.protocol import MsgType
+import logging
 
 
 class PickupLootManager:
@@ -81,21 +82,21 @@ class PickupLootManager:
         if not self.gv._chest_key_pressed or self.gv._spectating:
             return
         if gs.net_client is None:
-            print("[Client] net_client is None, skip interaction")
+            logging.debug("[Client] net_client is None, skip interaction")
             return
 
         player_x = self.gv.player.center_x
         player_y = self.gv.player.center_y
         interaction_type = None
 
-        print(f"[Client] 检测交互: chests={len(self.gv.chests)}, well={self.gv.map_data.get('water_well')}, pads={len(self.gv.rocket_pads)}")
+        logging.debug(f"[Client] 检测交互: chests={len(self.gv.chests)}, well={self.gv.map_data.get('water_well')}, pads={len(self.gv.rocket_pads)}")
 
         # 检测宝箱
         for i, chest in enumerate(self.gv.chests):
             if chest.opened:
                 continue
             dist = math.hypot(chest.center_x - player_x, chest.center_y - player_y)
-            print(f"[Client] 宝箱 {i}: pos=({chest.center_x},{chest.center_y}), opened={chest.opened}, dist={dist:.1f}")
+            logging.debug(f"[Client] 宝箱 {i}: pos=({chest.center_x},{chest.center_y}), opened={chest.opened}, dist={dist:.1f}")
             if dist < CHEST_WELL_INTERACT_RANGE:
                 interaction_type = "chest"
                 break
@@ -105,7 +106,7 @@ class PickupLootManager:
             well = self.gv.map_data.get("water_well")
             if well:
                 dist = math.hypot(well[0] - player_x, well[1] - player_y)
-                print(f"[Client] 水井: pos=({well[0]},{well[1]}), dist={dist:.1f}")
+                logging.debug(f"[Client] 水井: pos=({well[0]},{well[1]}), dist={dist:.1f}")
                 if dist < CHEST_WELL_INTERACT_RANGE:
                     interaction_type = "well"
 
@@ -113,12 +114,12 @@ class PickupLootManager:
         if interaction_type is None:
             for i, pad in enumerate(self.gv.rocket_pads):
                 dist = math.hypot(pad.center_x - player_x, pad.center_y - player_y)
-                print(f"[Client] 火箭台 {i}: pos=({pad.center_x},{pad.center_y}), state={pad.state}, dist={dist:.1f}")
+                logging.debug(f"[Client] 火箭台 {i}: pos=({pad.center_x},{pad.center_y}), state={pad.state}, dist={dist:.1f}")
                 if dist < ROCKET_PAD_INTERACT_RANGE and pad.state in ("idle", "boss_defeated"):
                     interaction_type = "rocket_pad"
                     break
 
-        print(f"[Client] 交互类型: {interaction_type}")
+        logging.debug(f"[Client] 交互类型: {interaction_type}")
 
         # 发送交互请求
         if interaction_type:
@@ -129,7 +130,7 @@ class PickupLootManager:
                 "y": player_y,
             }))
             self.gv._chest_key_pressed = False  # 消费按键
-            print(f"[Client] 发送交互请求: {interaction_type}")
+            logging.debug(f"[Client] 发送交互请求: {interaction_type}")
 
     def _apply_free_equip(self, d: dict) -> None:
         """无背包拾取空槽位武器/装备/背包时，立即在局内生效（穿戴 / 加防御 / 获得容量）

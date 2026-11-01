@@ -55,6 +55,7 @@ from game.entity_callbacks import (
 )
 import game.monsters as monsters
 from game.monsters import Zombie  # 远端怪物实例化兜底（未知类型回退用）
+import logging
 # 注意：_RemoteLaser / _lookup_weapon_by_name 在函数内延迟导入，避免与 game_view.py 构成模块级循环导入
 
 
@@ -70,7 +71,7 @@ def _color_to_list(color) -> list | None:
         return list(tuple(color)[:3])
     except TypeError:
         # 非序列（理论上不会发生）：显式告警后按缺失处理，禁静默吞掉脏数据
-        print(f"[警告] 快照颜色字段类型异常：{color!r}")
+        logging.debug(f"[警告] 快照颜色字段类型异常：{color!r}")
         return None
 
 
@@ -194,13 +195,13 @@ class NetworkSyncManager:
         last_at = self._last_attack_at.get(attacker_id)
         if last_at is not None and (now - last_at) < min_gap:
             # 超频攻击：丢弃本次事件（不扣血、不生成弹丸），显式告警一次
-            print(f"[Host] 玩家 {attacker_id} 攻击超频（间隔 {now - last_at:.3f}s < "
+            logging.debug(f"[Host] 玩家 {attacker_id} 攻击超频（间隔 {now - last_at:.3f}s < "
                   f"窗口 {min_gap:.3f}s，攻速 {reported_speed:.2f}），已丢弃")
             return
         # timestamp 去重：同一 timestamp 重复重发（重放）直接丢弃
         ts = payload.get("timestamp")
         if ts is not None and ts == self._last_attack_ts.get(attacker_id):
-            print(f"[Host] 玩家 {attacker_id} 重放同一 timestamp={ts!r} 的攻击事件，已丢弃")
+            logging.debug(f"[Host] 玩家 {attacker_id} 重放同一 timestamp={ts!r} 的攻击事件，已丢弃")
             return
         self._last_attack_at[attacker_id] = now
         if ts is not None:
@@ -457,17 +458,17 @@ class NetworkSyncManager:
         # 冷却窗口取 get_skill(caster)["cooldown"]（entities/character_defs 单一来源）
         skill_def = get_skill(caster)
         if skill_def is None:
-            print(f"[Host] 玩家 {caster_id} 无角色技能定义，忽略 SKILL_USE")
+            logging.debug(f"[Host] 玩家 {caster_id} 无角色技能定义，忽略 SKILL_USE")
             return
         cooldown = float(skill_def.get("cooldown", 0.0) or 0.0)
         now = time.time()
         ready_at = self._skill_cd_until.get(caster_id)
         if ready_at is not None and now < ready_at:
-            print(f"[Host] 玩家 {caster_id} 技能冷却中（剩余 {ready_at - now:.2f}s），"
+            logging.debug(f"[Host] 玩家 {caster_id} 技能冷却中（剩余 {ready_at - now:.2f}s），"
                   f"忽略本次 SKILL_USE")
             return
         if getattr(caster, "_stunned", False):
-            print(f"[Host] 玩家 {caster_id} 处于眩晕，忽略本次 SKILL_USE")
+            logging.debug(f"[Host] 玩家 {caster_id} 处于眩晕，忽略本次 SKILL_USE")
             return
         self._skill_cd_until[caster_id] = now + cooldown
         # 幽灵 skill_cd 交给主机墙钟接管（每次放技能前清零，避免 can_use_skill 误拦）
@@ -565,7 +566,7 @@ class NetworkSyncManager:
                 warn_key = ("damage_drop", target_id)
                 if warn_key not in self._warned_keys:
                     self._warned_keys.add(warn_key)
-                    print(f"[Client] DAMAGE_RESULT 目标 {target_id} 超时未出现在快照中，"
+                    logging.debug(f"[Client] DAMAGE_RESULT 目标 {target_id} 超时未出现在快照中，"
                           f"已丢弃（血量以下一帧快照为准）")
             else:
                 still_pending.append(entry)
@@ -618,7 +619,7 @@ class NetworkSyncManager:
                 getattr(ghost, "_pending_debuff_effects", None),
             )
         self.gv.remote_players[player_id] = ghost
-        print(f"[GameView] 远端玩家幽灵懒创建: player_id={player_id} @({sx:.0f},{sy:.0f})")
+        logging.debug(f"[GameView] 远端玩家幽灵懒创建: player_id={player_id} @({sx:.0f},{sy:.0f})")
         return ghost
 
     def _broadcast_player_hurt(self, player_id: int, damage: float,
@@ -745,7 +746,7 @@ class NetworkSyncManager:
             try:
                 player.apply_debuff(eid, int(lvl or 1))
             except Exception as exc:  # noqa: BLE001 - 未知效果 id 属脏数据，须显式告警
-                print(f"[NetSync] 施加附带效果失败 id={eid} level={lvl}：{exc}")
+                logging.debug(f"[NetSync] 施加附带效果失败 id={eid} level={lvl}：{exc}")
         if entries:
             return  # 全量列表已消费，不再回退读旧单值字段
         # 旧主机兼容：仅下发 debuff/debuff_level 单值时按单条施加
@@ -754,7 +755,7 @@ class NetworkSyncManager:
             try:
                 player.apply_debuff(legacy, int(payload.get("debuff_level") or 1))
             except Exception as exc:  # noqa: BLE001 - 同上，显式告警
-                print(f"[NetSync] 施加旧版附带效果失败 id={legacy}：{exc}")
+                logging.debug(f"[NetSync] 施加旧版附带效果失败 id={legacy}：{exc}")
 
     def _broadcast_skill_debuff(self, player, debuffs: list) -> None:
         """主机：把怪物技能的 debuff 单播给被影响的**远端**玩家（范围技能无伤害命中的唯一送达通道）
@@ -945,7 +946,7 @@ class NetworkSyncManager:
         gs = self.gv.window.game_state
         if gs.net_mode == "host" and gs.net_server is not None:
             gs.net_server.broadcast(MsgType.ROOM_ENDED, {"reason": reason})
-            print(f"[GameView] 主机广播房间结束: {reason} close_room={close_room}")
+            logging.debug(f"[GameView] 主机广播房间结束: {reason} close_room={close_room}")
             if close_room:
                 # 关闭房间：停止服务器释放端口，保证下一次建房可重新监听
                 gs.net_server.stop()
@@ -995,7 +996,7 @@ class NetworkSyncManager:
         }
         if reason not in _reason_cn:
             # net 铁律：未知 reason 不静默拼接英文枚举，记录后用通用文案兜底
-            print(f"[GameView] ROOM_ENDED 未知 reason={reason!r}，使用通用结束提示")
+            logging.debug(f"[GameView] ROOM_ENDED 未知 reason={reason!r}，使用通用结束提示")
         self.gv._back_to_lobby(_reason_cn.get(reason, "本局结束，等待主机再次开局"))
 
     def _handle_potion_use(self, sender_id: int, payload: dict) -> None:
@@ -1174,7 +1175,7 @@ class NetworkSyncManager:
         net_id = payload.get("item_id")
         if not net_id:
             # 非法请求：无掉落物网络 id（禁静默——回执与日志至少要有一个）
-            print(f"[Host] 玩家 {sender_id} 的拾取请求缺 item_id，已拒绝")
+            logging.debug(f"[Host] 玩家 {sender_id} 的拾取请求缺 item_id，已拒绝")
             return
         # 在主机权威掉落列表中查找目标掉落物
         target = next((d for d in self.gv.drops if d.net_id == net_id), None)
@@ -1207,7 +1208,7 @@ class NetworkSyncManager:
             warn_key = ("ghost_missing", "pickup", sender_id)
             if warn_key not in self._warned_keys:
                 self._warned_keys.add(warn_key)
-                print(f"[Host] 玩家 {sender_id} 拾取时幽灵缺失，已按上报坐标/出生点兜底"
+                logging.debug(f"[Host] 玩家 {sender_id} 拾取时幽灵缺失，已按上报坐标/出生点兜底"
                       f"（限频告警一次）")
             # 兜底坐标判定放在告警守卫之外：幽灵被清（重开一局）后再次缺失时，
             # 告警已限频但 check_x/check_y 必须仍被赋值（否则 NameError 中断主机泵）
@@ -1229,7 +1230,7 @@ class NetworkSyncManager:
                 self._warned_keys.add(warn_key)
                 gap = math.hypot(float(req_x) - ghost.center_x,
                                  float(req_y) - ghost.center_y)
-                print(f"[Host] 玩家 {sender_id} 拾取上报坐标与幽灵偏差 {gap:.0f}px 超容差"
+                logging.debug(f"[Host] 玩家 {sender_id} 拾取上报坐标与幽灵偏差 {gap:.0f}px 超容差"
                       f"（{DROP_PICKUP_POS_TOLERANCE}px），回退幽灵坐标判距（限频告警一次）")
             check_x, check_y = ghost.center_x, ghost.center_y
         else:
@@ -1349,7 +1350,7 @@ class NetworkSyncManager:
         # 被重复计数（EVAC_RESULT 清单也会重复广播）。口径对齐 _handle_player_abandon
         # 的 _player_status 判定：已是 evac/left 视为已结算，显式忽略并记日志（禁静默）。
         if self.gv._player_status.get(sender_id) in ("evac", "left"):
-            print(f"[GameView] 忽略玩家 {sender_id} 重复的撤离请求（已结算，不再计数）")
+            logging.debug(f"[GameView] 忽略玩家 {sender_id} 重复的撤离请求（已结算，不再计数）")
             return
         # 阶段6.2 任务/成就进度：撤离成功按「结算玩家」归属（唯一 evac 计数口径），
         # 客户端经 MISSION_PROGRESS 写自己的本地库（防双计铁律：客户端永不自计）
@@ -1368,7 +1369,7 @@ class NetworkSyncManager:
                 warn_key = ("evac_carried_diff", sender_id)
                 if warn_key not in self._warned_keys:
                     self._warned_keys.add(warn_key)
-                    print(f"[Host] 玩家 {sender_id} 上报携带清单与主机账本不一致，"
+                    logging.debug(f"[Host] 玩家 {sender_id} 上报携带清单与主机账本不一致，"
                           f"已按主机账本为准结算（明细见下方[撤离对账]日志）")
             carried = merged
         gs.net_server.broadcast(MsgType.EVAC_RESULT, {
@@ -1383,7 +1384,7 @@ class NetworkSyncManager:
         if ghost is not None:
             ghost.hp = 0
             ghost.alive = False
-        print(f"[GameView] 主机响应玩家 {sender_id} 撤离请求：广播 EVAC_RESULT 结算清单")
+        logging.debug(f"[GameView] 主机响应玩家 {sender_id} 撤离请求：广播 EVAC_RESULT 结算清单")
 
     def _reject_evac_request(self, sender_id: int, reason: str, detail: str) -> None:
         """主机拒绝客户端撤离请求：单播 EVAC_RESULT{success:False} + 中文日志
@@ -1398,7 +1399,7 @@ class NetworkSyncManager:
         PLAYER_ABANDON_RESULT 同一模式），net/protocol.py 本任务不改。
         """
         gs = self.gv.window.game_state
-        print(f"[Host] 拒绝玩家 {sender_id} 的撤离请求：{detail}（reason={reason}）")
+        logging.debug(f"[Host] 拒绝玩家 {sender_id} 的撤离请求：{detail}（reason={reason}）")
         if gs.net_server is None:
             return  # 防御性：主机无服务端连接时无从回执（已记日志）
         gs.net_server.send_to(sender_id, MsgType.EVAC_RESULT, {
@@ -1456,7 +1457,7 @@ class NetworkSyncManager:
                              reason: str, detail: str) -> None:
         """主机拒绝商队购买：单播 CARRIAGE_BUY_RESULT{ok:False} + 中文日志（禁静默）"""
         gs = self.gv.window.game_state
-        print(f"[Host] 拒绝玩家 {sender_id} 的商队购买：{detail}"
+        logging.debug(f"[Host] 拒绝玩家 {sender_id} 的商队购买：{detail}"
               f"（item={payload.get('item_id')!r} kind={payload.get('kind')!r} "
               f"reason={reason}）")
         if gs.net_server is None:
@@ -1559,7 +1560,7 @@ class NetworkSyncManager:
             "item_id": item_id,
             "qty": qty,
         })
-        print(f"[Host] 玩家 {sender_id} 商队购入 {kind}/{item_id}×{qty} 成功"
+        logging.debug(f"[Host] 玩家 {sender_id} 商队购入 {kind}/{item_id}×{qty} 成功"
               f"（扣账 {expect_cost} 账号金币由本端结算），"
               f"权威携带物={ {k: v for k, v in carried.items()} }")
 
@@ -1586,7 +1587,7 @@ class NetworkSyncManager:
         )
         if change_type not in _KNOWN_CHANGE_TYPES:
             # 未知改动类型：显式记录而非静默忽略（net 层铁律）
-            print(f"[Client] MAP_CHANGE 未知 change_type={change_type!r}，忽略")
+            logging.debug(f"[Client] MAP_CHANGE 未知 change_type={change_type!r}，忽略")
             return
         if change_type == "drop_spawn":
             for entry in payload.get("extra", {}).get("drops", []):
@@ -1728,12 +1729,12 @@ class NetworkSyncManager:
         # bid 口径：主机用 BuildSystem._next_bid 分配的 int；协议 fixture 用字符串 id。
         # 两种都按不透明标识处理（增删两侧同口径即可），但必须存在。
         if not isinstance(bid, (int, str)) or isinstance(bid, bool):
-            print(f"[Client] build_place 非法 obj_id={bid!r}，忽略")
+            logging.debug(f"[Client] build_place 非法 obj_id={bid!r}，忽略")
             return
         kind = state.get("kind", "")
         if kind not in BUILDS:
             # 未知建筑类型：显式记录而非静默忽略（跨版本建筑定义不同步的防御）
-            print(f"[Client] build_place 未知 kind={kind!r}（bid={bid}），忽略")
+            logging.debug(f"[Client] build_place 未知 kind={kind!r}（bid={bid}），忽略")
             return
         for building in buildings:
             if building.bid == bid:
@@ -2118,7 +2119,7 @@ class NetworkSyncManager:
         # commit_run_to_warehouse 当成「本局零战利品」清空账本（凭空丢货 desync）。
         if payload.get("success") is False:
             reason = payload.get("reason") or "撤离请求未被主机受理"
-            print(f"[Client] 撤离请求被主机拒绝：{reason}")
+            logging.debug(f"[Client] 撤离请求被主机拒绝：{reason}")
             floating_texts.add(self.gv.player.center_x, self.gv.player.center_y + 60,
                                f"撤离失败：{reason}", arcade.color.RED,
                                life=2.0, font_size=16)
@@ -2295,7 +2296,7 @@ class NetworkSyncManager:
         # 身份收口：优先用连接 sender_id（禁信任 payload.player_id）
         player_id = sender_id if sender_id is not None else payload.get("player_id")
         if player_id is None:
-            print("[Host] SPECTATE_LEAVE 缺少玩家身份，忽略本次请求")
+            logging.debug("[Host] SPECTATE_LEAVE 缺少玩家身份，忽略本次请求")
             return
         if player_id == 0:
             # 主机自己退出观战：统一真死结算（清账本/装备 → 进观战）
@@ -2304,7 +2305,7 @@ class NetworkSyncManager:
             # 客户端退出观战：清账本 + 标记真死（不再回执 PLAYER_DEATH，见 docstring）
             self.gv._downed_players.pop(player_id, None)
             self.gv._player_status[player_id] = "dead"
-            print(f"[Host] 玩家 {player_id} 主动退出观战 → 视为真死")
+            logging.debug(f"[Host] 玩家 {player_id} 主动退出观战 → 视为真死")
 
     def handle_evac_point_result(self, payload: dict) -> None:
         """客户端应用主机 EVAC_POINT_RESULT：撤离点激活/修复的权威回执
@@ -2329,12 +2330,12 @@ class NetworkSyncManager:
         action = str(payload.get("action") or "")
         known_actions = ("activate", "repair")
         if action not in known_actions:
-            print(f"[Client] EVAC_POINT_RESULT action 非法：{action!r} payload={payload!r}")
+            logging.debug(f"[Client] EVAC_POINT_RESULT action 非法：{action!r} payload={payload!r}")
             return  # 禁静默忽略未知载荷
         ok = bool(payload.get("ok"))
         reason = payload.get("reason") or "撤离点操作被拒绝"
         if not ok:
-            print(f"[Client] 撒离点操作被主机拒绝：action={action!r} reason={reason}")
+            logging.debug(f"[Client] 撒离点操作被主机拒绝：action={action!r} reason={reason}")
             # 问题2 修复：直接显示主机 reason 原文（现为全量需求清单
             # 「资源不足，需要 木材x8 …」，与主机本地提示同口径）；
             # 旧版加「操作失败：」前缀且主机只报首个缺失项，客户端看不出需求
@@ -2352,7 +2353,7 @@ class NetworkSyncManager:
         except Exception:
             theme = None
         if not theme:
-            print("[Client] EVAC_POINT_RESULT：无法获取地图主题，放弃扣料并返回")
+            logging.debug("[Client] EVAC_POINT_RESULT：无法获取地图主题，放弃扣料并返回")
             floating_texts.add(self.gv.player.center_x, self.gv.player.center_y + 60,
                                "操作失败：地图主题未知", arcade.color.RED,
                                life=2.0, font_size=16)
@@ -2361,7 +2362,7 @@ class NetworkSyncManager:
             from config import evac_activate_cost
             cost = evac_activate_cost(theme)
         except Exception as exc:
-            print(f"[Client] EVAC_POINT_RESULT：evac_activate_cost 导入/调用失败：{exc}")
+            logging.debug(f"[Client] EVAC_POINT_RESULT：evac_activate_cost 导入/调用失败：{exc}")
             floating_texts.add(self.gv.player.center_x, self.gv.player.center_y + 60,
                                "操作失败：配置读取失败", arcade.color.RED,
                                life=2.0, font_size=16)
@@ -2371,10 +2372,10 @@ class NetworkSyncManager:
         try:
             paid = self.gv._pay_resource_cost(gs, cost)
         except Exception as exc:
-            print(f"[Client] EVAC_POINT_RESULT：_pay_resource_cost 调用失败：{exc}")
+            logging.debug(f"[Client] EVAC_POINT_RESULT：_pay_resource_cost 调用失败：{exc}")
             paid = False
         if not paid:
-            print(f"[Client] EVAC_POINT_RESULT：资源扣减失败（theme={theme!r} cost={cost}）")
+            logging.debug(f"[Client] EVAC_POINT_RESULT：资源扣减失败（theme={theme!r} cost={cost}）")
             floating_texts.add(self.gv.player.center_x, self.gv.player.center_y + 60,
                                "操作失败：资源不足或账本异常", arcade.color.RED,
                                life=2.0, font_size=16)
@@ -2421,20 +2422,20 @@ class NetworkSyncManager:
             reason = ("被救者不存在" if target_id is None
                       else f"被救者 {target_id} 当前状态 "
                            f"{self.gv._player_status.get(target_id)!r} 非倒地")
-            print(f"[Host] 拒绝玩家 {rescuer_id} 的救援请求：{reason}")
+            logging.debug(f"[Host] 拒绝玩家 {rescuer_id} 的救援请求：{reason}")
             self._send_rescue_reject(rescuer_id, target_id)
             return
         # 校验：救援者必须存活（自身已阵亡/撤离/断线者不得发起救援）
         if self.gv._player_status.get(rescuer_id) != "alive":
             reason = (f"救援者 {rescuer_id} 当前状态 "
                       f"{self.gv._player_status.get(rescuer_id)!r} 非存活")
-            print(f"[Host] 拒绝玩家 {rescuer_id} 的救援请求：{reason}")
+            logging.debug(f"[Host] 拒绝玩家 {rescuer_id} 的救援请求：{reason}")
             self._send_rescue_reject(rescuer_id, target_id)
             return
         # 获取被救者位置
         downed_info = self.gv._downed_players.get(target_id)
         if downed_info is None:
-            print(f"[Host] 拒绝玩家 {rescuer_id} 的救援请求："
+            logging.debug(f"[Host] 拒绝玩家 {rescuer_id} 的救援请求："
                   f"被救者 {target_id} 无倒地位置记录（状态与位置账本不一致）")
             self._send_rescue_reject(rescuer_id, target_id)
             return
@@ -2451,7 +2452,7 @@ class NetworkSyncManager:
                 warn_key = ("ghost_missing", "rescue", rescuer_id)
                 if warn_key not in self._warned_keys:
                     self._warned_keys.add(warn_key)
-                    print(f"[Host] 玩家 {rescuer_id} 救援时幽灵缺失，"
+                    logging.debug(f"[Host] 玩家 {rescuer_id} 救援时幽灵缺失，"
                           f"已按出生点 ({ghost.center_x},{ghost.center_y}) 兜底（限频告警一次）")
             rescuer_x, rescuer_y = ghost.center_x, ghost.center_y
         # 距离校验
@@ -2499,7 +2500,7 @@ class NetworkSyncManager:
                 ghost.hp = REVIVE_HP
                 ghost.downed = False
                 ghost._downed_notified = False
-        print(f"[GameView] 玩家 {rescuer_id} 成功救援玩家 {target_id}，HP 恢复为 {REVIVE_HP}")
+        logging.debug(f"[GameView] 玩家 {rescuer_id} 成功救援玩家 {target_id}，HP 恢复为 {REVIVE_HP}")
 
     def _handle_interaction_request(self, sender_id: int, payload: dict) -> None:
         """主机处理客户端交互请求：验证距离 → 执行交互 → 广播结果
@@ -2515,7 +2516,7 @@ class NetworkSyncManager:
         request_x = float(payload.get("x", 0))
         request_y = float(payload.get("y", 0))
 
-        print(f"[Host] 收到交互请求: player={player_id}, type={interaction_type}, pos=({request_x},{request_y})")
+        logging.debug(f"[Host] 收到交互请求: player={player_id}, type={interaction_type}, pos=({request_x},{request_y})")
 
         # 距离校验一律用幽灵实测坐标（PLAYER_SNAPSHOT 主机权威）：直接采信上报坐标
         # 会让客户端隔空开箱/回血/启火箭台。幽灵缺失时优先用本次上报坐标兜底
@@ -2526,7 +2527,7 @@ class NetworkSyncManager:
             warn_key = ("ghost_missing", "interaction", player_id)
             if warn_key not in self._warned_keys:
                 self._warned_keys.add(warn_key)
-                print(f"[Host] 玩家 {player_id} 交互时幽灵缺失，"
+                logging.debug(f"[Host] 玩家 {player_id} 交互时幽灵缺失，"
                       f"已按上报坐标 ({request_x},{request_y}) 兜底（限频告警一次）")
             # 上报坐标缺失（None）才退到出生点：ghost 是刚懒创建的，坐标即出生点
             if payload.get("x") is None or payload.get("y") is None:
@@ -2558,7 +2559,7 @@ class NetworkSyncManager:
                     # 阶段6.2 任务 chest 按开箱发起者归属（主机裁决，单播给该客户端）
                     from game.mission_tracker import on_event as mission_on_event
                     mission_on_event(self.gv, "chest", 1, player_id)
-                    print(f"[GameView] 客户端 {player_id} 开启宝箱 {i}")
+                    logging.debug(f"[GameView] 客户端 {player_id} 开启宝箱 {i}")
                     handled = True
                     break
 
@@ -2589,7 +2590,7 @@ class NetworkSyncManager:
                             "heal_amount": heal_amount,
                             "effect": "heal", "value": heal_amount, "duration": 0,
                         })
-                    print(f"[GameView] 客户端 {player_id} 使用水井，回血 {heal_amount}")
+                    logging.debug(f"[GameView] 客户端 {player_id} 使用水井，回血 {heal_amount}")
                     handled = True
 
         elif interaction_type == "rocket_pad":
@@ -2606,27 +2607,27 @@ class NetworkSyncManager:
                         handle_rocket_pad_interaction(self.gv)
                         self.gv.player = old_player
                         self.gv._chest_key_pressed = old_key
-                        print(f"[GameView] 客户端 {player_id} 激活火箭台 {i}")
+                        logging.debug(f"[GameView] 客户端 {player_id} 激活火箭台 {i}")
                         handled = True
                     elif pad.state == "boss_defeated":
                         # 标记可选择状态（7/8键选择）
                         self.gv._rocket_pad_menu = pad
-                        print(f"[GameView] 客户端 {player_id} 打开火箭台菜单 {i}")
+                        logging.debug(f"[GameView] 客户端 {player_id} 打开火箭台菜单 {i}")
                         handled = True
                     else:
                         # 范围内但状态不允许（倒计时中/已启动/已摧毁）：显式记日志（禁静默）
-                        print(f"[Host] 玩家 {player_id} 交互火箭台被拒："
+                        logging.debug(f"[Host] 玩家 {player_id} 交互火箭台被拒："
                               f"第 {i} 个发射台当前状态 {pad.state!r} 不可交互")
                     break
         else:
             # 未知交互类型：显式告警而非静默忽略（net 层铁律：禁静默丢弃请求）
-            print(f"[Host] 玩家 {player_id} 请求未知交互类型 "
+            logging.debug(f"[Host] 玩家 {player_id} 请求未知交互类型 "
                   f"interaction_type={interaction_type!r}，已忽略")
             return
 
         if not handled:
             # 范围内无可交互目标：显式记日志（禁静默，让「按 E 没反应」可追因）
-            print(f"[Host] 玩家 {player_id} 的 {interaction_type} 交互未被受理："
+            logging.debug(f"[Host] 玩家 {player_id} 的 {interaction_type} 交互未被受理："
                   f"坐标 ({check_x:.0f},{check_y:.0f}) 范围内无合法目标")
 
     def _handle_player_abandon(self, sender_id: int, payload: dict) -> None:
@@ -2647,7 +2648,7 @@ class NetworkSyncManager:
         # 更新玩家状态为 dead（与死亡同待遇，触发全员结束判定）
         if self.gv._player_status.get(player_id) not in ("evac", "dead", "left"):
             self.gv._player_status[player_id] = "dead"
-            print(f"[GameView] 客户端 {player_id} 放弃行动: {reason}，已标记 dead")
+            logging.debug(f"[GameView] 客户端 {player_id} 放弃行动: {reason}，已标记 dead")
 
         # 标记幽灵为不存活（设置 hp=0，alive 是只读 property：hp > 0）
         ghost = self.gv.remote_players.get(player_id)
@@ -2931,7 +2932,7 @@ class NetworkSyncManager:
         if monster_list and not self._warned_old_monster_snapshot:
             # net 层铁律：禁静默丢字段——主机快照缺新字段时显式告警一次（非每帧刷屏）
             if "attack_cd_ratio" not in monster_list[0] or "shield" not in monster_list[0]:
-                print("[NetSync] 主机 MONSTER_SNAPSHOT 缺 shield/attack_cd_ratio 等新字段"
+                logging.debug("[NetSync] 主机 MONSTER_SNAPSHOT 缺 shield/attack_cd_ratio 等新字段"
                       "（旧主机？），已按本地默认值兜底渲染")
                 self._warned_old_monster_snapshot = True
         # 删除本端存在但快照缺失的怪物（主机已击杀/移除）
@@ -3247,7 +3248,7 @@ class NetworkSyncManager:
         build_id = payload.get("build_id")
         if build_id not in BUILDS:
             # 未知建筑类型：显式拒绝并告警（禁静默，跨版本建筑表不同步的防御）
-            print(f"[Host] 玩家 {sender_id} 请求未知建筑 {build_id!r}，已拒绝")
+            logging.debug(f"[Host] 玩家 {sender_id} 请求未知建筑 {build_id!r}，已拒绝")
             gs.net_server.send_to(sender_id, MsgType.BUILD_RESULT, {
                 "build_id": build_id, "ok": False, "bid": None, "reason": "unknown_build",
             })
@@ -3285,7 +3286,7 @@ class NetworkSyncManager:
             # 该玩家的权威携带物已被 place 扣减（游戏背包/结算口径均读它），
             # 故记一笔显式日志便于对账（携带清单无独立消息类型，禁改 net/protocol.py，
             # 因此不在此发明新消息；客户端携带显示仍以本端为准，撤离时才按主机清单入库）
-            print(f"[Host] 玩家 {sender_id} 建造 {build_id} 成功：bid={bid}，"
+            logging.debug(f"[Host] 玩家 {sender_id} 建造 {build_id} 成功：bid={bid}，"
                   f"携带清单={self.gv._players_run_carried.get(sender_id) or {}}")
         gs.net_server.send_to(sender_id, MsgType.BUILD_RESULT, {
             "build_id": build_id, "ok": ok, "bid": bid, "reason": reason or None,
@@ -3312,7 +3313,7 @@ class NetworkSyncManager:
             carried = getattr(gs, "run_carried", None)
             if not cost or not isinstance(carried, dict):
                 # 载荷缺 build_id / 建筑表无 cost 变更：显式告警，不静默吞掉
-                print(f"[Client] BUILD_RESULT 成功但 cost 缺失：build_id={build_id!r}")
+                logging.debug(f"[Client] BUILD_RESULT 成功但 cost 缺失：build_id={build_id!r}")
                 return
             resource = carried.get("resource")
             if not isinstance(resource, dict):
@@ -3325,7 +3326,7 @@ class NetworkSyncManager:
                 warn_key = ("build_cost_drift", tuple(sorted(drift)), build_id)
                 if warn_key not in self._warned_keys:
                     self._warned_keys.add(warn_key)
-                    print(f"[Client] 建造 {build_id} 成功但本端资源不足于 cost"
+                    logging.debug(f"[Client] 建造 {build_id} 成功但本端资源不足于 cost"
                           f"（缺 {drift}），已按 0 对齐并记限频告警一次")
             for item_id, need in cost.items():
                 left = int(resource.get(item_id, 0) or 0) - int(need)
@@ -3339,7 +3340,7 @@ class NetworkSyncManager:
         reason = payload.get("reason") or "无法建造"
         # 主机拒绝原因为 BuildSystem.can_place 的中文文案（边界/距离/占用/资源不足），
         # 直接展示即可；未知 reason 前缀（防御分支）也照原样显示，不静默吞掉
-        print(f"[Client] 建造请求被主机拒绝：build_id={build_id!r} reason={reason}")
+        logging.debug(f"[Client] 建造请求被主机拒绝：build_id={build_id!r} reason={reason}")
         from entities.build_defs import BUILDS
         build_name = BUILDS.get(build_id, {}).get("name", str(build_id))
         gs.build_mode = False  # 退出建造模式：拒绝后别留在原地反复按（build_mode 在 game_state 上）
@@ -3364,7 +3365,7 @@ class NetworkSyncManager:
         if payload.get("ok"):
             return  # 成功：效果已由 MAP_CHANGE 广播落地
         reason = payload.get("reason") or "无法交互"
-        print(f"[Client] 交互请求被主机拒绝：type={payload.get('interaction_type')!r} "
+        logging.debug(f"[Client] 交互请求被主机拒绝：type={payload.get('interaction_type')!r} "
               f"reason={reason}")
         floating_texts.add(self.gv.player.center_x, self.gv.player.center_y + 60,
                            f"交互失败：{reason}", arcade.color.RED, life=2.0, font_size=16)
@@ -3384,7 +3385,7 @@ class NetworkSyncManager:
         if payload.get("ok"):
             return  # 已受理：清装备/回房由主机 ROOM_ENDED 统一收口
         reason = payload.get("reason") or "放弃请求未被受理"
-        print(f"[Client] 放弃行动被主机拒绝：{reason}")
+        logging.debug(f"[Client] 放弃行动被主机拒绝：{reason}")
         floating_texts.add(self.gv.player.center_x, self.gv.player.center_y + 60,
                            f"放弃失败：{reason}", arcade.color.RED, life=2.0, font_size=16)
 
@@ -3408,7 +3409,7 @@ class NetworkSyncManager:
             self.gv._downed_players.pop(peer_id, None)
             self.gv._player_status[peer_id] = "left"
             reason = payload.get("reason") or "connection_closed"
-            print(f"[NetSync] 玩家 {peer_id} 断连（{reason}），已清理其幽灵与状态")
+            logging.debug(f"[NetSync] 玩家 {peer_id} 断连（{reason}），已清理其幽灵与状态")
             if peer_id != 0:
                 # 断线幽灵消失需要提示：玩家可能正与对方交战中突然对手不见了
                 floating_texts.add(self.gv.player.center_x, self.gv.player.center_y + 60,
@@ -3422,5 +3423,5 @@ class NetworkSyncManager:
         显式走 _back_to_lobby 而不是静默停在半死的游戏视图里。
         """
         reason = payload.get("reason") or "房间错误"
-        print(f"[NetSync] 收到 ROOM_ERROR：{reason}")
+        logging.debug(f"[NetSync] 收到 ROOM_ERROR：{reason}")
         self.gv._back_to_lobby(f"房间错误：{reason}")

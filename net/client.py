@@ -33,6 +33,7 @@ from collections.abc import Callable
 
 from websockets.asyncio.client import ClientConnection, connect as _ws_connect
 from websockets.exceptions import ConnectionClosed
+import logging
 
 try:
     from net.protocol import MsgType, decode, encode
@@ -208,7 +209,7 @@ class NetClient:
                 frame = encode(msg[0], msg[1])
             except ValueError as exc:
                 # 编码失败：显式告警（禁静默忽略，否则上层永远不知道为什么发不出去）
-                print(f"[NetClient] 消息编码失败，已丢弃 type={msg[0].name}: {exc}")
+                logging.debug(f"[NetClient] 消息编码失败，已丢弃 type={msg[0].name}: {exc}")
                 return False
             is_heartbeat = msg[0] == MsgType.HEARTBEAT
         else:
@@ -217,7 +218,7 @@ class NetClient:
         # 此后 _recv_loop 才按 config.NET_TIMEOUT_SEC 判定链路存活。
         # （大厅阶段上层还没发心跳、主机此时本就不发任何帧，无条件布防会误断）
         if is_heartbeat and not self._heartbeat_armed:
-            print(
+            logging.debug(
                 f"[NetClient] 心跳看门狗已布防"
                 f"（阈值 {HEARTBEAT_TIMEOUT_SEC}s 未收包即判定掉线）"
             )
@@ -310,7 +311,7 @@ class NetClient:
             try:
                 self._on_disconnect()
             except Exception as exc:
-                print(f"[NetClient] 断线回调异常: {exc!r}")
+                logging.debug(f"[NetClient] 断线回调异常: {exc!r}")
 
     def _network_worker(self, host: str, port: int) -> None:
         """网络 daemon 线程入口：创建并运行事件循环，直至连接结束或 stop()。
@@ -337,7 +338,7 @@ class NetClient:
             self._connect_event.set()
             self._set_state("disconnected")
             self._trigger_disconnect_callback()
-            print(f"[NetClient] 网络线程异常: {exc!r}")
+            logging.debug(f"[NetClient] 网络线程异常: {exc!r}")
         finally:
             # 清理事件循环内未完成的任务，避免 loop.close() 告警
             if not loop.is_closed():
@@ -479,7 +480,7 @@ class NetClient:
                 # 剩余容忍时间 = 阈值 - 距上次收包的间隔；<=0 表示已超时
                 timeout = HEARTBEAT_TIMEOUT_SEC - self.last_recv_age
                 if timeout <= 0:
-                    print(
+                    logging.debug(
                         f"[NetClient] 心跳看门狗超时: 已 {self.last_recv_age:.1f}s "
                         f"未收到主机任何消息（阈值 {HEARTBEAT_TIMEOUT_SEC}s），"
                         f"判定链路已死并断开"
@@ -493,7 +494,7 @@ class NetClient:
                     # 是 OSError 的子类，故此处必须在下面的 OSError 分支之前捕获
                     raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
             except TimeoutError:
-                print(
+                logging.debug(
                     f"[NetClient] 心跳看门狗超时: 等待主机消息超过 "
                     f"{HEARTBEAT_TIMEOUT_SEC}s 未收到，判定链路已死并断开"
                 )
@@ -509,7 +510,7 @@ class NetClient:
                 msg_type, payload = decode(raw)
             except ValueError as exc:
                 # 非法帧丢弃（协议层约定），不崩溃
-                print(f"[NetClient] 丢弃非法帧: {exc}")
+                logging.debug(f"[NetClient] 丢弃非法帧: {exc}")
                 continue
             # 解码后的 (MsgType, payload) 交给主线程 poll() 消费
             self._bridge.put_inbound((msg_type, payload))
@@ -606,7 +607,7 @@ class RoomDiscovery:
             sock.close()
         except OSError as exc:
             # 广播发送失败：显式告警（禁静默忽略，否则房间列表空着却无从排查）
-            print(f"[RoomDiscovery] 发送 ROOM_QUERY 失败: {exc!r}")
+            logging.debug(f"[RoomDiscovery] 发送 ROOM_QUERY 失败: {exc!r}")
     
     def _discovery_worker(self) -> None:
         """后台搜索线程：监听 UDP 广播，收集房间信息。
@@ -622,7 +623,7 @@ class RoomDiscovery:
         try:
             sock.bind(("", self._broadcast_port))
         except OSError:
-            print(f"[RoomDiscovery] 无法绑定端口 {self._broadcast_port}")
+            logging.debug(f"[RoomDiscovery] 无法绑定端口 {self._broadcast_port}")
             return
         
         # 启动时立即发送一次查询
@@ -636,7 +637,7 @@ class RoomDiscovery:
                         msg_type, payload = decode(data.decode("utf-8"))
                     except ValueError as exc:
                         # UDP 坏帧 / 未知类型：显式告警（禁静默忽略）
-                        print(f"[RoomDiscovery] 收到非法 UDP 发现包（来自 {addr}），已忽略: {exc}")
+                        logging.debug(f"[RoomDiscovery] 收到非法 UDP 发现包（来自 {addr}），已忽略: {exc}")
                     else:
                         if msg_type == MsgType.ROOM_BROADCAST:
                             room_id = payload.get("room_id", "")

@@ -102,10 +102,21 @@ class CharacterSelectView(arcade.View):
         # 默认角色已选中且已解锁：直接标记已选定，显示"进入地图"按钮（避免玩家困惑）
         if self.selected in self._unlocked:
             self._picked = True
+        # 金币缓存：on_draw 曾每帧查库（每次新建 sqlite 连接）。进页面读一次，
+        # 点击/按键后由脏标记触发下一帧重读，on_draw 常态只读内存。
+        from db.database import get_gold
+        self._gold_cache = get_gold(gs.player_id) if gs.player_id else 0
+        self._cache_dirty = False
 
     def on_draw(self):
         self.clear()
         gs = self.window.game_state
+
+        # 金币：脏标记驱动刷新（购买角色后下一帧即为新值）
+        if getattr(self, "_cache_dirty", False):
+            from db.database import get_gold
+            self._gold_cache = get_gold(gs.player_id) if gs.player_id else 0
+            self._cache_dirty = False
 
         # 标题
         # 持久 Text 对象，避免 draw_text 每帧重建纹理
@@ -115,10 +126,7 @@ class CharacterSelectView(arcade.View):
             arcade.color.WHITE, size=32, anchor_x="center", bold=True,
         )
         # 当前金币（右上角；购买后实时刷新）
-        gold = 0
-        if gs.player_id:
-            from db.database import get_gold
-            gold = get_gold(gs.player_id)
+        gold = getattr(self, "_gold_cache", 0)
         # 持久 Text 对象，避免 draw_text 每帧重建纹理
         self._tc.text(
             "gold", f"金币: {gold}",
@@ -279,6 +287,8 @@ class CharacterSelectView(arcade.View):
                 self._tc, self.tut_next_hover)
 
     def on_key_press(self, key, modifiers):
+        # 按键可能触发确认/购买：置脏，下一帧重读金币缓存
+        self._cache_dirty = True
         # 新手教程激活：ESC 立即跳过并标记完成
         tut = getattr(self.window.game_state, "tutorial", None)
         if tut is not None and tut.active:
@@ -307,6 +317,8 @@ class CharacterSelectView(arcade.View):
         self.back_hover = self.back_rect.point_in_rect((x, y))
 
     def on_mouse_press(self, x, y, button, modifiers):
+        # 任何点击都可能购买角色：置脏，下一帧重读金币缓存
+        self._cache_dirty = True
         gs = self.window.game_state
 
         # 新手教程向导显示：只响应 下一步/跳过

@@ -1,4 +1,7 @@
 """玩家管理：创建/查询/金币操作"""
+
+import logging
+
 from db.connection import _conn
 
 
@@ -42,7 +45,8 @@ def _grant_starter_backpack(pid: int) -> None:
         equip_item(pid, "backpack", "small_bag", info["name"],
                    capacity=info["capacity"], level=1, effects=[])
     except Exception as e:  # noqa: BLE001 - 赠送失败不得阻断玩家创建
-        print(f"[警告] 新玩家赠送小布袋失败（pid={pid}）：{e}")
+        # 真实故障（非调试信息）：保留 warning 级别，仅发生时才输出，便于排查数据异常
+        logging.warning(f"[警告] 新玩家赠送小布袋失败（pid={pid}）：{e}")
 
 
 def ensure_starter_backpack(pid: int) -> None:

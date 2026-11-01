@@ -14,6 +14,7 @@ from config import WINDOW_WIDTH, WINDOW_HEIGHT, BLESSING_MAX
 from entities.blessing_defs import BLESSINGS
 from game.sound_manager import sound_manager
 from views.text_cache import TextCache
+import logging
 
 
 class BlessingView(arcade.View):
@@ -174,7 +175,7 @@ class BlessingView(arcade.View):
                 tip += f" +{int(shield)} 护盾"
             floating_texts.add(player.center_x, player.center_y + 60, tip,
                                cfg.get("color", arcade.color.GOLD), life=2.0, font_size=20)
-        print(f"[Blessing] 选中 {blessing_id}，当前持有 {len(state.ids)} 条")
+        logging.debug(f"[Blessing] 选中 {blessing_id}，当前持有 {len(state.ids)} 条")
 
         self._consume_and_advance()
 

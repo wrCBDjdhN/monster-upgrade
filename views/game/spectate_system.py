@@ -12,6 +12,7 @@ import arcade
 from net.protocol import MsgType
 from game.effects import floating_texts
 from config import DOWNED_TIMEOUT, PLAYER_SIZE, RESCUE_DISTANCE, RESCUE_DURATION, WINDOW_WIDTH
+import logging
 
 
 class SpectateManager:
@@ -56,7 +57,7 @@ class SpectateManager:
         )
         self.gv._spectate_target_id = first_ghost if first_ghost is not None else None
         self.gv._player_status[0] = outcome
-        print(f"[GameView] 主机进入观战模式: {outcome}")
+        logging.debug(f"[GameView] 主机进入观战模式: {outcome}")
         # 观战提示（撤离成功/阵亡分流文案）
         tip = ("你已撤离，进入观战模式（V 键切换视角）" if outcome == "evac"
                else "你已阵亡，进入观战模式（V 键切换视角）")
@@ -225,13 +226,13 @@ class SpectateManager:
                 self.gv.player.downed_timer = 0.0
             self.gv._clear_run_equipment(gs)
             self.gv._enter_spectate("dead")
-            print(f"[GameView] 玩家 {pid} 倒地真死（{reason}），已本地结算进观战")
+            logging.debug(f"[GameView] 玩家 {pid} 倒地真死（{reason}），已本地结算进观战")
             return
         if gs.net_mode == "host" and gs.net_server is not None:
             gs.net_server.send_to(pid, MsgType.PLAYER_DEATH, {
                 "player_id": pid, "killer_id": None,
             })
-        print(f"[GameView] 玩家 {pid} 倒地真死（{reason}）")
+        logging.debug(f"[GameView] 玩家 {pid} 倒地真死（{reason}）")
 
     def _settle_no_rescuer(self) -> None:
         """无可救援者立即结算（用户口径 A 方案）：不等 60 秒超时，按正常死亡收口
@@ -306,8 +307,9 @@ class SpectateManager:
         timer_color = (arcade.color.GREEN if timer > 20
                        else (arcade.color.ORANGE if timer > 10 else arcade.color.RED))
         self.gv._world_labels.append((
+            f"dp{own_pid}_timer",
             player.center_x, player.center_y + PLAYER_SIZE + 18,
-            f"救援 {int(timer)}s", timer_color, 10,
+            f"救援 {int(timer)}s", timer_color, 10, 0,
         ))
 
     def _update_rescue(self, dt: float) -> None:

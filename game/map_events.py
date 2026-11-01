@@ -62,6 +62,7 @@ from entities.resource_defs import RESOURCES
 from entities.weapon_defs import ALL_WEAPONS
 from game.effects import floating_texts
 from net.protocol import MsgType  # 联机消息类型（客户端商队购买发 CARRIAGE_BUY 请求）
+import logging
 
 
 # ─────────────────────────── 抽选 / 生效 / 横幅 ───────────────────────────
@@ -853,12 +854,12 @@ def apply_carriage_buy_result(view, payload: dict) -> bool:
     if not ok:
         _caravan_pending_consume(view, kind, item_id)
         reason = payload.get("reason") or "主机拒绝"
-        print(f"[Client] 商队购买被主机拒绝：kind={kind!r} item={item_id!r} reason={reason}")
+        logging.debug(f"[Client] 商队购买被主机拒绝：kind={kind!r} item={item_id!r} reason={reason}")
         _caravan_prompt(view, f"购买失败：{reason}", (255, 120, 120), force=True)
         return False
     if not _caravan_pending_consume(view, kind, item_id):
         # 无待确认记录（重复/迟到回执，或本局已重置）：禁重复发货
-        print(f"[Client] 收到非待确认的商队购买成功回执，已忽略：kind={kind!r} item={item_id!r}")
+        logging.debug(f"[Client] 收到非待确认的商队购买成功回执，已忽略：kind={kind!r} item={item_id!r}")
         return False
     entry = _caravan_stock_entry(view, kind, item_id)
     if entry is None:

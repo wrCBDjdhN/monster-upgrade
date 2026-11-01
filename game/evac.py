@@ -24,6 +24,7 @@ from config import (
     EVAC_RADIUS,
     EVAC_WAVE_INTERVAL,
 )
+import logging
 
 
 class EvacPoint:
@@ -293,10 +294,10 @@ def _merge_authoritative(authoritative: dict, client_carried: dict | None, *,
     diffs = _reconcile_carried(host_ledger, reported)
     if diffs:
         who = "未知" if player_id is None else player_id
-        print(f"[撤离对账] 玩家 {who} 的客户端上报清单与主机账本存在 {len(diffs)} 处差异，"
+        logging.debug(f"[撤离对账] 玩家 {who} 的客户端上报清单与主机账本存在 {len(diffs)} 处差异，"
               f"已全部以主机账本为准（客户端载荷仅对账、不采信）：")
         for line in diffs:
-            print(f"[撤离对账]   - {line}")
+            logging.debug(f"[撤离对账]   - {line}")
     # 返回主机账本的逐槽副本：既保证结果完全等于权威值，也避免调用方误改主机账本
     return copy_run_carried(host_ledger)
 
