@@ -46,6 +46,8 @@ class StartView(arcade.View):
         self.mission_rect = arcade.XYWH(WINDOW_WIDTH // 2 + 110, WINDOW_HEIGHT // 2 - 275, 200, 50)  # 任务板入口
         self.net_rect = arcade.XYWH(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - 330, 220, 46)  # 局域网联机入口
         self.settings_gear_rect = arcade.XYWH(35, WINDOW_HEIGHT - 35, 40, 40)  # 左上角齿轮图标
+        # 右上角邮件入口（阶段12：系统奖励 / 满仓溢出补发；角标 = 未领取数）
+        self.mail_rect = arcade.XYWH(WINDOW_WIDTH - 60, WINDOW_HEIGHT - 35, 100, 40)
         self.btn_hover = False
         self.wh_hover = False
         self.market_hover = False
@@ -54,6 +56,8 @@ class StartView(arcade.View):
         self.mission_hover = False  # 任务板按钮悬停态
         self.net_hover = False
         self.settings_hover = False
+        self.mail_hover = False
+        self._unclaimed_mail = 0
         # 新手教程（阶段 1）：向导弹窗状态
         self.tut_pages = self._build_tutorial_pages()
         self.tut_next_rect = None
@@ -95,6 +99,21 @@ class StartView(arcade.View):
         """该设施是否已建造（等级 >= 1）"""
         return int(self._fac_levels.get(facility_id, 0)) >= 1
 
+    def _refresh_mail_badge(self):
+        """刷新未领取邮件数（阶段12：右上角邮件按钮角标）
+
+        读库失败（首次启动缺表等）时归零，保证开始界面不会因邮件表异常崩掉。
+        """
+        pid = getattr(self.window_ref.game_state, "player_id", None)
+        if not pid:
+            self._unclaimed_mail = 0
+            return
+        try:
+            from db.database import get_unclaimed_mail_count
+            self._unclaimed_mail = int(get_unclaimed_mail_count(pid))
+        except Exception:
+            self._unclaimed_mail = 0
+
     def _build_tutorial_pages(self):
         """新手教程阶段 0：开始界面向导页（介绍各入口 + 引导进入游戏）
 
@@ -120,7 +139,9 @@ class StartView(arcade.View):
             ], highlight=self.wh_rect),
             # ── 阶段11：仓库容量上限与升级（页体由 views/tutorial.py 构造，
             #    数值实查 config.WAREHOUSE_*，见 warehouse_capacity_label）──
-            build_warehouse_capacity_page(highlight=self.wh_rect),
+            # 不传 highlight：本页正文 10 行，第 9 行 y≈238 会落进仓库按钮的
+            # 镂空高亮区（225~275）与按钮文字叠字；前一页「仓库」已高亮过同一按钮。
+            build_warehouse_capacity_page(),
             TutorialPage("市场", [
                 "【市场】买卖物品：",
                 "购买更强力的武器装备、出售不需要的物品换取金币。",
@@ -172,6 +193,8 @@ class StartView(arcade.View):
         self.window.background_color = arcade.color.DARK_SLATE_GRAY
         # 设施等级刷新（阶段10：从设施页建造/升级后返回，按钮🔒与 Lv.N 立即生效）
         self._refresh_facilities()
+        # 邮件未领取数刷新（阶段12：领完/收到新邮件后返回大厅角标立即更新，避免每帧查库）
+        self._refresh_mail_badge()
         # 携带武器缓存：on_draw 曾每帧查库（每次新建 sqlite 连接）。开始界面每次进入
         # 都会重入 on_show_view（从背包/市场/仓库返回），刷新一次即可，on_draw 只读内存。
         from db.database import get_weapons
@@ -342,6 +365,23 @@ class StartView(arcade.View):
             arcade.color.WHITE, size=24, anchor_x="center", anchor_y="center",
         )
 
+        # 右上角邮件入口（阶段12）：未领取数用角标提示
+        mail_color = (60, 90, 160) if self.mail_hover else (45, 65, 115)
+        arcade.draw_rect_filled(self.mail_rect, mail_color)
+        self._tc.text(
+            "btn_mail", "邮 件",
+            self.mail_rect.center_x, self.mail_rect.center_y,
+            arcade.color.WHITE, size=16, anchor_x="center", anchor_y="center",
+        )
+        if self._unclaimed_mail > 0:
+            badge = arcade.XYWH(self.mail_rect.right - 6, self.mail_rect.top - 6, 26, 22)
+            arcade.draw_rect_filled(badge, (200, 60, 50))
+            self._tc.text(
+                "mail_badge", str(self._unclaimed_mail),
+                badge.center_x, badge.center_y,
+                arcade.color.WHITE, size=12, anchor_x="center", anchor_y="center",
+            )
+
         # 底部提示（联机按钮占用了底部空间，提示上移）
         # 阶段10：悬停未建造的市场/锻造坊按钮时改为「点击建造：XX」引导
         hint_text = "WASD移动 | 鼠标瞄准攻击 | 击杀怪物获取资源"
@@ -382,6 +422,7 @@ class StartView(arcade.View):
         self.mission_hover = self.mission_rect.point_in_rect((x, y))  # 任务板按钮悬停
         self.net_hover = self.net_rect.point_in_rect((x, y))
         self.settings_hover = self.settings_gear_rect.point_in_rect((x, y))
+        self.mail_hover = self.mail_rect.point_in_rect((x, y))
 
     def _start_game(self):
         """开始游戏：初始化玩家并进入角色选择页（单机流程入口）"""
@@ -486,4 +527,13 @@ class StartView(arcade.View):
         if self.settings_gear_rect.point_in_rect((x, y)):
             from views.settings_view import SettingsView
             self.window.show_view(SettingsView(self.window_ref, from_game=False))
+            return
+
+        # 邮件按钮（阶段12：系统奖励 / 满仓溢出补发）
+        if self.mail_rect.point_in_rect((x, y)):
+            init_db()
+            gs = self.window.game_state
+            gs.player_id = get_or_create_player(gs.player_name)
+            from views.mail_view import MailView
+            self.window.show_view(MailView(self.window_ref))
             return

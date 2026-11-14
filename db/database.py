@@ -248,6 +248,35 @@ def init_db():
                 FOREIGN KEY(player_id) REFERENCES players(id)
             )
         """)
+        # 邮件主表（阶段12：系统奖励与满仓溢出兜底统一收件箱，见 db/mail.py；
+        # gold/exp 为待领数值，创建时不入账，领取时才由视图发放）
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS mails (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                player_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                body TEXT NOT NULL DEFAULT '',
+                gold INTEGER NOT NULL DEFAULT 0,
+                exp INTEGER NOT NULL DEFAULT 0,
+                source TEXT NOT NULL DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now', 'localtime')),
+                claimed INTEGER NOT NULL DEFAULT 0,
+                claimed_at TEXT,
+                FOREIGN KEY(player_id) REFERENCES players(id)
+            )
+        """)
+        # 邮件附件表（逐件记录；item_type 口径与仓库容量计算完全一致）
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS mail_attachments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mail_id INTEGER NOT NULL,
+                item_type TEXT NOT NULL,
+                item_id TEXT NOT NULL,
+                level INTEGER NOT NULL DEFAULT 1,
+                quantity INTEGER NOT NULL DEFAULT 1,
+                FOREIGN KEY(mail_id) REFERENCES mails(id)
+            )
+        """)
 
 
 # ── Re-exports（保持向后兼容） ──
@@ -332,3 +361,9 @@ from db.facilities import (  # noqa: F401, E402
 
 # 地图星级管理（阶段8：各主题地图最高星数；判定在 game/level_progress.py，map_select_view 读取）
 from db.map_progress import get_stars, record_stars  # noqa: F401, E402
+
+# 邮件管理（阶段12：系统奖励 / 满仓溢出兜底，领取在 views/mail_view.py）
+from db.mail import (  # noqa: F401, E402
+    create_mail, get_mails, get_mail, get_unclaimed_mail_count,
+    can_claim_mail, claim_mail,
+)

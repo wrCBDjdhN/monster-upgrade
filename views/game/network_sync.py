@@ -929,6 +929,29 @@ class NetworkSyncManager:
             if not entry.get("alive", True):
                 ghost.hp = 0  # 客户端阵亡：HP 归零（主机随后 PLAYER_DEATH 单播通知）
 
+    def _show_net_run_result(self) -> None:
+        """联机全员结束：本端停在撤离结算页，玩家点「返回大厅」后才回房
+
+        修复（2026-11-07）：旧版 ROOM_ENDED 收口后直接 `_back_to_lobby`，玩家
+        只看到一帧对局画面就被切回大厅（全员死亡时尤其明显）。现在按本端本局
+        结局显示成功/失败结算页，且不自动跳转——结果页停留到玩家主动返回。
+
+        - 主机：结局看 `_player_status[0]`（_enter_spectate 写入 evac/dead）；
+        - 客户端：结局看 `net_wait_reason`（_apply_evac_result / _apply_player_death
+          写入 evac/dead），`_player_status` 作为补充判据；
+        - 成功页收益取 __init__ 缓存的 `_run_result_carried`（撤离时 run_carried
+          已被 clear_run 清空，不能直接读）。
+        """
+        gs = self.gv.window.game_state
+        my_id = 0 if gs.net_mode == "host" else getattr(gs, "net_player_id", None)
+        status = self.gv._player_status.get(my_id)
+        success = (status == "evac"
+                   or getattr(gs, "net_wait_reason", "") == "evac")
+        carried = getattr(self.gv, "_run_result_carried", None) if success else None
+        from views.evac_result_view import EvacResultView
+        self.gv.window.show_view(EvacResultView(
+            self.gv.window_ref, success=success, run_carried=carried))
+
     def _broadcast_room_ended(self, reason: str, close_room: bool = False) -> None:
         """主机广播 ROOM_ENDED 并收口本局房间生命周期（重构：房间生命周期与单局解耦）
 
@@ -955,8 +978,13 @@ class NetworkSyncManager:
                 from views.start_view import StartView
                 self.gv.window.show_view(StartView(self.gv.window_ref))
             else:
-                # 本局结束但房间保留：主机回 LobbyView host_wait 等待再次开局（服务器不停止）
-                self.gv._back_to_lobby("本局结束，等待再次开局")
+                # 本局结束但房间保留：先停结算页（用户口径 2026-11-07），玩家点
+                # 「返回大厅」后才回 LobbyView；主机已提前回房（LobbyView 后台
+                # 转发本局）时不抢视图，维持原回房路径。
+                if self.gv.window.current_view is self.gv:
+                    self._show_net_run_result()
+                else:
+                    self.gv._back_to_lobby("本局结束，等待再次开局")
 
     def _apply_room_ended(self, payload: dict) -> None:
         """客户端应用主机 ROOM_ENDED：按 reason 收口房间生命周期
@@ -997,7 +1025,8 @@ class NetworkSyncManager:
         if reason not in _reason_cn:
             # net 铁律：未知 reason 不静默拼接英文枚举，记录后用通用文案兜底
             logging.debug(f"[GameView] ROOM_ENDED 未知 reason={reason!r}，使用通用结束提示")
-        self.gv._back_to_lobby(_reason_cn.get(reason, "本局结束，等待主机再次开局"))
+        # 本局结束但房间保留：先停结算页（成功/失败按本端结局），点返回后再回房
+        self._show_net_run_result()
 
     def _handle_potion_use(self, sender_id: int, payload: dict) -> None:
         """主机确认客户端药水使用请求：查库存 → 应用到对应玩家/幽灵 → 广播 POTION_ACK
@@ -2126,6 +2155,8 @@ class NetworkSyncManager:
             return
         # 按主机权威清单还原并入库（tuple 键还原为入参口径）
         run_carried = self.gv._deserialize_evac_carried(payload.get("run_carried") or {})
+        # 联机全员结束结算页展示用：run_carried 随后会被 clear_run 清空，先缓存副本
+        self.gv._run_result_carried = dict(run_carried)
         # 仓库有容量上限 → 主机清单也可能装不下；commit_run_to_warehouse 返回未入仓报告
         # 并自行挂到 game_state（与单机撤离同一通道），此处无需再转发
         commit_run_to_warehouse(gs.player_id, run_carried,

@@ -353,35 +353,21 @@ class CodexView(arcade.View):
                           color, 20, anchor_x="center", anchor_y="center", bold=True)
 
     def _claim_tier(self, tier: int):
-        """领取某档位奖励：容量预检 → claim_codex_reward → add_gold + 资源入库 → 置灰重绘
+        """领取某档位奖励：claim_codex_reward → 生成奖励邮件 → 置灰重绘
 
         冷却期（config.CODEX_CLAIM_COOLDOWN）内的点击直接忽略，防连点重复提交；
         db 层 claim_codex_reward 自身幂等（PK 冲突返回 None），双保险。
 
-        阶段11：仓库有容量上限，领奖属局外整笔事务，装不下必须**在 claim 之前**拦下——
-        claim_codex_reward 一旦落库就把该档位标记为已领，事后拦等于奖励凭空消失。
-        预检用的奖励内容取 self._tier_rows（_refresh_tiers 已按 config.codex_tier_reward
-        算好），不重算、不硬编码。资源按 1 件 = 1 格，金币不占仓库容量无需预检。
+        阶段12（用户口径 2026-11-07）：图鉴档位属系统奖励，改为发邮件
+        （金币 + 资源附件），玩家在邮件界面统一领取；仓库容量在邮件领取时校验，
+        因此不再需要这里的容量预检。
         """
         if self._claim_cd > 0.0:
             return
         pid = self._player_id()
         if not pid:
             return
-        from db.database import (
-            claim_codex_reward, add_gold, add_warehouse_item_checked,
-            warehouse_remaining_capacity,
-        )
-        # 阶段11：容量预检（找不到预览行时跳过预检，交由入库时的 checked 兜底）
-        preview = next((r for r in self._tier_rows if int(r.get("tier", 0)) == int(tier)), None)
-        if preview is not None:
-            need = sum(int(q) for q in (preview.get("res") or {}).values())
-            remain = warehouse_remaining_capacity(pid)
-            if need > remain:
-                self._toast(f"仓库容量不足（剩 {remain} 格，需 {need} 格），可先升级仓库扩容",
-                            (255, 160, 120))
-                sound_manager.play_ui()
-                return
+        from db.database import claim_codex_reward, create_mail
         res = claim_codex_reward(pid, TAB_CAT_KEYS.get(self._tab, ""), tier)
         self._claim_cd = CODEX_CLAIM_COOLDOWN
         if not res:
@@ -391,25 +377,21 @@ class CodexView(arcade.View):
             return
         gold = int(res.get("gold", 0))
         res_map = res.get("res", {}) or {}
-        if gold > 0:
-            add_gold(pid, gold)
-        # 资源入仓库：口径同 game/evac.commit_run_to_warehouse（item_type="resource"）。
-        # 阶段11 走 checked 版本（满仓整笔拒绝）而非裸写：预检已拦下绝大多数情况，
-        # 这里再兜一次底，防止预检与 claim 之间仓库被别处占用导致塞爆
-        blocked: list[str] = []
-        for rid, qty in res_map.items():
-            ok, _why = add_warehouse_item_checked(pid, "resource", rid, int(qty))
-            if not ok:
-                blocked.append(f"{RESOURCES.get(rid, {}).get('name', rid)}×{int(qty)}")
         res_txt = " ".join(
             f"{RESOURCES.get(rid, {}).get('name', rid)}×{int(qty)}"
             for rid, qty in res_map.items()
         )
-        if blocked:
-            self._toast(f"金币 +{gold} 到账，但 {'、'.join(blocked)} 因仓库已满未入仓",
-                        (255, 160, 120))
-        else:
-            self._toast(f"领取成功  金币 +{gold}  {res_txt}", arcade.color.GOLD)
+        # 资源作为邮件附件（item_type 与仓库容量口径一致）
+        attachments = [
+            {"item_type": "resource", "item_id": rid, "level": 1, "quantity": int(qty)}
+            for rid, qty in res_map.items() if int(qty) > 0
+        ]
+        create_mail(
+            pid, f"图鉴档位奖励（{self._tab} {tier} 条）",
+            "图鉴档位奖励已发放，清理仓库容量后可领取。",
+            gold=gold, attachments=attachments, source="codex",
+        )
+        self._toast(f"奖励已发送至邮件  金币 +{gold}  {res_txt}", arcade.color.GOLD)
         sound_manager.play_gold_pickup()
         # 重新查库刷新档位行（claimed=True → 置灰）
         self._refresh_tiers()

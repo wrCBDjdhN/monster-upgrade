@@ -419,6 +419,9 @@ class GameView(arcade.View):
         # 联机：房间结束已广播/已处理标记（主机撤离/死亡/超时广播 ROOM_ENDED 防重复；
         # 客户端收到后回大厅，避免后续帧再次触发同一路径）
         self._room_ended_handled = False
+        # 联机全员结束后结算页展示用的本端撤离携带物副本（撤离成功时缓存；
+        # 失败为 None）。run_carried 在结算时会被 clear_run 清空，结算页必须用副本。
+        self._run_result_carried = None
         # 世界坐标标签列表（在HUD阶段绘制）：
         # [(稳定key, world_x, world_y, text, color, font_size, tier)]
         # key 必须来自实体身份（禁列表下标，否则实体进出视野会让标签缓存整体失效）；
@@ -2860,6 +2863,8 @@ class GameView(arcade.View):
                         gs.build_mode = False
                         # 保存携带物品用于显示收益
                         carried_copy = dict(gs.run_carried) if hasattr(gs, 'run_carried') else {}
+                        # 联机全员结束结算页展示用（同普通撤离点口径）
+                        self._run_result_carried = carried_copy
                         clear_run(gs.run_carried)
                         # 等级系统：火箭台撤离成功经验（各端本地结算，solo/host 发放）
                         _award_exp(self, EXP_EVAC)
@@ -2902,6 +2907,8 @@ class GameView(arcade.View):
                         # 修复：单机火箭台撤离失败 = 死亡语义，与主机分支/超时一致，先清装备再跳失败页
                         # （原实现漏调 _clear_run_equipment，导致单机撤离失败只丢金币、装备保留）
                         self._clear_run_equipment(gs)
+                        # 新手教程：失败同样进入 stage 4 失败教学页（避免回大厅重播 stage 0）
+                        self.evac_manager._enter_tutorial_failure(gs)
                         # 单机：跳转到撤离结果页面
                         from views.evac_result_view import EvacResultView
                         self.window.show_view(EvacResultView(self.window_ref, success=False))
@@ -3178,6 +3185,8 @@ class GameView(arcade.View):
                 self.clear_blessings()
                 # 保存携带物品用于显示收益（先复制再清空）
                 carried_copy = dict(gs.run_carried) if hasattr(gs, 'run_carried') else {}
+                # 联机全员结束结算页展示用（主机撤离后先观战，ROOM_ENDED 时才弹结算页）
+                self._run_result_carried = carried_copy
                 clear_run(gs.run_carried)
                 # 等级系统：撤离成功经验（各端本地结算，solo/host 撤离点成功发放）
                 _award_exp(self, EXP_EVAC)

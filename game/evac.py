@@ -315,14 +315,15 @@ def commit_run_to_warehouse(pid: int, run_carried: dict, *,
       **不传时行为与旧版逐字节一致**（直接按 run_carried 入库，不复制、不合流）。
 
     返回「未入仓报告」dict，字段：
-    - dropped:      因仓库已满而**没存进去**的物品件数（0 = 全部入库，调用方可静默）
-    - dropped_items: 明细，形如 ["木材×12", "铁剑×1"]，供结算页显示「N 件未入仓」
+    - dropped:      因仓库已满而没直接存进去的物品件数（0 = 全部入库，调用方可静默）
+    - dropped_items: 明细，形如 ["木材×12", "铁剑×1"]，供结算页显示「N 件转入邮件」
     - stored:       本次成功入库的物品件数（金币不计入：金币走 players.gold，不受容量限制）
+    - mailed:       已转入邮件的件数（阶段12：满仓不再丢弃，改为邮件补发）
 
     为什么不用 db.add_warehouse_item_checked（满仓整笔拒绝）：
     那边是市场回购 / 图鉴领奖这类**局外整笔事务**，装不下就该一笔不买；
     撤离是「本局战利品落袋」，部分入库远比整笔丢弃合理——装得下的先保住，
-    剩下的由玩家自己去升级仓库扩容后再想办法（这正是仓库等级系统的意义）。
+    装不下的部分（阶段12 起）转入邮件，玩家清理/升级仓库后再领。
 
     容量口径完全交给 db.warehouse.warehouse_item_capacity（与背包 game/loot.py 同源），
     本函数**不复制口径逻辑**，只做「按剩余容量逐件扣减」。
@@ -332,6 +333,7 @@ def commit_run_to_warehouse(pid: int, run_carried: dict, *,
         add_gold,
         add_potion,
         add_warehouse_item,
+        create_mail,
         create_weapon,
         warehouse_item_capacity,
         warehouse_remaining_capacity,
@@ -344,6 +346,8 @@ def commit_run_to_warehouse(pid: int, run_carried: dict, *,
     remaining = warehouse_remaining_capacity(pid)
     stored = 0
     dropped: list[tuple[str, int]] = []  # (中文名, 件数)
+    # 阶段12：装不下的部分转邮件补发（不再丢弃）；附件口径与仓库容量计算一致
+    mailed: list[dict] = []
     # 入库清单 = 本参数（主机账本）的逐槽副本（单机/主机原口径，零变化）；
     # 传了 client_carried 只做对账日志，客户端上报的任何条目都不并入
     source = _merge_authoritative(run_carried, client_carried, player_id=pid)
@@ -367,10 +371,19 @@ def commit_run_to_warehouse(pid: int, run_carried: dict, *,
         stored += can
         return can
 
-    def _drop(name: str, count: int, can: int) -> None:
-        """把装不下的部分登记进未入仓清单。"""
+    def _drop(name: str, count: int, can: int, *,
+              item_type: str = "", item_id: str = "", level: int = 1) -> None:
+        """把装不下的部分登记为「转邮件补发」（阶段12；此前为直接丢弃）"""
         if can < count:
-            dropped.append((name, count - can))
+            lost = count - can
+            dropped.append((name, lost))
+            if item_type and item_id:
+                mailed.append({
+                    "item_type": item_type,
+                    "item_id": item_id,
+                    "level": int(level),
+                    "quantity": int(lost),
+                })
 
     for item_type, items in source.items():
         if item_type == "gold":
@@ -382,7 +395,7 @@ def commit_run_to_warehouse(pid: int, run_carried: dict, *,
                 can = _take(warehouse_item_capacity("resource", item_id), qty)
                 if can:
                     add_warehouse_item(pid, "resource", item_id, can)
-                _drop(name, int(qty), can)
+                _drop(name, int(qty), can, item_type="resource", item_id=item_id)
         elif item_type == "weapon":
             # run_carried["weapon"] = {(item_id, level): qty, ...}，入库时保留等级
             all_weapons = {**MELEE_WEAPONS, **RANGED_WEAPONS}
@@ -395,7 +408,8 @@ def commit_run_to_warehouse(pid: int, run_carried: dict, *,
                 for _ in range(can):
                     create_weapon(pid, weapon_id, kind, info["name"], info["damage"],
                                   info["attack_speed"], level=level)
-                _drop(info["name"], int(qty), can)
+                _drop(info["name"], int(qty), can, item_type="weapon",
+                      item_id=weapon_id, level=level)
         elif item_type in ("helmet", "armor", "backpack"):
             # run_carried[slot] = {(item_id, level): qty, ...}
             # （原代码把 helmet/armor 与 backpack 分成两段，但都只是 add_equipment(slot)，
@@ -406,7 +420,8 @@ def commit_run_to_warehouse(pid: int, run_carried: dict, *,
                 can = _take(warehouse_item_capacity(item_type, item_id), qty)
                 for _ in range(can):
                     add_equipment(pid, item_id, item_type, level=level)
-                _drop(name, int(qty), can)
+                _drop(name, int(qty), can, item_type=item_type,
+                      item_id=item_id, level=level)
         elif item_type == "potion":
             # run_carried["potion"] = {item_id: qty, ...}（果实等掉落药水入库；不占容量）
             for item_id, qty in items.items():
@@ -417,13 +432,29 @@ def commit_run_to_warehouse(pid: int, run_carried: dict, *,
                 for _ in range(can):
                     add_potion(pid, item_id, info["name"], info["effect"],
                                info.get("value", 0), info.get("duration", 0))
-                _drop(info["name"], int(qty), can)
+                _drop(info["name"], int(qty), can, item_type="potion", item_id=item_id)
 
     report = {
         "stored": stored,
         "dropped": sum(n for _, n in dropped),
         "dropped_items": [f"{name}×{n}" for name, n in dropped if n > 0],
+        "mailed": sum(int(a["quantity"]) for a in mailed),
     }
+    # 阶段12：仓库装不下的部分转邮件补发（此前直接丢弃）。邮件写入失败不得影响
+    # 主流程（战利品已入仓部分照常结算），仅记录告警——报告里 mailed 口径同步修正。
+    if mailed:
+        try:
+            create_mail(
+                pid,
+                "撤离战利品补发",
+                "上一局撤离时仓库已满，未能入仓的战利品已随邮件附上。"
+                "清理仓库或升级仓库容量后可领取。",
+                attachments=mailed,
+                source="evac_overflow",
+            )
+        except Exception as exc:  # noqa: BLE001 - 邮件失败不能回滚已完成的入库
+            logging.warning(f"[撤离] 战利品转邮件失败（已入仓部分不受影响）：{exc!r}")
+            report["mailed"] = 0
     # 本函数**自行**发布未入仓报告：调用方里包含禁改的 views/game_view.py，
     # 若依赖调用方转发，报告会在单机/主机撤离路径上被丢掉。发布后仍照常返回，
     # 便于将来可改的调用方按需自行处理（例如联机端）。

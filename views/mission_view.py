@@ -4,9 +4,9 @@
   与「成就」（db.missions.get_achievements，累计进度、一次性奖励）；
 - 每行结构：任务描述 + 奖励预览 + 进度条（progress/target）+ 领取按钮；
 - 领取按钮：达成未领 → 亮黄（缓慢呼吸提示可领），未达成/已领 → 置灰不可点；
-- 领奖链：db.missions.claim_* 返回奖励 → db.players.add_gold 入账金币
-  → db.levels.add_exp 入账经验（角色取 game_state.character_id 当前选中角色）
-  → 飘奖励文字 + 金币音效；
+- 领奖链：db.missions.claim_* 返回奖励 → db.mail.create_mail 生成奖励邮件
+  （阶段12：系统奖励统一走邮件，玩家在邮件界面领取；不再直接加金币/经验）
+  → 飘提示文字 + 金币音效；
 - 打开即刷新：on_show_view 调 get_daily（自带跨天重抽）与 get_achievements；
 - 滚动复用 views/scroll_view.py（ScrollView：滚轮 + 滚动条拖拽 + 返回按钮）；
 - 返回：按钮 + ESC（基类规则：联机回大厅 / 单机回开始界面，延迟导入）。
@@ -18,7 +18,7 @@ import arcade
 from config import WINDOW_WIDTH, WINDOW_HEIGHT
 from db.database import (
     get_daily, claim_daily, get_achievements, claim_achievement,
-    add_gold, add_exp, get_gold,
+    get_gold, create_mail,
 )
 from views.scroll_view import ScrollView
 from views.text_cache import TextCache
@@ -341,7 +341,11 @@ class MissionView(ScrollView):
     # ── 领奖 ──────────────────────────────────────────────────
 
     def _claim(self, i: int):
-        """领取第 i 行奖励：claim_* → add_gold + add_exp → 飘奖励文字"""
+        """领取第 i 行奖励：claim_* → 生成奖励邮件 → 飘提示文字
+
+        阶段12（用户口径 2026-11-07）：任务/成就属系统奖励，不再直接入账金币/经验，
+        改为发一封邮件（金币/经验作为邮件载荷），玩家在邮件界面统一领取。
+        """
         row = self._rows[i]
         if row["claimed"] or not row["complete"]:
             # 按钮已置灰，这里再挡一次（防止状态与绘制不同步）
@@ -364,14 +368,10 @@ class MissionView(ScrollView):
             return
         gold = int(res.get("reward_gold", 0))
         exp = int(res.get("reward_exp", 0))
-        if gold > 0:
-            add_gold(pid, gold)
-        if exp > 0:
-            # 经验入账到当前选中角色（单机/联机共用的 game_state.character_id）
-            gs = getattr(self.window_ref, "game_state", None)
-            character_id = getattr(gs, "character_id", "initial")
-            add_exp(pid, character_id, exp)
-        text = f"领取成功  金币 +{gold}"
+        title = "每日任务奖励" if row["is_daily"] else "成就奖励"
+        create_mail(pid, title, f"任务「{row['desc']}」奖励已发放。",
+                    gold=gold, exp=exp, source="mission")
+        text = f"奖励已发送至邮件  金币 +{gold}"
         if exp > 0:
             text += f"  经验 +{exp}"
         self._toast(text, arcade.color.GOLD)

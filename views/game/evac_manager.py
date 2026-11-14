@@ -89,6 +89,19 @@ class EvacManager:
         gs.weapon_aura_slow = False
         gs.weapon_aura_radius = 0
 
+    def _enter_tutorial_failure(self, gs: "GameState") -> None:
+        """教程局失败 → 推进到 stage 4 失败教学页（禁在失败路径漏掉）
+
+        修复（2026-11-07）：阵亡/超时/火箭台撤离失败原先只跳失败结算页，
+        教程 stage 停在 3；回大厅后 StartView 按「未完成教程」重置到 stage 0，
+        玩家一死就从第 1 页重播教程，且 stage 4 的失败教学文案永远播不到。
+        本方法与撤离成功路径（game_view 普通撤离/火箭台撤离）同口径。
+        """
+        tut = getattr(gs, "tutorial", None)
+        if tut is not None and tut.active and tut.stage == 3:
+            tut.stage = 4
+            tut.page = 0
+
     def _fail_run(self, reason: str) -> None:
         """行动失败统一处理：超时/死亡 → 清空携带物 → 删除数据库中的装备
 
@@ -150,6 +163,8 @@ class EvacManager:
         particle_system.emit(self.gv.player.center_x, self.gv.player.center_y, 20,
                             (255, 50, 50), speed=80, life=0.8, size=4)
         sound_manager.play_hurt()  # 使用受伤音效作为失败音效
+        # 新手教程：失败也要进入 stage 4 失败教学页，否则回大厅会从头重播 stage 0
+        self._enter_tutorial_failure(gs)
         # 跳转到撤离结果页面
         from views.evac_result_view import EvacResultView
         self.gv.window.show_view(EvacResultView(self.gv.window_ref, success=False))

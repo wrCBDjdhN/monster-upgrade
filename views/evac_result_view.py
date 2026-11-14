@@ -34,8 +34,9 @@ class EvacResultView(arcade.View):
         self.star_info = star_info
         # 阶段8：本次升星顺带解锁的地图名（构造时算一次并缓存，避免 on_draw 每帧查 DB）
         self._newly_unlocked = self._newly_unlocked_names(star_info)
-        # 阶段11：仓库满仓时的「未入仓」报告（撤离成功才有；取走即清空 game_state，
-        # 防止残留导致下一次撤离误显示）。由 game/evac.commit_run_to_warehouse 发布。
+        # 阶段11/12：仓库满仓时溢出的战利品报告（撤离成功才有；取走即清空 game_state，
+        # 防止残留导致下一次撤离误显示）。由 game/evac.commit_run_to_warehouse 发布，
+        # 阶段12 起溢出部分已转入邮件，横幅改为提示「已转入邮件」。
         from game.evac import take_warehouse_overflow
         overflow = take_warehouse_overflow()
         self.overflow: dict = overflow if (
@@ -232,8 +233,9 @@ class EvacResultView(arcade.View):
                       (120, 220, 255), size=13, anchor_x="center")
 
     def _draw_overflow_banner(self):
-        """阶段11：仓库满仓「未入仓」警告横幅（仅撤离成功且确有未入仓时绘制）
+        """仓库满仓溢出横幅（仅撤离成功且确有溢出时绘制）
 
+        阶段12 起溢出的战利品不再丢弃，而是转邮件补发，文案改为「已转入邮件」。
         渲染铁律：一律不透明实心填充（禁 outline/线框），横幅压在屏幕最顶部，
         与星级横幅（_draw_star_banner，位于 WINDOW_HEIGHT-118）不重叠。
         明细过长时只显示前 4 项并补「等」，避免一行撑出横幅。
@@ -248,7 +250,7 @@ class EvacResultView(arcade.View):
             items = items[:4] + [f"等 {len(items)} 项"]
         banner = arcade.XYWH(cx, WINDOW_HEIGHT - 30, 620, 48)
         arcade.draw_rect_filled(banner, (120, 44, 12))  # 实心警示底，不画描边
-        self._tc.text("ovf_title", f"⚠ 仓库已满：{dropped} 件战利品未能入仓",
+        self._tc.text("ovf_title", f"⚠ 仓库已满：{dropped} 件战利品已转入邮件",
                       cx, banner.top - 16, (255, 235, 200), size=18,
                       anchor_x="center", bold=True)
         self._tc.text("ovf_items", "、".join(items) or "（明细缺失）",
@@ -288,7 +290,7 @@ class EvacResultView(arcade.View):
 
         # 阶段8 星级横幅（撤离成功才画；升星显示「★×N 解锁！」）
         self._draw_star_banner()
-        # 阶段11 仓库满仓「未入仓」警告横幅（压在星级横幅之上，屏幕最顶部）
+        # 阶段11 仓库满仓溢出横幅（阶段12：已转邮件；压在星级横幅之上，屏幕最顶部）
         self._draw_overflow_banner()
         
         # 显示收益详情
@@ -465,8 +467,16 @@ class EvacResultView(arcade.View):
                 # 联机模式：撤离结果页仅单机路径可达（联机撤离/死亡均走回房等待），
                 # 防御性分流：联机回 LobbyView 复用连接，单机回 StartView
                 if getattr(gs, "net_mode", "solo") != "solo":
+                    # 联机全员结束结算页返回：清本局残留状态并回房等待（与
+                    # GameView._back_to_lobby 同口径），连接由 LobbyView 复用
+                    gs.run_carried = {}
+                    gs.run_potions = {}
+                    gs.room_player_status = {}
                     from views.lobby_view import LobbyView
-                    self.window.show_view(LobbyView(self.window_ref))
+                    lobby = LobbyView(self.window_ref)
+                    lobby._notice = "本局结束，等待再次开局"
+                    lobby._status = lobby._notice
+                    self.window.show_view(lobby)
                 else:
                     from views.start_view import StartView
                     self.window.show_view(StartView(self.window_ref))
