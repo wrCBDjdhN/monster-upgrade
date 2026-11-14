@@ -22,6 +22,8 @@ from config import (
     MAP_WIDTH, MAP_HEIGHT, TILE_SIZE,
     ROOM_MIN, ROOM_MAX, EVAC_RADIUS,
     ROCKET_PAD_SIZE,
+    MONSTER_ROOM_SPAWN_MIN, MONSTER_ROOM_SPAWN_MAX,
+    MONSTER_WILD_SPAWN_POINTS, MONSTER_BANDIT_GROUP_MIN, MONSTER_BANDIT_GROUP_MAX,
 )
 
 # 房间最小间距（像素）：保证房间之间留出足够通道，避免门洞正对邻房墙导致无法进出
@@ -411,20 +413,20 @@ def generate_map(seed: int, num_rooms: int = 6, theme: str = "forest") -> dict:
                     break
             resources.append((rx, ry, rng.choice(resource_types)))
 
-    # ── 房间内怪物刷新点（每个房间 2~4 个，出生房间除外）──
+    # ── 房间内怪物刷新点（数量取自 config.MONSTER_ROOM_SPAWN_MIN/MAX，出生房间除外）──
     spawn_points = []
     for idx, r in enumerate(rooms):
         if idx == 0:
             continue  # 出生房间不刷怪物，避免玩家刚出生就被攻击
-        n = rng.randint(2, 4)  # 增加怪物数量
+        n = rng.randint(MONSTER_ROOM_SPAWN_MIN, MONSTER_ROOM_SPAWN_MAX)
         for _ in range(n):
             sx = rng.randint(r.x + TILE_SIZE * 2, r.x + r.w - TILE_SIZE * 2)
             sy = rng.randint(r.y + TILE_SIZE * 2, r.y + r.h - TILE_SIZE * 2)
             spawn_points.append((sx, sy, rng.choice(monster_types)))
 
-    # ── 野外怪物刷新点（地图上随机分布，避开房间与 BOSS 建筑）──
+    # ── 野外怪物刷新点（地图上随机分布，避开房间与 BOSS 建筑；数量取 config）──
     wild_spawns = []
-    for _ in range(8):
+    for _ in range(MONSTER_WILD_SPAWN_POINTS):
         wx = rng.randint(TILE_SIZE * 3, MAP_WIDTH - TILE_SIZE * 3)
         wy = rng.randint(TILE_SIZE * 3, MAP_HEIGHT - TILE_SIZE * 3)
         # 修复：需附怪物半宽缓冲，否则野外怪出生点可能压在房间墙壁上而卡住
@@ -432,8 +434,8 @@ def generate_map(seed: int, num_rooms: int = 6, theme: str = "forest") -> dict:
             continue
         mtype = rng.choice(monster_types)
         if theme == "space" and mtype == "bandit":
-            # 修复：航天基地土匪 3~5 只成群生成（围绕中心点聚拢），而非单只出现
-            group_n = rng.randint(3, 5)
+            # 修复：航天基地土匪成群生成（围绕中心点聚拢），而非单只出现；群量取 config
+            group_n = rng.randint(MONSTER_BANDIT_GROUP_MIN, MONSTER_BANDIT_GROUP_MAX)
             for _i in range(group_n):
                 ox, oy = wx, wy
                 for _off in range(8):  # 聚拢偏移点，找到不卡墙的位置

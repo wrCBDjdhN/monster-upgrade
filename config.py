@@ -576,6 +576,15 @@ MONSTER_SPAWN_MAX_DIST = 1000     # 怪物刷新的环带外沿（像素）：�
                                   # 配合 MIN_DIST 构成 [600, 1000] 环带；留 0 则退回全图随机
 HARVEST_SPAWN_MIN_DIST = 400      # 环境物刷新最小距离
 
+# ── 刷怪密度（三图共用；2026-11-14 用户口径「适当减少怪物」）──
+MONSTER_ROOM_SPAWN_MIN = 1        # 每个非出生房间房间怪数量下限（原 2）
+MONSTER_ROOM_SPAWN_MAX = 2        # 每个非出生房间房间怪数量上限（原 4）
+MONSTER_WILD_SPAWN_POINTS = 5     # 野外刷点数量（原 8）
+MONSTER_BANDIT_GROUP_MIN = 2      # 航天图土匪成群数量下限（原 3）
+MONSTER_BANDIT_GROUP_MAX = 3      # 航天图土匪成群数量上限（原 5）
+MONSTER_FIELD_CAP = 14            # 场上野外怪物上限（含初始，原 20；事件倍率以此为基础）
+MONSTER_RESPAWN_INTERVAL = 12.0   # 野外补刷间隔（秒，原 10）
+
 # ── 小地图（游戏 HUD 右上角）──
 MINIMAP_SIZE = 200             # 小地图边长（像素）
 MINIMAP_PADDING = 20           # 距屏幕右/上边缘间距（像素）
@@ -643,8 +652,8 @@ def evac_activate_cost(theme: str) -> dict[str, int]:
     """
     return dict(EVAC_COST_BY_THEME.get(theme, EVAC_COST_BY_THEME[EVAC_DEFAULT_THEME]))
 EVAC_DEFEND_TIME = {"forest": 45.0, "desert": 60.0, "space": 75.0}  # 防守倒计时
-EVAC_WAVE_INTERVAL = 10.0          # 防守期间进攻波次间隔（秒）
-EVAC_WAVE_SIZE = 3                 # 每波基础进攻怪数量（降负载：减少驻守刷怪量，2026-10-04）
+EVAC_WAVE_INTERVAL = 12.0          # 防守期间进攻波次间隔（秒，原 10；2026-11-14 降怪）
+EVAC_WAVE_SIZE = 2                 # 每波基础进攻怪数量（原 3；2026-11-14 降怪）
 EVAC_WAVE_GROWTH = 1               # 每波额外数量（递增）
 EVAC_INTERACT_RANGE = 90.0         # 激活/修复交互距离（E 键）
 EVAC_WAVE_HP_GROWTH = 0.15         # 每波血量加成比例（按已打波数线性累加）

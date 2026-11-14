@@ -14,6 +14,7 @@ from config import (
     WELL_HEAL, WELL_SPEED_MULT, WELL_SPEED_DURATION,
     CACTUS_THORN_DAMAGE,  # 仙人掌反伤：客户端近战攻击环境物命中时作用于攻击者（幽灵）
     MONSTER_WEAPON_LEVEL_RANGE, MONSTER_GEAR_LEVEL_RANGE,
+    MONSTER_FIELD_CAP, MONSTER_RESPAWN_INTERVAL,  # 刷怪密度：野外上限与补刷间隔（config 唯一来源）
     BOSS_WEAPON_LEVEL_RANGE, BOSS_GEAR_LEVEL_RANGE,
     NET_SNAPSHOT_HZ,  # 状态快照广播频率（怪物快照 20Hz）
     NET_HEARTBEAT_SEC,  # 心跳间隔（客户端 RTT 测量与保活）
@@ -300,13 +301,13 @@ class GameView(arcade.View):
         self._harvest_respawn_interval = 6.0   # 每 6 秒尝试补刷一次
         self._harvest_respawn_batch = 3        # 每次最多补刷数量
         self._harvest_cap = 50                 # 地图上资源上限（含初始）
-        # 野外怪物刷新（持续补充被击杀的怪物）
+        # 野外怪物刷新（持续补充被击杀的怪物）；上限/间隔取 config（2026-11-14 降怪）
         self._monster_respawn_timer = 0.0
-        self._monster_respawn_interval = 10.0  # 每 10 秒尝试补刷一次
+        self._monster_respawn_interval = MONSTER_RESPAWN_INTERVAL
         self._monster_respawn_batch = 2        # 每次最多补刷数量
-        self._monster_cap = 20                 # 野外怪物上限（含初始）
+        self._monster_cap = MONSTER_FIELD_CAP
         # 阶段4 随机地图事件：未加倍率的上限基线（apply_event 按事件倍率反算 _monster_cap）
-        self._monster_cap_base = 20
+        self._monster_cap_base = MONSTER_FIELD_CAP
         # ── 阶段4 随机事件（核心逻辑在 game/map_events.py，此处仅存状态与薄调用）──
         # 本局事件 id（"" = 无事件，教程局恒为 ""）
         self.event_id = ""
@@ -1470,7 +1471,9 @@ class GameView(arcade.View):
         point.update(dt)
         # 波次事件：读取即清（EvacPoint 保证同一波次只触发一次事件）
         if point.consume_wave_event():
-            count = EVAC_WAVE_SIZE + EVAC_WAVE_GROWTH * point.wave_no
+            # 首波 = EVAC_WAVE_SIZE（wave_no 从 1 起，故减 1）；2026-11-14 降怪：
+            # 原口径首波为 SIZE+GROWTH，实际每波多 1 只
+            count = EVAC_WAVE_SIZE + EVAC_WAVE_GROWTH * (point.wave_no - 1)
             spawned = spawn_wave(
                 self, self.map_data.get("theme", "forest"),
                 (point.x, point.y), count, aggro_xy=(point.x, point.y),
