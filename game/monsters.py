@@ -28,7 +28,11 @@ from config import MAP_WIDTH, MAP_HEIGHT, PLAYER_SIZE, BOSS_PHASES, BOSS_BERSERK
 from entities.monster_defs import (
     BOSS_SKILLS, BOSS_SUMMON_CONFIG, MONSTER_CONFIGS, get_boss_skill, get_boss_skill_cooldowns,
 )
-from game.monster_base import _WallGrid, Projectile, _MeleeMonsterBase, _RangedMonsterBase, _select_target, _has_line_of_sight, _ranged_attack_distance, _mark_attack_vfx
+from game.monster_base import (
+    _WallGrid, Projectile, _MeleeMonsterBase, _RangedMonsterBase, _select_target,
+    _has_line_of_sight, _ranged_attack_distance, _mark_attack_vfx,
+    _attack_evac_point_ranged, _try_attack_building_ranged,
+)
 
 # Re-export for backward compatibility
 from game.monster_base import _WallGrid, Projectile, _MeleeMonsterBase, _RangedMonsterBase
@@ -706,11 +710,18 @@ class RocketTroop(_RangedMonsterBase):
         if self._stunned:
             # 眩晕状态下无法攻击
             return None
-        # 阶段 2：进攻撤离点期间不在这里攻击玩家（伤害已在 _update_evac_aggro 结算）
-        # 放行口径同基类：aggro_point 非空 = 本帧仍以撤离点为目标；防守期插队已在
-        # _update_evac_aggro 清空 aggro_point → 自然落到下面的玩家开火分支
-        if self.aggro_point is not None:
-            return None
+        # 建筑优先：被路障挡住时先拆挡路建筑（火箭弹与打撤离点同口径）
+        if self.attack_building is not None:
+            building_result = _try_attack_building_ranged(
+                self, self.attack_building, special="explosive")
+            if building_result is not None and building_result is not False:
+                return building_result
+            if building_result is False and not getattr(self, "_evac_target_active", False):
+                # 已锁定建筑但本帧不开火：不要落到玩家开火分支（避免双目标）
+                return None
+        # 阶段 2：本帧以撤离点为目标 → 火箭弹打点（命中才结算伤害）
+        if getattr(self, "_evac_target_active", False):
+            return _attack_evac_point_ranged(self, special="explosive")
         if players is not None:
             # 多目标模式：重新选取最近存活玩家作为攻击目标
             player = _select_target(players, self.center_x, self.center_y)

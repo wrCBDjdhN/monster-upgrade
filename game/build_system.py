@@ -19,9 +19,10 @@ class Building:
         self.hp = self.max_hp
         # 是否注册为怪物移动障碍：路障/箭塔阻挡，陷阱为地面触发物不阻挡
         self.blocks_monsters = bool(BUILDS[kind].get("blocks_monsters", True))
-        self.sprite = arcade.SpriteSolidColor(
-            BUILDS[kind]["size"], BUILDS[kind]["size"], BUILDS[kind]["color"])
-        self.sprite.position = (x, y)
+        # 边长：怪物拆建筑时按它算攻击距离（替代已删除的 sprite.width）
+        self.size = BUILDS[kind]["size"]
+        # 不持有 arcade.Sprite：arcade 3.3 的 Sprite 已无 draw()，建筑统一由 rendering
+        # 以实心矩形绘制（尺寸/颜色取 BUILDS），避免再维护一份绘制对象
         self._fire_timer = 0.0   # 塔攻击计时
         self._sprung = False     # 陷阱是否已触发
         # 血量变更回调（签名 (bid, hp, max_hp)）：host 在 set_hp 内触发以广播 MAP_CHANGE，

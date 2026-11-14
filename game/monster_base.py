@@ -32,6 +32,7 @@ from config import (
     MONSTER_AGGRO_RANGE_MULT, MONSTER_AGGRO_RANGE_BASE, MONSTER_ACQUIRE_RANGE_MAX,
     PLAYER_SIZE, DEBUFF_TICK_INTERVAL,
     HIT_FLASH_DURATION, RANGED_KEEP_MIN, RANGED_KEEP_MAX, BUILDING_ATTACK_SEARCH_RANGE,
+    EVAC_BLOCK_HALF,
     ATTACK_VFX_DURATION,  # 怪物攻击表现（刀光/闪白）时长，与玩家同款
     MONSTER_NAV_CELL_PAD, MONSTER_NAV_REFRESH_INTERVAL, MONSTER_NAV_WAYPOINT_LOOKAHEAD,
     MONSTER_NAV_WAYPOINT_ARRIVE_RATIO, MONSTER_NAV_WAYPOINT_STUCK_FRAMES,
@@ -53,10 +54,12 @@ class _WallGrid:
         for wx, wy, ww, wh in walls:
             if ww <= 0 or wh <= 0:
                 continue
-            x0 = wx // cell
-            x1 = (wx + ww) // cell
-            y0 = wy // cell
-            y1 = (wy + wh) // cell
+            # 网格下标必须是 int：add_rect 传入的建筑矩形含 float 半宽，
+            # float // int 仍为 float，range() 会抛 TypeError
+            x0 = int(wx // cell)
+            x1 = int((wx + ww) // cell)
+            y0 = int(wy // cell)
+            y1 = int((wy + wh) // cell)
             for gx in range(x0, x1 + 1):
                 for gy in range(y0, y1 + 1):
                     self.buckets.setdefault((gx, gy), []).append((wx, wy, ww, wh))
@@ -77,10 +80,11 @@ class _WallGrid:
             return
         rect = (x - half, y - half, half * 2, half * 2)
         wx, wy, ww, wh = rect
-        x0 = wx // self.cell
-        x1 = (wx + ww) // self.cell
-        y0 = wy // self.cell
-        y1 = (wy + wh) // self.cell
+        # 同 __init__：浮点矩形 → int 网格下标，否则 range() 抛 TypeError
+        x0 = int(wx // self.cell)
+        x1 = int((wx + ww) // self.cell)
+        y0 = int(wy // self.cell)
+        y1 = int((wy + wh) // self.cell)
         for gx in range(x0, x1 + 1):
             for gy in range(y0, y1 + 1):
                 self.buckets.setdefault((gx, gy), []).append(rect)
@@ -91,10 +95,11 @@ class _WallGrid:
             return
         rect = (x - half, y - half, half * 2, half * 2)
         wx, wy, ww, wh = rect
-        x0 = wx // self.cell
-        x1 = (wx + ww) // self.cell
-        y0 = wy // self.cell
-        y1 = (wy + wh) // self.cell
+        # 与 add_rect 同口径取整，保证注册/注销落在同一批桶
+        x0 = int(wx // self.cell)
+        x1 = int((wx + ww) // self.cell)
+        y0 = int(wy // self.cell)
+        y1 = int((wy + wh) // self.cell)
         for gx in range(x0, x1 + 1):
             for gy in range(y0, y1 + 1):
                 bucket = self.buckets.get((gx, gy))
@@ -810,22 +815,26 @@ def _mark_attack_vfx(monster, kind: str, tx: float, ty: float) -> None:
     monster._atk_vfx_angle = math.atan2(ty - monster.center_y, tx - monster.center_x)
 
 
-def _building_attack_distance(monster, building) -> float:
-    """计算怪物与建筑边缘接触所需的攻击距离（与近战武器射程同口径）。"""
-    sprite = getattr(building, "sprite", None)
-    building_size = float(getattr(sprite, "width", 0) or 0)
-    # 与近战统一口径：长柄/神器武器可站在更远处挥砍建筑，短武器仍贴到建筑表面打
-    return max(_melee_attack_distance(monster), monster._size + building_size * 0.5)
+def _building_attack_distance(monster, building, ranged: bool = False) -> float:
+    """计算怪物与建筑边缘接触所需的攻击距离（近战=武器射程 / 远程=开火射程）。"""
+    building_size = float(getattr(building, "size", 0) or 0)
+    # 与攻击玩家统一口径：长柄/神器武器可站在更远处，短武器仍贴到建筑表面打；
+    # 建筑尺寸取 Building.size（此前读已删除的 sprite.width → 恒为 0）
+    base = _ranged_attack_distance(monster) if ranged else _melee_attack_distance(monster)
+    return max(base, monster._size + building_size * 0.5)
 
 
-def _move_toward_building(monster, building, delta_time: float) -> None:
-    """让受阻怪物朝当前建筑移动，仍复用墙体空间索引做碰撞。"""
+def _move_toward_building(monster, building, delta_time: float, ranged: bool = False) -> None:
+    """让受阻怪物朝当前建筑移动，仍复用墙体空间索引做碰撞。
+
+    ranged=True：远程怪停在开火射程内即可（不贴身），与打撤离点同口径。
+    """
     bx = getattr(building, "x", getattr(building, "center_x", monster.center_x))
     by = getattr(building, "y", getattr(building, "center_y", monster.center_y))
     dx = bx - monster.center_x
     dy = by - monster.center_y
     dist = math.hypot(dx, dy)
-    if dist <= 0 or dist <= _building_attack_distance(monster, building):
+    if dist <= 0 or dist <= _building_attack_distance(monster, building, ranged=ranged):
         return
     move_x = (dx / dist) * monster.speed * monster._debuff_speed_mult * delta_time
     move_y = (dy / dist) * monster.speed * monster._debuff_speed_mult * delta_time
@@ -865,17 +874,102 @@ def _try_attack_building(monster, building) -> bool | None:
     return True
 
 
-def _evac_aggro_attack_distance(monster, point) -> float:
-    """怪物接触撤离点并发起攻击所需的距离（与近战攻击距离同口径 = 武器射程）。"""
-    del point  # 撤离点尺寸由渲染层决定，攻击距离与近战攻击距离保持同一口径
-    return _melee_attack_distance(monster)
+def _try_attack_building_ranged(monster, building, special: str | None = None):
+    """远程怪朝建筑发射弹丸（与打撤离点同口径；命中结算见 GameView 弹丸循环）。
+
+    返回弹丸对象供调用方加入 skeleton_projectiles；False = 已锁定建筑但本帧未开火；
+    None = 建筑已失效（调用方恢复攻击玩家）。不要求视线：怪物是被这栋建筑挡住才锁定它。
+    """
+    if not _building_is_active(monster, building):
+        monster.attack_building = None
+        return None
+    bx = getattr(building, "x", getattr(building, "center_x", monster.center_x))
+    by = getattr(building, "y", getattr(building, "center_y", monster.center_y))
+    dist = math.hypot(bx - monster.center_x, by - monster.center_y)
+    if dist > _building_attack_distance(monster, building, ranged=True) or monster._attack_timer > 0:
+        # 已锁定建筑但本帧不开火：返回 False 表示「已被建筑目标接管」，不要转打玩家
+        return False
+    monster._attack_timer = monster._attack_delay
+    _mark_attack_vfx(monster, "ranged", bx, by)
+    return Projectile(
+        monster.center_x, monster.center_y, bx, by,
+        monster._proj_speed, monster.damage,
+        color=monster._proj_color, size=monster._proj_size,
+        special=special, max_range=_ranged_attack_distance(monster),
+    )
+
+
+def _evac_point_target(monster):
+    """取当前可攻击的撤离点；不存在/不再防守则清空进攻目标并返回 None。
+
+    注意：玩家插队索敌（_player_intercepts_evac_aggro）只清「本帧是否打点」标记，
+    不清 aggro_point——玩家离开后仍要恢复打撤离点（原实现一次性清空后永不回头）。
+    """
+    provider = getattr(monster, "_evac_point_provider", None)
+    point = provider() if provider is not None else None
+    if point is None or getattr(point, "state", None) != "defending":
+        monster.aggro_point = None
+        monster._evac_target_active = False
+        return None
+    return point
+
+
+def _attack_evac_point_melee(monster) -> None:
+    """近战怪按攻击节奏直接结算撤离点伤害（与打玩家同口径：射程内 + 视线通畅）"""
+    point = _evac_point_target(monster)
+    if point is None:
+        return
+    px, py = float(point.x), float(point.y)
+    dist = math.hypot(px - monster.center_x, py - monster.center_y)
+    if dist >= _melee_attack_distance(monster) or monster._attack_timer > 0:
+        return
+    if not _has_line_of_sight(monster.center_x, monster.center_y, px, py,
+                              monster._walls, monster._size, EVAC_BLOCK_HALF):
+        return
+    monster._attack_timer = monster._attack_delay
+    _mark_attack_vfx(monster, "melee", px, py)
+    point.take_damage(monster.damage)
+    from game.effects import particle_system
+    particle_system.emit(px, py, 3, (255, 90, 90), speed=50, life=0.2, size=2)
+
+
+def _attack_evac_point_ranged(monster, special: str | None = None):
+    """远程怪朝撤离点发射弹丸（与打玩家同口径：射程内 + 视线通畅）。
+
+    返回弹丸对象供调用方加入 skeleton_projectiles；None = 本帧未开火。
+    撤离点伤害在 GameView 弹丸循环命中时结算（不再由 update 直接扣血）。
+    """
+    point = _evac_point_target(monster)
+    if point is None:
+        return None
+    px, py = float(point.x), float(point.y)
+    dist = math.hypot(px - monster.center_x, py - monster.center_y)
+    if dist >= _ranged_attack_distance(monster) or monster._attack_timer > 0:
+        return None
+    if not _has_line_of_sight(monster.center_x, monster.center_y, px, py,
+                              monster._walls, monster._size, EVAC_BLOCK_HALF):
+        return None
+    monster._attack_timer = monster._attack_delay
+    _mark_attack_vfx(monster, "ranged", px, py)
+    return Projectile(
+        monster.center_x, monster.center_y, px, py,
+        monster._proj_speed, monster.damage,
+        color=monster._proj_color, size=monster._proj_size,
+        special=special, max_range=_ranged_attack_distance(monster),
+    )
+
+
+def _evac_aggro_attack_distance(monster, point=None, ranged: bool = False) -> float:
+    """怪物攻击撤离点所需的距离口径（近战=武器射程 / 远程=开火射程）"""
+    del point  # 撤离点方块尺寸不参与距离判定，与打玩家保持同一口径
+    return _ranged_attack_distance(monster) if ranged else _melee_attack_distance(monster)
 
 
 def _player_intercepts_evac_aggro(monster, player_x, player_y, players) -> bool:
     """玩家是否能把进攻波的怪从撤离点目标上抢走（防守期插队索敌）
 
     判定：玩家在怪物索敌范围 `_aggro_range` 内且有视线（边缘视线，拐角露身即可见）
-    → 怪物立刻放弃撤离点、回头打玩家。
+    → 本帧改打玩家（只清 `_evac_target_active`，`aggro_point` 保留，玩家脱离后回头继续打点）。
     联机多目标模式取最近存活玩家（与 update() 的目标选择同口径）；无存活玩家不插队。
     """
     if players is not None:
@@ -894,41 +988,44 @@ def _player_intercepts_evac_aggro(monster, player_x, player_y, players) -> bool:
 
 
 def _update_evac_aggro(monster, delta_time: float,
-                       player_x=None, player_y=None, players=None) -> bool:
-    """阶段 2 防守撤离：怪物朝撤离点推进并攻击（进攻波专用）。
+                       player_x=None, player_y=None, players=None,
+                       ranged: bool = False) -> bool:
+    """阶段 2 防守撤离：进攻波怪物朝撤离点推进（攻击结算移交 try_attack）。
 
     - 撤离点引用经 set_evac_point_provider 注入（怪物不持有 GameView），因此撤离点
       被摧毁（destroyed）或已完成防守（secured）后，怪物立刻清空目标恢复普通索敌 AI；
-    - aggro_point 只是"该怪属于进攻波"的标记与非空判断依据，实际坐标以 provider
-      取到的当前撤离点为准（航天图 BOSS 陨落后新建的撤离点坐标可能不同）；
-    - 推进与碰撞复用现有墙体判定（分轴滑动），不受玩家索敌距离/视线限制；
+    - aggro_point 是"该怪属于进攻波"的持久标记，实际坐标以 provider 取到的当前撤离点为准；
+    - 无玩家仇恨 → 打撤离点：近战进入武器射程后由 _attack_evac_point_melee 直接结算，
+      远程停在武器射程外由 _attack_evac_point_ranged 发射弹丸（命中才掉血），与打玩家同口径；
+    - 玩家进入索敌范围且有视线 → 本帧改打玩家，但**保留** aggro_point；
+      玩家脱离仇恨/失去视线后自动恢复打撤离点（原实现一次性清空，永不回头）；
+    - 本帧目标唯一：由 _evac_target_active 标记（try_attack 据此二选一），
+      杜绝"一边打撤离点一边打玩家"；
+    - 远程推进：射程内且视线通畅才算到位；无视线则继续接近（BFS 绕墙找角度）。
     - 缺陷⑦修复 2026-09-26：房间只有一个门洞，"直线 + 分轴滑动"会让贴墙怪切向分量≈0
-      而永久死锁（永远进不了攻击距离、撤离点不掉血）；推进改为先走 BFS 航点（_nav_follow），
-      无路径/航点耗尽才回退原直线逻辑。本段依旧不接入任何视线判定。
-    - 防守期插队修复：防守期间玩家走进该怪索敌范围且视线通畅时，怪物改为攻击玩家
-      （清空 aggro_point 并返回 False 交回普通索敌 AI）；玩家远离或被墙挡住则继续打撤离点。
+      而永久死锁；推进优先走 BFS 航点（_nav_follow），无路径时才回退直线逻辑。
 
     Args:
         monster: 怪物实例
         delta_time: 帧时长（秒）
         player_x / player_y: 单机模式的玩家坐标（None = 本帧不做插队判定）
         players: 联机多目标模式的玩家列表（None 时回退 player_x/player_y）
+        ranged: 是否为远程怪（True = 停在开火射程外，不贴身）
 
     Returns:
         bool: True 表示本帧已由撤离点目标接管，调用方应直接 return，不再走玩家索敌逻辑。
     """
     if monster.aggro_point is None:
         return False
-    # 防守期插队索敌：玩家走到怪的索敌范围内且视线通畅 → 放弃撤离点，改为攻击玩家
+    point = _evac_point_target(monster)
+    if point is None:
+        monster._evac_target_active = False
+        return False
+    # 防守期插队索敌：玩家抢走仇恨 → 本帧打玩家；保留 aggro_point 以便玩家脱离后回头打点
     if _player_intercepts_evac_aggro(monster, player_x, player_y, players):
-        monster.aggro_point = None
+        monster._evac_target_active = False
         return False
-    provider = getattr(monster, "_evac_point_provider", None)
-    point = provider() if provider is not None else None
-    # 撤离点不存在或不在防守中 → 清空目标，恢复普通 AI
-    if point is None or getattr(point, "state", None) != "defending":
-        monster.aggro_point = None
-        return False
+    monster._evac_target_active = True
 
     px = float(getattr(point, "x", monster.aggro_point[0]))
     py = float(getattr(point, "y", monster.aggro_point[1]))
@@ -936,19 +1033,38 @@ def _update_evac_aggro(monster, delta_time: float,
     dx = px - monster.center_x
     dy = py - monster.center_y
     dist = math.hypot(dx, dy)
-    attack_dist = _evac_aggro_attack_distance(monster, point)
+    attack_dist = _evac_aggro_attack_distance(monster, ranged=ranged)
+    # 远程需要视线才能开火：射程内但隔墙时继续靠近（与打玩家同一视线口径）
+    in_position = dist <= attack_dist
+    if ranged and in_position and not _has_line_of_sight(
+            monster.center_x, monster.center_y, px, py,
+            monster._walls, monster._size, EVAC_BLOCK_HALF):
+        in_position = False
 
-    if dist > attack_dist and dist > 0:
+    if not in_position and dist > 0:
+        move_x = (dx / dist) * monster.speed * monster._debuff_speed_mult * delta_time
+        move_y = (dy / dist) * monster.speed * monster._debuff_speed_mult * delta_time
+        new_x = monster.center_x + move_x
+        new_y = monster.center_y + move_y
+        # 被玩家建筑挡住：优先停下拆挡路建筑（用户口径：路障挡路时先拆，不绕行）。
+        # 近战贴身砍、远程在射程内发弹丸，攻击入口仍是 try_attack（建筑优先于撤离点）。
+        if monster._build_lookup is not None and not _can_move_to(
+                new_x, new_y, monster._size, monster._walls):
+            blocker = _find_nearest_building(
+                monster._build_lookup() or (), monster.center_x, monster.center_y,
+                BUILDING_ATTACK_SEARCH_RANGE,
+            )
+            if blocker is not None:
+                monster.attack_building = blocker
+                _move_toward_building(monster, blocker, delta_time, ranged=ranged)
+                monster._attack_timer = max(0, monster._attack_timer - delta_time)
+                return True
         # 缺陷⑦修复：优先沿 BFS 航点绕墙推进（门洞天然可通行，怪物能真正进屋打到撤离点）。
         # 无路径/航点耗尽时返回 False → 落回下方原直线 + 分轴滑动逻辑（行为不劣化）。
         # 设计约束不变：本段不受玩家索敌距离/视线限制。
         if _nav_follow(monster, px, py, delta_time):
             monster._attack_timer = max(0, monster._attack_timer - delta_time)
             return True
-        move_x = (dx / dist) * monster.speed * monster._debuff_speed_mult * delta_time
-        move_y = (dy / dist) * monster.speed * monster._debuff_speed_mult * delta_time
-        new_x = monster.center_x + move_x
-        new_y = monster.center_y + move_y
         if _can_move_to(new_x, new_y, monster._size, monster._walls):
             # 撤离点路线恢复畅通后解除建筑锁定
             monster.attack_building = None
@@ -965,13 +1081,10 @@ def _update_evac_aggro(monster, delta_time: float,
         monster._attack_timer = max(0, monster._attack_timer - delta_time)
         return True
 
-    # 已进入攻击距离：按自身攻击节奏对撤离点结算伤害（特效口径同 _try_attack_building）
+    # 已到位：攻击结算统一由 try_attack 按近战/远程口径执行，这里只推进冷却。
+    # 到位即说明路障已不再构成阻挡，松开建筑锁定（否则 try_attack 会一直优先打建筑）
+    monster.attack_building = None
     monster._attack_timer = max(0, monster._attack_timer - delta_time)
-    if monster._attack_timer <= 0:
-        monster._attack_timer = monster._attack_delay
-        from game.effects import particle_system
-        particle_system.emit(px, py, 3, (255, 90, 90), speed=50, life=0.2, size=2)
-        point.take_damage(monster.damage)
     return True
 
 
@@ -1076,6 +1189,8 @@ class _MeleeMonsterBase(arcade.SpriteSolidColor):
         self._build_damage_cb = None
         # 阶段 2 防守撤离：进攻目标标记（非空表示该怪属于进攻波）+ 撤离点引用 provider
         self.aggro_point = None
+        # 本帧是否真的以撤离点为目标（玩家插队时为 False）：try_attack 据此二选一
+        self._evac_target_active = False
         self._evac_point_provider = None
         # BFS 寻路状态（缺陷⑦⑧修复 2026-09-26）：私有属性不参与联机快照同步
         self._nav_waypoints: list[tuple[float, float]] = []
@@ -1274,6 +1389,19 @@ class _MeleeMonsterBase(arcade.SpriteSolidColor):
         move_y = (dy / dist) * self.speed * self._debuff_speed_mult * delta_time
         new_x = self.center_x + move_x
         new_y = self.center_y + move_y
+        # 被玩家建筑挡住：优先停下拆挡路建筑（不再先转 BFS 绕行）——
+        # 用户口径：路障挡住去路时应像打撤离点一样先把路障拆掉
+        if self._build_lookup is not None and not _can_move_to(
+                new_x, new_y, self._size, self._walls):
+            blocker = _find_nearest_building(
+                self._build_lookup() or (), self.center_x, self.center_y,
+                BUILDING_ATTACK_SEARCH_RANGE,
+            )
+            if blocker is not None:
+                self.attack_building = blocker
+                _move_toward_building(self, blocker, delta_time)
+                self._attack_timer = max(0, self._attack_timer - delta_time)
+                return
         # 缺陷⑧修复：连续多帧「想动却几乎不动」（凹角处整步与两次单轴探测全失败）→ 转 BFS 航点绕墙
         if _nav_chase_step(self, player_x, player_y, delta_time,
                            move_x != 0.0 or move_y != 0.0):
@@ -1287,33 +1415,19 @@ class _MeleeMonsterBase(arcade.SpriteSolidColor):
             self.center_x = new_x
             self.center_y = new_y
         else:
-            # 受阻时只在附近寻找建筑，找到后转攻建筑；无建筑才沿墙滑动
-            target = self.attack_building
-            if target is not None and not _building_is_active(self, target):
-                target = None
-                self.attack_building = None
-            if target is None and self._build_lookup is not None:
-                target = _find_nearest_building(
-                    self._build_lookup() or (), self.center_x, self.center_y,
-                    BUILDING_ATTACK_SEARCH_RANGE,
-                )
-            if target is not None:
-                self.attack_building = target
-                _move_toward_building(self, target, delta_time)
-            else:
-                # 直线被挡且附近无建筑可拆：立即转 BFS 航点绕开，不再只靠分轴滑动硬顶。
-                # 与 _nav_chase_step 用的是同一套 BFS（_nav_follow），区别是不等
-                # MONSTER_NAV_STUCK_FRAMES 的卡死计数——被建筑/墙角挡住时整步与两次单轴
-                # 探测往往同帧全失败，靠分轴滑动要卡满阈值才转 BFS，玩家会看到怪原地不动。
-                self._nav_mode = True
-                if not _nav_follow(self, player_x, player_y, delta_time):
-                    # 无路径/航点耗尽 → 退出航点模式并回退分轴滑动（行为不劣化）
-                    _nav_reset(self)
-                    # 整体移动被挡：分轴尝试，允许怪物沿墙滑行绕过墙角进入门洞
-                    if _can_move_to(new_x, self.center_y, self._size, self._walls):
-                        self.center_x = new_x
-                    if _can_move_to(self.center_x, new_y, self._size, self._walls):
-                        self.center_y = new_y
+            # 直线被挡且上方没找到可拆建筑（有建筑时已被预检接管）：立即转 BFS 航点绕开，
+            # 不再只靠分轴滑动硬顶。与 _nav_chase_step 用的是同一套 BFS（_nav_follow），
+            # 区别是不等 MONSTER_NAV_STUCK_FRAMES 的卡死计数——被墙角挡住时整步与两次
+            # 单轴探测往往同帧全失败，靠分轴滑动要卡满阈值才转 BFS，玩家会看到怪原地不动。
+            self._nav_mode = True
+            if not _nav_follow(self, player_x, player_y, delta_time):
+                # 无路径/航点耗尽 → 退出航点模式并回退分轴滑动（行为不劣化）
+                _nav_reset(self)
+                # 整体移动被挡：分轴尝试，允许怪物沿墙滑行绕过墙角进入门洞
+                if _can_move_to(new_x, self.center_y, self._size, self._walls):
+                    self.center_x = new_x
+                if _can_move_to(self.center_x, new_y, self._size, self._walls):
+                    self.center_y = new_y
         self._attack_timer = max(0, self._attack_timer - delta_time)
 
     def try_attack(self, player=None, players=None) -> bool:
@@ -1330,17 +1444,17 @@ class _MeleeMonsterBase(arcade.SpriteSolidColor):
         if self._stunned:
             # 眩晕状态下无法攻击
             return False
-        # 阶段 2：进攻撤离点期间不在这里攻击玩家（伤害已在 _update_evac_aggro 结算）
-        # 放行口径：aggro_point 非空 = 该怪本帧仍以撤离点为目标 → 不打玩家；
-        # 防守期插队（玩家进索敌范围且视线通畅）已在 _update_evac_aggro 清空 aggro_point，
-        # 此处自然落到下面的玩家攻击分支（views/game_view.py 每帧先 update 后 try_attack，
-        # 故插队当帧即可开打，无需等下一帧）
-        if self.aggro_point is not None:
-            return False
+        # 建筑优先：被路障挡住时先拆挡路建筑（推进撤离点的路上也会锁定路障）
         if self.attack_building is not None:
             building_result = _try_attack_building(self, self.attack_building)
             if building_result is not None:
                 return building_result
+        # 阶段 2：本帧以撤离点为目标 → 近战打点后直接返回，绝不同帧再打玩家
+        # （目标二选一由 _evac_target_active 裁决：玩家插队时该标记为 False，
+        #   本帧落到下面的玩家攻击分支；玩家脱离仇恨后自动恢复打点）
+        if getattr(self, "_evac_target_active", False):
+            _attack_evac_point_melee(self)
+            return False
         if players is not None:
             # 多目标模式：重新选取最近存活玩家作为攻击目标
             player = _select_target(players, self.center_x, self.center_y)
@@ -1585,6 +1699,8 @@ class _RangedMonsterBase(arcade.SpriteSolidColor):
         self._build_damage_cb = None
         # 阶段 2 防守撤离：进攻目标标记（非空表示该怪属于进攻波）+ 撤离点引用 provider
         self.aggro_point = None
+        # 本帧是否真的以撤离点为目标（玩家插队时为 False）：try_attack 据此二选一
+        self._evac_target_active = False
         self._evac_point_provider = None
         # BFS 寻路状态（缺陷⑦⑧修复 2026-09-26）：私有属性不参与联机快照同步
         self._nav_waypoints: list[tuple[float, float]] = []
@@ -1736,7 +1852,8 @@ class _RangedMonsterBase(arcade.SpriteSolidColor):
             return
         # 阶段 2 防守撤离：进攻波目标为撤离点时接管本帧 AI
         # 传入玩家坐标/列表：玩家进入索敌范围且视线通畅时，怪改为攻击玩家（防守期插队）
-        if _update_evac_aggro(self, delta_time, player_x, player_y, players):
+        # ranged=True：远程怪停在开火射程外，由 try_attack 发射弹丸打点（不贴身）
+        if _update_evac_aggro(self, delta_time, player_x, player_y, players, ranged=True):
             return
         if players is not None:
             # 多目标模式：选取最近存活玩家作为当前目标，无存活玩家则待机
@@ -1777,6 +1894,20 @@ class _RangedMonsterBase(arcade.SpriteSolidColor):
         if move_x != 0 or move_y != 0:
             new_x = self.center_x + move_x
             new_y = self.center_y + move_y
+            # 被玩家建筑挡住：优先停下拆挡路建筑（不再先转 BFS 绕行）——
+            # 用户口径：路障挡住去路时应像打撤离点一样先把路障拆掉。
+            # 远程口径：停在武器射程内发射弹丸，命中由 GameView 弹丸循环结算。
+            if self._build_lookup is not None and not _can_move_to(
+                    new_x, new_y, self._size, self._walls):
+                blocker = _find_nearest_building(
+                    self._build_lookup() or (), self.center_x, self.center_y,
+                    BUILDING_ATTACK_SEARCH_RANGE,
+                )
+                if blocker is not None:
+                    self.attack_building = blocker
+                    _move_toward_building(self, blocker, delta_time, ranged=True)
+                    self._attack_timer = max(0, self._attack_timer - delta_time)
+                    return
             # 缺陷⑧修复：连续多帧「想动却几乎不动」（凹角处整步与两次单轴探测全失败）→ 转 BFS 航点绕墙
             if _nav_chase_step(self, player_x, player_y, delta_time,
                                move_x != 0.0 or move_y != 0.0):
@@ -1790,28 +1921,20 @@ class _RangedMonsterBase(arcade.SpriteSolidColor):
                 self.center_x = new_x
                 self.center_y = new_y
             else:
-                # 受阻时只在附近寻找建筑，找到后转攻建筑；无建筑才沿墙滑动
-                target = self.attack_building
-                if target is not None and not _building_is_active(self, target):
-                    target = None
-                    self.attack_building = None
-                if target is None and self._build_lookup is not None:
-                    target = _find_nearest_building(
-                        self._build_lookup() or (), self.center_x, self.center_y,
-                        BUILDING_ATTACK_SEARCH_RANGE,
-                    )
-                if target is not None:
-                    self.attack_building = target
-                    _move_toward_building(self, target, delta_time)
-                else:
-                    # 整体移动被挡：分轴尝试，允许怪物沿墙滑行绕过墙角进入门洞
-                    if _can_move_to(new_x, self.center_y, self._size, self._walls):
-                        self.center_x = new_x
-                    if _can_move_to(self.center_x, new_y, self._size, self._walls):
-                        self.center_y = new_y
+                # 直线被挡且上方没找到可拆建筑（有建筑时已被预检接管）：
+                # 分轴尝试，允许怪物沿墙滑行绕过墙角进入门洞
+                if _can_move_to(new_x, self.center_y, self._size, self._walls):
+                    self.center_x = new_x
+                if _can_move_to(self.center_x, new_y, self._size, self._walls):
+                    self.center_y = new_y
         else:
-            # 没有移动需求时不再继续拆建筑，优先维持远程距离
-            self.attack_building = None
+            # 无移动需求：已锁定建筑仍挡在视线里就保持锁定（远程怪隔着建筑站着会既
+            # 打不到玩家也打不到建筑）；视线已通畅或建筑失效则松开，恢复打玩家
+            if self.attack_building is not None and (
+                    not _building_is_active(self, self.attack_building)
+                    or _has_line_of_sight(self.center_x, self.center_y, player_x, player_y,
+                                          self._walls, self._size, PLAYER_SIZE)):
+                self.attack_building = None
         self._attack_timer = max(0, self._attack_timer - delta_time)
 
     def try_attack(self, player=None, players=None) -> Projectile | None:
@@ -1828,16 +1951,17 @@ class _RangedMonsterBase(arcade.SpriteSolidColor):
         if self._stunned:
             # 眩晕状态下无法攻击
             return None
-        # 阶段 2：进攻撤离点期间不在这里攻击玩家（伤害已在 _update_evac_aggro 结算）
-        # 放行口径同近战：aggro_point 非空 = 本帧仍以撤离点为目标；防守期插队已在
-        # _update_evac_aggro 清空 aggro_point → 自然落到下面的玩家开火分支
-        if self.aggro_point is not None:
-            return None
+        # 建筑优先：被路障挡住时先拆挡路建筑（与近战同口径，远程用弹丸）
         if self.attack_building is not None:
-            building_result = _try_attack_building(self, self.attack_building)
-            if building_result is not None:
-                # 建筑攻击直接结算伤害，不生成玩家弹丸
+            building_result = _try_attack_building_ranged(self, self.attack_building)
+            if building_result is not None and building_result is not False:
+                return building_result
+            if building_result is False and not getattr(self, "_evac_target_active", False):
+                # 已锁定建筑但本帧不开火：不要落到玩家开火分支（避免双目标）
                 return None
+        # 阶段 2：本帧以撤离点为目标 → 远程打点（发射弹丸，命中才结算伤害）
+        if getattr(self, "_evac_target_active", False):
+            return _attack_evac_point_ranged(self)
         if players is not None:
             # 多目标模式：重新选取最近存活玩家作为攻击目标
             player = _select_target(players, self.center_x, self.center_y)

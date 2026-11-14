@@ -439,14 +439,20 @@ def render_game(view):
     for m in view.monsters:
         draw_skill_vfx(m)
 
-    # 局内建造系统（阶段1）：建筑实体（sprite + 顶部血条，实心填充禁线框）
+    # 局内建造系统（阶段1）：建筑实体（实心矩形 + 顶部血条，实心填充禁线框）
+    # 建筑不再持有 Sprite（arcade 3.3 Sprite 无 draw()），尺寸/颜色统一取 BUILDS
     if hasattr(view, "build_system"):
+        from entities.build_defs import BUILDS
         for b in view.build_system.buildings:
             if not view._in_view(b.x, b.y):
                 continue
-            b.sprite.draw()
+            size = BUILDS[b.kind]["size"]
+            color = BUILDS[b.kind]["color"]
+            if wb is not None:
+                wb.rect(b.x, b.y, size, size, color)
+            else:
+                arcade.draw_rect_filled(arcade.XYWH(b.x, b.y, size, size), color)
             # 顶部血条：背景全宽暗红 + 前景按 hp/max_hp 比例绿色（实心）
-            size = b.sprite.width
             ratio = max(0.0, b.hp / b.max_hp)
             bw = size * ratio
             bx = b.x - size / 2
@@ -461,7 +467,6 @@ def render_game(view):
         # 建造模式预览格：吸附目标格半透明实心方块（合法绿/非法红，禁线框）
         gs = view.window.game_state
         if getattr(gs, "build_mode", False):
-            from entities.build_defs import BUILDS
             cam = view.controller.camera.position
             mx = view._mouse_x + cam[0] - WINDOW_WIDTH / 2
             my = view._mouse_y + cam[1] - WINDOW_HEIGHT / 2

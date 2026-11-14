@@ -9,6 +9,7 @@ from config import (
     WINDOW_WIDTH, WINDOW_HEIGHT, PLAYER_HP,
     PLAYER_SIZE, PLAYER_COLOR, TILE_SIZE, PLAYER_SPEED,
     EVAC_RADIUS,
+    EVAC_BLOCK_HALF,  # 撤离点方块半边长（弹丸命中判定与渲染同口径）
     evac_activate_cost, EVAC_INTERACT_RANGE,  # 阶段2 防守撤离：按主题的激活/修复消耗 helper 与交互距离
     EVAC_WAVE_SIZE, EVAC_WAVE_GROWTH, EVAC_STATE_BCAST_SEC,  # 阶段2 防守撤离：波次规模与状态广播周期
     WELL_HEAL, WELL_SPEED_MULT, WELL_SPEED_DURATION,
@@ -1505,6 +1506,13 @@ class GameView(arcade.View):
             return
         if not getattr(self, "_chest_key_pressed", False):
             return
+        # 拾取优先（用户口径 2026-11-14）：拾取半径内有掉落物时 E 先给拾取，
+        # 撤离点交互本帧让位——否则站在点旁（交互半径 48 ≥ 拾取半径 40）捡不到东西。
+        # 拾取分支不消费按键，按住 E 捡完最后一件事后本函数下一帧自然接管。
+        if any(math.hypot(self.player.center_x - d.center_x,
+                          self.player.center_y - d.center_y) <= DROP_PICKUP_RADIUS
+               for d in self.drops):
+            return
         # 交互距离判定
         if math.hypot(self.player.center_x - point.x,
                       self.player.center_y - point.y) > EVAC_INTERACT_RANGE:
@@ -1553,6 +1561,12 @@ class GameView(arcade.View):
         point = self.evac_point
         if point is None or gs.net_client is None:
             return
+        # 拾取优先（与主机/solo 同一口径）：拾取半径内有掉落物时 E 先给拾取，
+        # 不占用按键，避免站在撤离点旁捡不到东西
+        if any(math.hypot(self.player.center_x - d.center_x,
+                          self.player.center_y - d.center_y) <= DROP_PICKUP_RADIUS
+               for d in self.drops):
+            return
         if point.state == "dormant":
             action = "activate"
         elif point.state == "destroyed":
@@ -1575,12 +1589,15 @@ class GameView(arcade.View):
     def _clear_evac_defense(self) -> None:
         """本局失败/结束清理：撤离点失活 + 所有怪物解除对撤离点的锁定
 
-        provider 语义会在下帧自动清空 aggro_point（撤离点不再是 defending），
-        这里再显式清一遍，防止本局残留怪物继续锁定已失效的撤离点。
+        撤离点置空后 provider 返回 None，下一次 update 只会自动清 aggro_point；
+        这里显式清一遍，保证本帧（尚未 update 的）怪物也不再锁定已失效的撤离点。
         """
         for monster in self.monsters:
             if getattr(monster, "aggro_point", None) is not None:
                 monster.aggro_point = None
+            # 本帧打点标记同步清掉：否则 try_attack 会拿失效 provider 重试一次
+            if getattr(monster, "_evac_target_active", False):
+                monster._evac_target_active = False
         # 撤离点失活：本局结束后不再推进/渲染
         self.evac_point = None
         self._evac_last_state = None
@@ -2636,6 +2653,31 @@ class GameView(arcade.View):
                     continue
                 # 碰墙消亡
                 if arcade.check_for_collision_with_list(p, self.wall_list):
+                    p.remove_from_sprite_lists()
+                    continue
+                # 怪物弹丸命中主撤离点：防守期拆点（命中才结算，与打玩家同口径；
+                # 此前撤离点伤害由 _update_evac_aggro 直接扣，远程怪无法"远程"打点）
+                evac = self.evac_point
+                if (evac is not None and evac.state == "defending"
+                        and abs(p.center_x - evac.x) <= EVAC_BLOCK_HALF + p.width * 0.5
+                        and abs(p.center_y - evac.y) <= EVAC_BLOCK_HALF + p.height * 0.5):
+                    evac.take_damage(p.damage)
+                    p.remove_from_sprite_lists()
+                    continue
+                # 怪物弹丸命中挡路建筑：受阻怪物停下拆路障（远程怪用弹丸，与打撤离点同口径）
+                hit_building = None
+                for building in self.build_system.buildings:
+                    # 只判定阻挡型建筑（陷阱是地面触发物，弹丸应飞过而不是拆它）
+                    if not getattr(building, "blocks_monsters", True):
+                        continue
+                    half = (getattr(building, "size", 0) or 0) * 0.5
+                    if (getattr(building, "hp", 0) > 0
+                            and abs(p.center_x - building.x) <= half + p.width * 0.5
+                            and abs(p.center_y - building.y) <= half + p.height * 0.5):
+                        hit_building = building
+                        break
+                if hit_building is not None:
+                    self.build_system.damage_building(hit_building.bid, p.damage)
                     p.remove_from_sprite_lists()
                     continue
                 # 弹丸命中玩家：本地玩家直结算；主机权威模式下幽灵由 on_take_damage 钩子广播 PLAYER_HURT
