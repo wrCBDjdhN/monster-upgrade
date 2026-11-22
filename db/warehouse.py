@@ -161,6 +161,8 @@ def warehouse_item_capacity(item_type: str, item_id: str) -> int:
         return 1  # 与 loot.py:116「资源逐件 1 格」同口径
     if item_type in ("potion", "gold"):
         return 0  # config.RUN_POTION_SLOTS：药水不占容量；金币不是物品
+    if item_type == "box":
+        return 1  # 武器箱/装备箱每箱占 1 格（实际存放在 warehouse_boxes 表）
     if item_type in ("helmet", "armor", "backpack"):
         from entities.equipment_defs import ARMORS, BACKPACKS, HELMETS
         defs = {"helmet": HELMETS, "armor": ARMORS, "backpack": BACKPACKS}[item_type]
@@ -194,12 +196,18 @@ def warehouse_used_capacity(pid: int) -> int:
         equip_rows = c.execute(
             "SELECT slot, item_id FROM equipment WHERE player_id=?", (pid,),
         ).fetchall()
+        # 仓库宝箱（每箱 1 格；表由 init_db 创建，与 warehouse_items 分开存放）
+        box_row = c.execute(
+            "SELECT COALESCE(SUM(quantity), 0) FROM warehouse_boxes WHERE player_id=?",
+            (pid,),
+        ).fetchone()
     for item_type, item_id, qty in item_rows:
         total += warehouse_item_capacity(str(item_type), str(item_id)) * int(qty)
     for (item_id,) in weapon_rows:
         total += warehouse_item_capacity("weapon", str(item_id))
     for slot, item_id in equip_rows:
         total += warehouse_item_capacity(str(slot), str(item_id))
+    total += int(box_row[0]) if box_row else 0
     return total
 
 

@@ -4,9 +4,9 @@
   与「成就」（db.missions.get_achievements，累计进度、一次性奖励）；
 - 每行结构：任务描述 + 奖励预览 + 进度条（progress/target）+ 领取按钮；
 - 领取按钮：达成未领 → 亮黄（缓慢呼吸提示可领），未达成/已领 → 置灰不可点；
-- 领奖链：db.missions.claim_* 返回奖励 → db.mail.create_mail 生成奖励邮件
-  （阶段12：系统奖励统一走邮件，玩家在邮件界面领取；不再直接加金币/经验）
-  → 飘提示文字 + 金币音效；
+- 领奖链：db.missions.claim_* 返回金币 + 奖励池 id → game.mission_rewards.roll_reward
+  随机抽 1 项 → db.mail.create_mail 生成奖励邮件（阶段12：系统奖励统一走邮件；
+  经验已按用户口径 2026-11-21 删除）→ 飘提示文字 + 金币音效；
 - 打开即刷新：on_show_view 调 get_daily（自带跨天重抽）与 get_achievements；
 - 滚动复用 views/scroll_view.py（ScrollView：滚轮 + 滚动条拖拽 + 返回按钮）；
 - 返回：按钮 + ESC（基类规则：联机回大厅 / 单机回开始界面，延迟导入）。
@@ -23,6 +23,7 @@ from db.database import (
 from views.scroll_view import ScrollView
 from views.text_cache import TextCache
 from game.sound_manager import sound_manager
+from game.mission_rewards import roll_reward
 
 
 class MissionView(ScrollView):
@@ -126,7 +127,7 @@ class MissionView(ScrollView):
         """db 层行字典 → 页面统一行结构
 
         每日任务用 slot 定位、成就用 achievement_id 定位；统一出 key/desc/target/
-        progress/claimed/complete/gold/exp 供绘制与领奖使用。
+        progress/claimed/complete/gold/pool 供绘制与领奖使用。
         """
         return {
             "is_daily": is_daily,
@@ -138,7 +139,9 @@ class MissionView(ScrollView):
             "claimed": bool(raw.get("claimed", False)),
             "complete": bool(raw.get("complete", False)),
             "gold": int(raw.get("reward_gold", 0)),
-            "exp": int(raw.get("reward_exp", 0)),
+            "pool": str(raw.get("reward_pool", "")),
+            "pool_name": str(raw.get("reward_pool_name", "")),
+            "pool_desc": str(raw.get("reward_pool_desc", "")),
         }
 
     def _refresh(self):
@@ -219,9 +222,10 @@ class MissionView(ScrollView):
         # 描述 + 奖励预览
         self._tc.text(f"row_desc_{i}", row["desc"], left + 18, y + 9,
                       arcade.color.WHITE, 17, anchor_y="center")
+        # 奖励预览：金币 + 随机奖励池说明（经验已按用户口径 2026-11-21 删除）
         reward = f"奖励：金币 {row['gold']}"
-        if row["exp"] > 0:
-            reward += f" · 经验 {row['exp']}"
+        if row["pool_name"]:
+            reward += f" · {row['pool_name']}（{row['pool_desc']}）"
         # 奖励文案不在此绘制：原位置（left+18, y-13）会被随后绘制的进度条实心底槽整段遮挡，
         # 改画到进度数字右侧、与进度条同高（见本函数进度数字绘制之后）
         # 进度条：底槽 + 填充（满格转金色）
@@ -343,8 +347,9 @@ class MissionView(ScrollView):
     def _claim(self, i: int):
         """领取第 i 行奖励：claim_* → 生成奖励邮件 → 飘提示文字
 
-        阶段12（用户口径 2026-11-07）：任务/成就属系统奖励，不再直接入账金币/经验，
-        改为发一封邮件（金币/经验作为邮件载荷），玩家在邮件界面统一领取。
+        阶段12（用户口径 2026-11-07）：任务/成就属系统奖励，不再直接入账，
+        改为发一封邮件，玩家在邮件界面统一领取。
+        2026-11-21：经验奖励删除，改为金币 + 随机奖励池物品（附件）。
         """
         row = self._rows[i]
         if row["claimed"] or not row["complete"]:
@@ -367,13 +372,15 @@ class MissionView(ScrollView):
             sound_manager.play_ui()
             return
         gold = int(res.get("reward_gold", 0))
-        exp = int(res.get("reward_exp", 0))
+        # 随机奖励池：领取时抽 1 项，作为邮件附件发放（箱子领取后进仓库宝箱页）
+        attachments = roll_reward(str(res.get("reward_pool", "")))
+        pool_name = str(res.get("reward_pool_name", ""))
         title = "每日任务奖励" if row["is_daily"] else "成就奖励"
         create_mail(pid, title, f"任务「{row['desc']}」奖励已发放。",
-                    gold=gold, exp=exp, source="mission")
+                    gold=gold, attachments=attachments, source="mission")
         text = f"奖励已发送至邮件  金币 +{gold}"
-        if exp > 0:
-            text += f"  经验 +{exp}"
+        if pool_name:
+            text += f" · {pool_name}"
         self._toast(text, arcade.color.GOLD)
         sound_manager.play_gold_pickup()
         # 重新读库刷新行状态（claimed=True）与顶部金币

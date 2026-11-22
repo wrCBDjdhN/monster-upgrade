@@ -10,14 +10,15 @@
 - mails: 每封邮件一行（player_id/标题/正文/金币/经验/来源/创建时间/领取标记）
 - mail_attachments: 附件逐条（类型/item_id/等级/数量）
 
-附件类型：resource / weapon / helmet / armor / backpack / potion
-（与 warehouse_item_capacity 的 item_type 口径完全一致）
+附件类型：resource / weapon / helmet / armor / backpack / potion / box
+（与 warehouse_item_capacity 的 item_type 口径完全一致；box 为武器箱/装备箱，
+领取后进入 warehouse_boxes，每箱占 1 格容量）
 """
 from db.connection import _conn
 from db.warehouse import warehouse_item_capacity, warehouse_remaining_capacity
 
 # 允许的附件类型（与仓库容量口径、装备槽位保持一致）
-ITEM_TYPES = ("resource", "weapon", "helmet", "armor", "backpack", "potion")
+ITEM_TYPES = ("resource", "weapon", "helmet", "armor", "backpack", "potion", "box")
 
 
 def _normalize_attachments(attachments) -> list[dict]:
@@ -138,6 +139,25 @@ def get_mail(pid: int, mail_id: int) -> dict | None:
         "claimed": bool(row[7]),
         "attachments": att.get(int(row[0]), []),
     }
+
+
+def delete_claimed_mails(pid: int) -> int:
+    """删除玩家所有已领取邮件（连同附件），返回删除封数
+
+    附件表没有级联删除，必须先按 mail_id 清附件再删主表，避免孤儿行。
+    只删 claimed=1，未领取邮件不受影响。
+    """
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT id FROM mails WHERE player_id=? AND claimed=1", (pid,),
+        ).fetchall()
+        mail_ids = [int(r[0]) for r in rows]
+        if not mail_ids:
+            return 0
+        marks = ",".join("?" for _ in mail_ids)
+        c.execute(f"DELETE FROM mail_attachments WHERE mail_id IN ({marks})", tuple(mail_ids))
+        c.execute("DELETE FROM mails WHERE player_id=? AND claimed=1", (pid,))
+    return len(mail_ids)
 
 
 def get_unclaimed_mail_count(pid: int) -> int:

@@ -68,12 +68,18 @@ class ScrollView(arcade.View):
         return max(30, min(view_h, view_h * view_h / max(1, self.content_height)))
 
     def _scrollbar_handle_y(self, track_top=None) -> float:
-        """滚动条手柄中心 y（屏幕坐标），按 scroll_offset 比例定位。"""
-        view_h = (track_top or self.content_top) - self.SCROLLBAR_BOTTOM
+        """滚动条手柄中心 y（屏幕坐标），按 scroll_offset 比例定位。
+
+        口径：offset=0 时手柄贴轨道顶部，offset=max 时手柄贴轨道底部。
+        （旧实现用 top - bar_h，手柄整体下移半个手柄高，且与拖拽公式方向相反，
+        表现为「点住手柄在顶部会瞬间跳到底部」——2026-11-21 修复）
+        """
+        top = track_top or self.content_top
+        view_h = top - self.SCROLLBAR_BOTTOM
         bar_h = self._scrollbar_handle_h(track_top)
         max_scroll = self._scrollbar_max_scroll()
         ratio = 0.0 if max_scroll <= 0 else self.scroll_offset / max_scroll
-        return (track_top or self.content_top) - bar_h - (view_h - bar_h) * ratio
+        return top - bar_h / 2 - (view_h - bar_h) * ratio
 
     def draw_scrollbar(self, track_top=None):
         """绘制右侧滚动条（轨道 + 手柄）。子类在 on_draw 末尾调用即可。
@@ -131,9 +137,11 @@ class ScrollView(arcade.View):
         max_scroll = self._scrollbar_max_scroll()
         if view_h - bar_h <= 0 or max_scroll <= 0:
             return
-        # 手柄中心随鼠标移动：手柄顶部对应 offset=0，底部对应 offset=max_scroll
-        ratio = (y - self.SCROLLBAR_BOTTOM - bar_h / 2) / (view_h - bar_h)
-        self.scroll_offset = max(0, min(max_scroll, ratio * max_scroll))
+        # 手柄中心随鼠标移动：顶部对应 offset=0，底部对应 offset=max_scroll。
+        # 旧公式用 (y - 底 - bar_h/2)，与绘制方向相反，导致拖拽上下颠倒（2026-11-21 修复）。
+        ratio = (track_top - bar_h / 2 - y) / (view_h - bar_h)
+        ratio = max(0.0, min(1.0, ratio))
+        self.scroll_offset = ratio * max_scroll
 
     def end_scroll_drag(self):
         """结束滚动条拖拽。"""

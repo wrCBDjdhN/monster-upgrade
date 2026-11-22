@@ -18,7 +18,10 @@ from db.database import (
     # 阶段11：仓库等级 / 容量上限 / 升级链路
     get_warehouse_level, get_warehouse_capacity, warehouse_used_capacity,
     warehouse_upgrade_cost_at, warehouse_can_afford, upgrade_warehouse,
+    # 阶段13：仓库宝箱（武器箱/装备箱先入库，在「宝箱」页按数量开启）
+    get_warehouse_boxes,
 )
+from game.box_open import open_warehouse_boxes
 from views.scroll_view import ScrollView
 from views.text_cache import TextCache
 from game.sound_manager import sound_manager
@@ -31,8 +34,8 @@ class WarehouseView(ScrollView):
     def __init__(self, window):
         super().__init__(window)
         self._tc = TextCache()  # 文本缓存：复用 arcade.Text 消除 PerformanceWarning
-        # 顶部分类 Tab 栏：资源/武器/装备，切换时重建并按分类显示
-        self._tabs = ["资源", "武器", "装备"]
+        # 顶部分类 Tab 栏：资源/武器/装备/宝箱，切换时重建并按分类显示
+        self._tabs = ["资源", "武器", "装备", "宝箱"]
         self._tab = "资源"
         self.tab_rects = {}
         tab_w, tab_h, gap = 120, 30, 12
@@ -47,9 +50,12 @@ class WarehouseView(ScrollView):
         self.weapon_sell_buttons = []  # [(rect, weapon_dict, sell_price)]
         self.equip_item_buttons = []   # [(rect, equip_dict)]
         self.equip_sell_buttons = []   # [(rect, equip_dict, sell_price)]
-        # 资源售卖数量对话框状态（2026-10-04：售卖改选数量，仿 backpack 丢弃弹窗）
+        self.box_open_buttons = []     # [(rect, box_dict)]（宝箱 Tab）
+        # 数量对话框状态（2026-10-04：售卖改选数量，仿 backpack 丢弃弹窗；
+        # 2026-11-21：同一套数量选择复用于「开宝箱」，由 _qty_dialog_kind 区分）
         self._sell_dialog_active = False   # 对话框是否显示
-        self._sell_dialog_item = None      # (wh_id, item_id, name, max_qty, gold_per)
+        self._qty_dialog_kind = "sell"     # "sell"=售卖资源 / "box"=开宝箱
+        self._sell_dialog_item = None      # sell:(wh_id,item_id,name,max_qty,gold_per) / box:(box_type,box_id,name,max_qty,0)
         self._sell_dialog_qty = 1          # 确认时生效的售卖数量
         self._sell_dialog_input = "1"      # 输入缓冲区（字符串）
         self._sell_dialog_btn_1 = None     # "卖1个" 按钮
@@ -115,15 +121,35 @@ class WarehouseView(ScrollView):
                 self._toast(f"已出售 {name} x1，+{gold} 金币", (140, 230, 140))
             return
         self._sell_dialog_active = True
+        self._qty_dialog_kind = "sell"
         self._sell_dialog_item = (wh_id, item_id, name, max_qty, gold_per)
         self._sell_dialog_qty = 1
         self._sell_dialog_input = "1"
-        # 按钮布局与背包丢弃弹窗完全一致（标题→数量→快捷按钮→输入框→确认/取消）
+        self._setup_qty_dialog_buttons()
+
+    def _setup_qty_dialog_buttons(self) -> None:
+        """数量对话框按钮布局（售卖/开箱共用：标题→数量→快捷按钮→输入框→确认/取消）"""
         cx, cy = WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2
         self._sell_dialog_btn_1 = arcade.XYWH(cx - 60, cy + 5, 100, 32)
         self._sell_dialog_btn_all = arcade.XYWH(cx + 60, cy + 5, 100, 32)
         self._sell_dialog_btn_confirm = arcade.XYWH(cx + 60, cy - 75, 80, 32)
         self._sell_dialog_btn_cancel = arcade.XYWH(cx - 60, cy - 75, 80, 32)
+
+    def _show_box_dialog(self, box: dict) -> None:
+        """打开宝箱数量对话框（1 个直接开，多箱弹数量选择，与购买数量选择同模式）"""
+        max_qty = int(box.get("quantity", 0))
+        if max_qty <= 0:
+            self._rebuild()  # 库存已空，刷新列表防幽灵按钮
+            return
+        if max_qty == 1:
+            self._open_boxes(box["box_type"], box["box_id"], 1)
+            return
+        self._sell_dialog_active = True
+        self._qty_dialog_kind = "box"
+        self._sell_dialog_item = (box["box_type"], box["box_id"], box["name"], max_qty, 0)
+        self._sell_dialog_qty = 1
+        self._sell_dialog_input = "1"
+        self._setup_qty_dialog_buttons()
 
     def _handle_sell_dialog_click(self, x: int, y: int) -> None:
         """处理售卖对话框内的按钮点击（弹窗激活时 on_mouse_press 只进本方法）"""
@@ -149,13 +175,20 @@ class WarehouseView(ScrollView):
             return
 
     def _execute_sell(self) -> None:
-        """执行售卖并关闭对话框（部分售出走 sell_warehouse_item 的 qty 参数）"""
+        """执行对话框确认动作（售卖资源 / 开宝箱），随后关闭对话框"""
         if not self._sell_dialog_item:
             return
-        wh_id, item_id, name, max_qty, _gold_per = self._sell_dialog_item
+        kind = self._qty_dialog_kind
+        item = self._sell_dialog_item
         qty = self._sell_dialog_qty
         self._sell_dialog_active = False
         self._sell_dialog_item = None
+        self._qty_dialog_kind = "sell"
+        if kind == "box":
+            box_type, box_id, _name, _max_qty, _ = item
+            self._open_boxes(box_type, box_id, qty)
+            return
+        wh_id, item_id, name, max_qty, _gold_per = item
         pid = self.window.game_state.player_id
         gold, _ = sell_warehouse_item(pid, wh_id, qty=qty)
         self._rebuild()
@@ -163,6 +196,20 @@ class WarehouseView(ScrollView):
             self._toast(f"已出售 {name} x{qty}，+{gold} 金币", (140, 230, 140))
         else:
             self._toast("出售失败：物品已不存在", (255, 120, 120))
+
+    def _open_boxes(self, box_type: str, box_id: str, qty: int) -> None:
+        """开启 qty 个仓库宝箱并汇总结果（产物按容量入仓，装不下转邮件）"""
+        pid = self.window.game_state.player_id
+        results = open_warehouse_boxes(pid, box_type, box_id, qty)
+        self._rebuild()
+        if not results:
+            self._toast("开箱失败：宝箱已不存在", (255, 120, 120))
+            return
+        shown = "、".join(f"{r['name']} Lv.{r['level']}" for r in results[:3])
+        more = f" 等 {len(results)} 件" if len(results) > 3 else ""
+        mailed = sum(1 for r in results if r.get("mailed"))
+        suffix = f"（{mailed} 件仓库已满，转入邮件）" if mailed else ""
+        self._toast(f"开启 {len(results)} 个：{shown}{more}{suffix}", (140, 230, 140))
 
     def _draw_sell_dialog(self) -> None:
         """绘制售卖数量对话框（屏幕坐标系覆盖层，不受滚动影响）
@@ -175,26 +222,35 @@ class WarehouseView(ScrollView):
             (0, 0, 0, 150)
         )
         cx, cy = WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2
-        wh_id, item_id, name, max_qty, gold_per = self._sell_dialog_item
+        _a, _b, name, max_qty, gold_per = self._sell_dialog_item
+        is_box = self._qty_dialog_kind == "box"
         # 对话框背景 + 白色描边感（用两层实心矩形叠出边框，禁 outline 线框）
         arcade.draw_rect_filled(arcade.XYWH(cx, cy, 336, 246), (235, 235, 235))
         arcade.draw_rect_filled(arcade.XYWH(cx, cy, 324, 234), (30, 35, 50))
-        # 标题与数量/价格信息
-        self._tc.text("sdlg_title", f"售卖: {name}", cx, cy + 88,
-                      arcade.color.WHITE, 16, anchor_x="center")
-        self._tc.text("sdlg_max", f"当前数量: {max_qty}　单价: {gold_per} 金币/个",
-                      cx, cy + 62, arcade.color.LIGHT_GRAY, 13, anchor_x="center")
-        # 合计预览（按当前输入框数值实时换算，仅展示）
-        try:
-            preview = max(1, min(int(self._sell_dialog_input), max_qty))
-        except ValueError:
-            preview = 1
-        self._tc.text("sdlg_total", f"合计可得: {gold_per * preview} 金币",
-                      cx, cy + 38, arcade.color.GOLD, 13, anchor_x="center")
-        # "卖1个" / "全部(N)" 快捷按钮
+        # 标题与数量信息（宝箱显示持有数量，资源显示单价）
+        self._tc.text("sdlg_title", f"开启: {name}" if is_box else f"售卖: {name}",
+                      cx, cy + 88, arcade.color.WHITE, 16, anchor_x="center")
+        info = (f"当前数量: {max_qty} 个"
+                if is_box else f"当前数量: {max_qty}　单价: {gold_per} 金币/个")
+        self._tc.text("sdlg_max", info, cx, cy + 62, arcade.color.LIGHT_GRAY, 13,
+                      anchor_x="center")
+        if is_box:
+            # 宝箱不显示金额，改为说明「开几个就出几件随机装备」
+            self._tc.text("sdlg_total", "每箱随机产出 1 件武器/装备（按箱子档位决定等级）",
+                          cx, cy + 38, arcade.color.GOLD, 13, anchor_x="center")
+        else:
+            # 合计预览（按当前输入框数值实时换算，仅展示）
+            try:
+                preview = max(1, min(int(self._sell_dialog_input), max_qty))
+            except ValueError:
+                preview = 1
+            self._tc.text("sdlg_total", f"合计可得: {gold_per * preview} 金币",
+                          cx, cy + 38, arcade.color.GOLD, 13, anchor_x="center")
+        # "开1个/卖1个" / "全部(N)" 快捷按钮
         if self._sell_dialog_btn_1:
             arcade.draw_rect_filled(self._sell_dialog_btn_1, (50, 90, 60))
-            self._tc.text("sdlg_btn_1", "卖1个", self._sell_dialog_btn_1.center_x,
+            self._tc.text("sdlg_btn_1", "开1个" if is_box else "卖1个",
+                          self._sell_dialog_btn_1.center_x,
                           self._sell_dialog_btn_1.center_y, arcade.color.WHITE, 12,
                           anchor_x="center", anchor_y="center")
         if self._sell_dialog_btn_all:
@@ -227,6 +283,7 @@ class WarehouseView(ScrollView):
         self.weapon_sell_buttons = []
         self.equip_item_buttons = []
         self.equip_sell_buttons = []
+        self.box_open_buttons = []
         pid = self.window.game_state.player_id
         wh = get_warehouse(pid)
         # 阶段11：缓存仓库等级/容量（on_draw 只读缓存，不每帧查库——同 start_view 禁每帧查库约定）
@@ -239,6 +296,7 @@ class WarehouseView(ScrollView):
         self._wh_items = wh
         self._wh_weapons = get_weapons(pid)
         self._wh_equipment = get_equipment_inventory(pid)
+        self._wh_boxes = get_warehouse_boxes(pid)
         self._wh_gold = get_gold(pid)
         self._wh_sell_bonus = market_sell_bonus(get_facility_level(pid, MARKET_FACILITY_ID))
         y = WINDOW_HEIGHT - 160  # 内容区起点（下方为 Tab 栏，与 on_draw 一致）
@@ -269,6 +327,9 @@ class WarehouseView(ScrollView):
             # 每条武器基础占 32px；带效果词条额外占 16px（效果行；神器特效行已移除，不再计入）
             extra = sum(16 for w in weapons if w["effects"])
             total = header_height + 50 + len(weapons) * 32 + extra + 100
+        elif self._tab == "宝箱":
+            # 每个宝箱占 36px（名称/数量 + 开启按钮同行）
+            total = header_height + 50 + len(self._wh_boxes) * 36 + 100
         else:  # 装备
             # 每条装备基础占 32px；带效果词条额外占 16px（效果行；神器特效行已移除，不再计入）
             extra = 0
@@ -436,6 +497,32 @@ class WarehouseView(ScrollView):
                 self._tc.text("eq_empty", "(无装备)", 60, y, arcade.color.GRAY, 12)
                 y -= 32
 
+        elif self._tab == "宝箱":
+            # ── 宝箱列表（2026-11-21：市场购买/任务奖励的箱子先入库，这里按数量开启）──
+            from config import EQUIPMENT_BOXES, WEAPON_BOXES  # 延迟导入
+            self.box_open_buttons = []
+            self._tc.text("box_title", "宝箱:", 50, y, arcade.color.WHITE, 16)
+            y -= 30
+            for i, b in enumerate(self._wh_boxes):
+                box_defs = WEAPON_BOXES if b["box_type"] == "weapon" else EQUIPMENT_BOXES
+                lo, hi = box_defs.get(b["box_id"], {}).get("level_range", (1, 1))
+                kind_label = "武器箱" if b["box_type"] == "weapon" else "装备箱"
+                self._tc.text(
+                    f"box_{i}",
+                    f"[{kind_label}] {b['name']}  产出 Lv.{lo}-{hi}  x{b['quantity']}",
+                    60, y, b["color"], 14,
+                )
+                open_btn = arcade.XYWH(WINDOW_WIDTH - 80, y + 6, 80, 26)
+                self.box_open_buttons.append((open_btn, b))
+                arcade.draw_rect_filled(open_btn, (60, 110, 60))
+                self._tc.text(f"box_open_{i}", "开启", open_btn.center_x, open_btn.center_y,
+                              arcade.color.WHITE, 11, anchor_x="center", anchor_y="center")
+                y -= 36
+            if not self._wh_boxes:
+                self._tc.text("box_empty", "(无宝箱，可在市场购买或任务奖励获得)", 60, y,
+                              arcade.color.GRAY, 12)
+                y -= 36
+
         # 滚动条（基类统一绘制 + 支持鼠标拖拽）
         self.draw_scrollbar(WINDOW_HEIGHT - 160)
 
@@ -592,6 +679,12 @@ class WarehouseView(ScrollView):
         # 右侧滚动条拖拽（轨道顶部与 on_draw 内容区一致）
         if self.start_scroll_drag(x, y, WINDOW_HEIGHT - 160):
             return
+
+        # 开启宝箱（宝箱 Tab：按钮 center_y 已在 on_draw 时包含 offset）
+        for btn, box in self.box_open_buttons:
+            if btn.point_in_rect((x, y)):
+                self._show_box_dialog(box)
+                return
 
         # 装备武器（btn.center_y 已在 on_draw 时包含 offset，直接使用）
         for btn, w in self.equip_buttons:

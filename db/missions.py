@@ -34,6 +34,7 @@ from entities.mission_defs import (
     ACHIEVEMENT_BY_ID,
     DAILY_BY_ID,
     DAILY_POOL,
+    REWARD_POOLS,
 )
 
 
@@ -59,11 +60,13 @@ def _daily_row_to_dict(row: tuple) -> dict:
     """daily_missions 行 → 任务字典（合并 mission_defs 的展示/奖励字段）
 
     输出字段：slot / mission_id / desc / event / target / progress / claimed /
-    complete / reward_gold / reward_exp / date
+    complete / reward_gold / reward_pool / reward_pool_name / reward_pool_desc / date
     """
     slot, mission_id, progress, claimed, date_str = row[0], row[1], row[2], row[3], row[4]
     defn = DAILY_BY_ID.get(str(mission_id), {})
     target = int(defn.get("target", 0))
+    pool_id = str(defn.get("reward_pool", "easy"))
+    pool = REWARD_POOLS.get(pool_id, {})
     return {
         "slot": slot,
         "mission_id": mission_id,
@@ -74,7 +77,9 @@ def _daily_row_to_dict(row: tuple) -> dict:
         "claimed": bool(claimed),
         "complete": progress >= target,
         "reward_gold": int(defn.get("reward_gold", 0)),
-        "reward_exp": int(defn.get("reward_exp", 0)),
+        "reward_pool": pool_id,
+        "reward_pool_name": str(pool.get("name", pool_id)),
+        "reward_pool_desc": str(pool.get("desc", "")),
         "date": date_str,
     }
 
@@ -161,9 +166,10 @@ def bump_mission(player_id: int, event: str, amount: int = 1) -> list[str]:
 def claim_daily(player_id: int, slot: int) -> dict:
     """领取指定槽位（0..DAILY_COUNT-1）的今日任务奖励
 
-    成功：{"ok": True, "mission_id", "desc", "reward_gold", "reward_exp"}
+    成功：{"ok": True, "mission_id", "desc", "reward_gold",
+           "reward_pool", "reward_pool_name", "reward_pool_desc"}
     失败：{"ok": False, "reason": "..."}（槽位无任务 / 未完成 / 已领取）
-    本层只返回奖励数据，金币与经验由上层发放。
+    本层只返回奖励数据；金币与随机池物品由上层发放（见 views/mission_view.py）。
     """
     for row in _ensure_today(player_id):
         if int(row[0]) != slot:
@@ -183,7 +189,9 @@ def claim_daily(player_id: int, slot: int) -> dict:
             "mission_id": d["mission_id"],
             "desc": d["desc"],
             "reward_gold": d["reward_gold"],
-            "reward_exp": d["reward_exp"],
+            "reward_pool": d["reward_pool"],
+            "reward_pool_name": d["reward_pool_name"],
+            "reward_pool_desc": d["reward_pool_desc"],
         }
     return {"ok": False, "reason": "槽位无任务"}
 
@@ -204,6 +212,8 @@ def get_achievements(player_id: int) -> list[dict]:
         aid = str(defn["id"])
         progress, claimed = saved.get(aid, (0, False))
         target = int(defn["target"])
+        pool_id = str(defn.get("reward_pool", "easy"))
+        pool = REWARD_POOLS.get(pool_id, {})
         out.append({
             "achievement_id": aid,
             "desc": defn["desc"],
@@ -213,6 +223,9 @@ def get_achievements(player_id: int) -> list[dict]:
             "claimed": claimed,
             "complete": progress >= target,
             "reward_gold": int(defn["reward_gold"]),
+            "reward_pool": pool_id,
+            "reward_pool_name": str(pool.get("name", pool_id)),
+            "reward_pool_desc": str(pool.get("desc", "")),
         })
     return out
 
@@ -259,9 +272,10 @@ def bump_achievement(player_id: int, event: str, amount: int = 1) -> list[str]:
 def claim_achievement(player_id: int, achievement_id: str) -> dict:
     """领取成就奖励（一次性）
 
-    成功：{"ok": True, "achievement_id", "desc", "reward_gold"}
+    成功：{"ok": True, "achievement_id", "desc", "reward_gold",
+           "reward_pool", "reward_pool_name", "reward_pool_desc"}
     失败：{"ok": False, "reason": "..."}（成就不存在 / 未达成 / 已领取）
-    本层只返回奖励数据，金币由上层发放。
+    本层只返回奖励数据；金币与随机池物品由上层发放（见 views/mission_view.py）。
     """
     defn = ACHIEVEMENT_BY_ID.get(achievement_id)
     if defn is None:
@@ -288,9 +302,14 @@ def claim_achievement(player_id: int, achievement_id: str) -> dict:
             "UPDATE mission_progress SET claimed=1 WHERE player_id=? AND achievement_id=?",
             (player_id, achievement_id),
         )
+    pool_id = str(defn.get("reward_pool", "easy"))
+    pool = REWARD_POOLS.get(pool_id, {})
     return {
         "ok": True,
         "achievement_id": achievement_id,
         "desc": defn["desc"],
         "reward_gold": int(defn["reward_gold"]),
+        "reward_pool": pool_id,
+        "reward_pool_name": str(pool.get("name", pool_id)),
+        "reward_pool_desc": str(pool.get("desc", "")),
     }

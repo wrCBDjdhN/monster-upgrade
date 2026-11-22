@@ -1098,10 +1098,12 @@ WAREHOUSE_MAX_LEVEL = 5              # 仓库最高等级（Lv5 = 50 + 4×25 = 1
 # 消耗仓库材料 + 金币。**数值可调**：随仓库容量曲线与中期金币产出校准，
 # 只想改数值时改本表即可（db/warehouse.py 经 warehouse_upgrade_cost_at 读取，禁硬编码）。
 WAREHOUSE_UPGRADE_COSTS = {
-    2: {"gold": 400, "wood": 20, "stone": 15},
-    3: {"gold": 800, "wood": 30, "stone": 25, "ore": 10},
-    4: {"gold": 1500, "wood": 45, "stone": 35, "ore": 20},
-    5: {"gold": 2600, "wood": 60, "stone": 50, "ore": 30},
+    # 2026-11-21 用户反馈：原费用材料过多（满级累计 230 件，接近仓库容量上限）。
+    # 下调为累计 82 件 / 金币 3050，保证升级时不必先清空半个仓库。
+    2: {"gold": 200, "wood": 10, "stone": 8},
+    3: {"gold": 450, "wood": 16, "stone": 12, "ore": 5},
+    4: {"gold": 900, "wood": 24, "stone": 18, "ore": 10},
+    5: {"gold": 1500, "wood": 32, "stone": 24, "ore": 15},
 }
 
 

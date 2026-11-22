@@ -1,14 +1,18 @@
-"""市场批量购买弹窗 + 开箱逻辑（从 market_view.py 拆分）
+"""市场批量购买弹窗（从 market_view.py 拆分）
 
 MarketBulkOverlay 持有市场视图引用（self.mv），所有市场状态
-（_bulk_state/_box_results/_tc 等）均通过 self.mv 访问，不新增全局状态。
+（_bulk_state/_tc 等）均通过 self.mv 访问，不新增全局状态。
+
+2026-11-21 用户口径：武器箱/装备箱购买后**只入库不开箱**（每箱占 1 格），
+开启入口统一在仓库「宝箱」页，故本模块不再包含开箱逻辑。
 """
 
 import arcade
-import random
-from config import WINDOW_WIDTH, WINDOW_HEIGHT, WEAPON_BOXES, EQUIPMENT_BOXES, ALL_WEAPON_IDS, ALL_EQUIP_POOL
-from db.database import get_gold, spend_gold, add_equipment, add_potion, add_weapon
-from entities.weapon_defs import MELEE_WEAPONS, RANGED_WEAPONS
+from config import WINDOW_WIDTH, WINDOW_HEIGHT, WEAPON_BOXES, EQUIPMENT_BOXES
+from db.database import (
+    get_gold, spend_gold, add_equipment, add_potion, add_weapon,
+    add_warehouse_box, warehouse_remaining_capacity,
+)
 from game.sound_manager import sound_manager
 
 
@@ -29,6 +33,9 @@ class MarketBulkOverlay:
         gold = get_gold(pid)
         cost = data["cost"]
         max_qty = max(1, gold // cost) if cost > 0 else 1
+        # 宝箱每箱占 1 格仓库：滑块上限同时受剩余容量限制（避免选到装不下的数量）
+        if item_type == "buy_box":
+            max_qty = min(max_qty, warehouse_remaining_capacity(pid))
         self.mv._bulk_state = {
             "item_type": item_type,
             "data": data,
@@ -100,7 +107,7 @@ class MarketBulkOverlay:
             return
 
     def _confirm_bulk(self):
-        """确认批量购买：一次性扣费，按数量循环入库；宝箱则批量开箱并播放序列动画
+        """确认批量购买：一次性扣费，按数量循环入库；宝箱只入库不开箱（仓库页开启）
 
         购买前后对比 codex_unlocks 集合：有新增条目时在市场界面弹「图鉴解锁」toast。
         """
@@ -113,6 +120,15 @@ class MarketBulkOverlay:
         item_type = st["item_type"]
         data = st["data"]
         total_cost = cost * qty
+        # 宝箱先入库再开启：购买前严格校验仓库剩余容量（每箱 1 格），装不下不扣钱
+        if item_type == "buy_box":
+            remain = warehouse_remaining_capacity(pid)
+            if qty > remain:
+                self.mv.show_toast(
+                    f"仓库容量不足（剩 {remain} 格，需 {qty} 格），请先升级仓库或清理空间",
+                    3.0,
+                )
+                return
         # 再次校验金币足够（防止弹窗停留期间余额变动）
         if get_gold(pid) < total_cost:
             return
@@ -134,10 +150,12 @@ class MarketBulkOverlay:
                 add_weapon(pid, data["item_id"], data["name"], data["kind"],
                            data["damage"], data["attack_speed"])
         elif item_type == "buy_box":
-            # 批量开箱：逐个随机产出并入库存，结果进入队列，随后统一播放动画
-            for _ in range(qty):
-                self._roll_box(data["box_type"], data["box_id"])
-            self._start_box_sequence()
+            # 2026-11-21 用户口径：购买后只入库不开箱（容量已在上方预检），
+            # 玩家到仓库「宝箱」页自选数量开启。
+            add_warehouse_box(pid, data["box_type"], data["box_id"], qty)
+            box_defs = WEAPON_BOXES if data["box_type"] == "weapon" else EQUIPMENT_BOXES
+            box_name = box_defs.get(data["box_id"], {}).get("name", data["box_id"])
+            self.mv.show_toast(f"已存入仓库：{box_name}×{qty}（到仓库-宝箱页开启）", 3.0)
         self.mv._bulk_state = None
         self.mv._rebuild_keep_view()
         # 购买后 diff：新解锁条目弹 toast（最多展示 3 个名称，超出用「等」省略）
@@ -151,56 +169,6 @@ class MarketBulkOverlay:
             else:
                 toast = f"图鉴解锁: {', '.join(names)}"
             self.mv.show_toast(toast, 3.0)
-
-    def _roll_box(self, box_type, box_id):
-        """开一个宝箱：随机产出并入库存，结果追加到 _box_results 队列
-
-        原单次开箱逻辑抽离以便批量复用：每次产出相互独立
-        """
-        pid = self.mv.window.game_state.player_id
-        if box_type == "weapon":
-            box = WEAPON_BOXES[box_id]
-            random_wid = random.choice(ALL_WEAPON_IDS)
-            wdef = RANGED_WEAPONS.get(random_wid) or MELEE_WEAPONS.get(random_wid)
-            if wdef:
-                lo, hi = box["level_range"]
-                level = random.randint(lo, hi)
-                # 根据等级调整伤害（平方根亚线性倍率，与锻造/升级数值平衡一致）
-                from config import upgrade_mult_product
-                adjusted_damage = round(wdef["damage"] * upgrade_mult_product(level), 1)
-                add_weapon(pid, random_wid, wdef["name"], wdef["kind"],
-                           adjusted_damage, wdef.get("attack_speed", 1.0), level)
-                self.mv._box_results.append({
-                    "name": wdef["name"], "level": level,
-                    "color": wdef.get("color", (255, 200, 50)),
-                })
-        else:  # equipment box
-            box = EQUIPMENT_BOXES[box_id]
-            slot, eid = random.choice(ALL_EQUIP_POOL)
-            lo, hi = box["level_range"]
-            level = random.randint(lo, hi)
-            add_equipment(pid, eid, slot, level)
-            # 获取装备名称
-            from entities.equipment_defs import HELMETS, ARMORS
-            eq_def = HELMETS.get(eid) or ARMORS.get(eid)
-            eq_name = eq_def["name"] if eq_def else eid
-            self.mv._box_results.append({
-                "name": eq_name, "level": level,
-                "color": eq_def.get("color", (150, 180, 200)) if eq_def else (150, 180, 200),
-            })
-
-    def _start_box_sequence(self):
-        """启动批量开箱序列动画：按批量数动态压缩单箱时长，避免大批量等待过久"""
-        total = len(self.mv._box_results)
-        if total <= 0:
-            return
-        self.mv._box_index = 0
-        self.mv._box_total = total
-        # 批量越多单箱动画越快（买 1 个用默认 1.5s，大批量压缩到 0.45s 下限）
-        self.mv._box_open_duration = max(0.45, 1.5 - (total - 1) * 0.04)
-        self.mv._box_open_timer = 0.0
-        self.mv._box_opening = True
-        sound_manager.play_chest_open()
 
     def _draw_bulk_overlay(self):
         """绘制批量购买弹窗：遮罩 + 面板 + 数量显示 + 滑块 + 输入框 + 加减 + 按钮"""

@@ -1,4 +1,6 @@
-"""市场页面：升级武器/装备 + 购买装备/药水 + 开箱 + 词条重铸（支持滚轮滚动）
+"""市场页面：升级武器/装备 + 购买装备/药水/宝箱 + 词条重铸（支持滚轮滚动）
+
+宝箱（武器箱/装备箱）2026-11-21 起购买后只入仓库，开启入口在仓库「宝箱」页。
 
 阶段 10 设施增益接入：
 - 折扣：所有**购买**价（武器/头盔/护甲/背包/药水/宝箱）套 apply_market_discount，
@@ -109,13 +111,6 @@ class MarketView(ScrollView):
             self.tab_rects[name] = arcade.XYWH(
                 start_x + i * (tab_w + gap) + tab_w / 2, WINDOW_HEIGHT - 135, tab_w, tab_h,
             )
-        # 开箱动画状态（支持批量：_box_results 为本次批量开出的结果队列）
-        self._box_opening = False
-        self._box_open_timer = 0.0
-        self._box_open_duration = 1.5  # 单个宝箱动画持续时间（秒）
-        self._box_results = []  # 批量开箱结果队列：[{"name":..., "level":..., "color":...}, ...]
-        self._box_index = 0     # 当前播放到第几个（0 起）
-        self._box_total = 0     # 本次批量开箱总数
         # 批量购买弹窗状态（None = 关闭）
         self._bulk_state = None
         # 词条重铸确认弹层状态（None = 关闭）：
@@ -519,7 +514,8 @@ class MarketView(ScrollView):
         else:  # 宝箱
             # === 武器箱区域 ===
             self.content_items.append(("header", y, "─── 武器箱 ───"))
-            self.content_items.append(("subheader", y - 18, "条件: 金币 (随机获得一把武器)"))
+            self.content_items.append(("subheader", y - 18,
+                                       "条件: 金币 (购买后存入仓库，到仓库-宝箱页开启)"))
             y -= 40
             for box_id, box in WEAPON_BOXES.items():
                 cost = apply_market_discount(box["price"], self._facility_level)
@@ -534,7 +530,8 @@ class MarketView(ScrollView):
             # === 装备箱区域 ===
             y -= 20
             self.content_items.append(("header", y, "─── 装备箱 ───"))
-            self.content_items.append(("subheader", y - 18, "条件: 金币 (随机获得一件装备)"))
+            self.content_items.append(("subheader", y - 18,
+                                       "条件: 金币 (购买后存入仓库，到仓库-宝箱页开启)"))
             y -= 40
             for box_id, box in EQUIPMENT_BOXES.items():
                 cost = apply_market_discount(box["price"], self._facility_level)
@@ -609,8 +606,8 @@ class MarketView(ScrollView):
         return (25, 20, 35)
 
     def on_mouse_scroll(self, x, y, scroll_x, scroll_y):
-        """覆盖基类：开箱动画 / 重铸弹层打开时禁止滚动"""
-        if self._box_opening or self._reforge_state:
+        """覆盖基类：重铸弹层打开时禁止滚动"""
+        if self._reforge_state:
             return
         super().on_mouse_scroll(x, y, scroll_x, scroll_y)
 
@@ -620,7 +617,7 @@ class MarketView(ScrollView):
         self._toast_timer = duration
 
     def on_update(self, delta_time: float):
-        """更新开箱动画计时器（批量：逐个播放结果队列）"""
+        """更新输入光标计时器与图鉴解锁 toast 倒计时"""
         self._input_cursor_timer += delta_time
         # 图鉴解锁 toast 倒计时
         if self._toast_timer > 0.0:
@@ -628,18 +625,6 @@ class MarketView(ScrollView):
             if self._toast_timer <= 0.0:
                 self._toast_timer = 0.0
                 self._toast_text = ""
-        if self._box_opening:
-            self._box_open_timer += delta_time
-            if self._box_open_timer >= self._box_open_duration:
-                # 当前宝箱动画结束，播放下一个或收尾
-                self._box_index += 1
-                if self._box_index >= len(self._box_results):
-                    self._box_opening = False
-                    self._box_results = []
-                    self._box_index = 0
-                    self._box_total = 0
-                else:
-                    self._box_open_timer = 0.0
 
     def _reforge_btn_rect(self, screen_y: float) -> arcade.Rect:
         """行内「重铸」按钮矩形（绘制与 on_mouse_press 共用，保证点击判定与画面完全一致）"""
@@ -840,62 +825,6 @@ class MarketView(ScrollView):
         self._tc.text("nav_wh", "仓库", self.wh_rect.center_x, self.wh_rect.center_y,
                       arcade.color.WHITE, 13, anchor_x="center", anchor_y="center")
 
-        # === 开箱动画覆盖层（支持批量：逐个播放 _box_results 队列）===
-        if self._box_opening and self._box_results:
-            # 半透明黑色遮罩
-            arcade.draw_rect_filled(
-                arcade.XYWH(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2, WINDOW_WIDTH, WINDOW_HEIGHT),
-                (0, 0, 0, 180),
-            )
-            # 动画进度 0→1
-            progress = min(1.0, self._box_open_timer / self._box_open_duration)
-            result = self._box_results[self._box_index]
-            # 缩放效果：从0.5倍放大到1.0倍
-            scale = 0.5 + 0.5 * min(1.0, progress * 2)
-            # 闪光效果：前0.3秒有闪光
-            flash_alpha = max(0, 1.0 - progress * 3) * 255
-            # 宝箱图标
-            box_color = result.get("color", (255, 200, 50))
-            box_size = int(80 * scale)
-            arcade.draw_rect_filled(
-                arcade.XYWH(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 + 40, box_size, box_size),
-                box_color,
-            )
-            if flash_alpha > 0:
-                arcade.draw_rect_filled(
-                    arcade.XYWH(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 + 40, box_size + 20, box_size + 20),
-                    (255, 255, 255, int(flash_alpha)),
-                )
-            # 获得物品信息（动画后半段显示）
-            if progress > 0.5:
-                text_alpha = min(1.0, (progress - 0.5) * 4)
-                name = result.get("name", "")
-                level = result.get("level", 1)
-                text = f"获得 {name} Lv.{level}!"
-                self._tc.text(
-                    "box_result", text, WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - 40,
-                    arcade.color.GOLD, 22, anchor_x="center", anchor_y="center",
-                )
-            # 批量进度（仅一次购买多个宝箱时显示）
-            if self._box_total > 1:
-                self._tc.text(
-                    "box_progress", f"宝箱 {self._box_index + 1} / {self._box_total}",
-                    WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 + 150,
-                    arcade.color.LIGHT_GRAY, 14, anchor_x="center", anchor_y="center",
-                )
-                # 整体进度条（尾部两相进度 = 已播完数量 + 当前箱内进度）
-                total_progress = (self._box_index + progress) / self._box_total
-                bar_w = 360
-                arcade.draw_rect_filled(
-                    arcade.XYWH(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 + 120, bar_w, 10),
-                    (60, 60, 60),
-                )
-                arcade.draw_rect_filled(
-                    arcade.XYWH(WINDOW_WIDTH // 2 - bar_w / 2 + bar_w * total_progress / 2,
-                                WINDOW_HEIGHT // 2 + 120, bar_w * total_progress, 10),
-                    arcade.color.GOLD,
-                )
-
         # === 批量购买弹窗覆盖层 ===
         self._draw_bulk_overlay()
 
@@ -926,10 +855,6 @@ class MarketView(ScrollView):
     def on_mouse_press(self, x, y, button, modifiers):
         # 任何点击都可能成交：置脏，下一帧重读金币/装备缓存（避免 on_draw 每帧查库）
         self._cache_dirty = True
-        # 动画中禁止所有点击
-        if self._box_opening:
-            return
-
         sound_manager.play_ui()
         # 新手教程向导显示：只响应 下一步/跳过（最后一页点完成后标记教程结束）
         if self._tut_showing():
@@ -1048,7 +973,7 @@ class MarketView(ScrollView):
 
             elif item_type == "buy_box":
                 btn = arcade.XYWH(WINDOW_WIDTH - 100, screen_y + 5, 90, 26)
-                if btn.point_in_rect((x, y)) and data["can_buy"] and not self._box_opening:
+                if btn.point_in_rect((x, y)) and data["can_buy"]:
                     self._open_bulk(item_type, data)
                     return
 

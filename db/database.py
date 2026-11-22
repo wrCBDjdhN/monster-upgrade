@@ -248,6 +248,18 @@ def init_db():
                 FOREIGN KEY(player_id) REFERENCES players(id)
             )
         """)
+        # 仓库宝箱表（阶段13：武器箱/装备箱先入库再开启，见 db/boxes.py；
+        # 复合主键保证同玩家同箱叠加一行，quantity 每箱占 1 格仓库容量）
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS warehouse_boxes (
+                player_id INTEGER NOT NULL,
+                box_type TEXT NOT NULL CHECK(box_type IN ('weapon', 'equipment')),
+                box_id TEXT NOT NULL,
+                quantity INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (player_id, box_type, box_id),
+                FOREIGN KEY(player_id) REFERENCES players(id)
+            )
+        """)
         # 邮件主表（阶段12：系统奖励与满仓溢出兜底统一收件箱，见 db/mail.py；
         # gold/exp 为待领数值，创建时不入账，领取时才由视图发放）
         c.execute("""
@@ -365,5 +377,11 @@ from db.map_progress import get_stars, record_stars  # noqa: F401, E402
 # 邮件管理（阶段12：系统奖励 / 满仓溢出兜底，领取在 views/mail_view.py）
 from db.mail import (  # noqa: F401, E402
     create_mail, get_mails, get_mail, get_unclaimed_mail_count,
-    can_claim_mail, claim_mail,
+    can_claim_mail, claim_mail, delete_claimed_mails,
+)
+
+# 仓库宝箱管理（阶段13：武器箱/装备箱先入库，仓库「宝箱」页开启，见 db/boxes.py）
+from db.boxes import (  # noqa: F401, E402
+    add_warehouse_box, get_warehouse_boxes, consume_warehouse_box,
+    warehouse_box_count, box_type_of,
 )

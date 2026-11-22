@@ -17,7 +17,7 @@ from config import WINDOW_WIDTH, WINDOW_HEIGHT
 from db.database import (
     get_mails, can_claim_mail, claim_mail, warehouse_remaining_capacity,
     add_gold, add_exp, add_warehouse_item, create_weapon, add_equipment,
-    add_potion,
+    add_potion, delete_claimed_mails, add_warehouse_box, box_type_of,
 )
 from views.scroll_view import ScrollView
 from views.text_cache import TextCache
@@ -40,6 +40,9 @@ def _item_label(item_type: str, item_id: str, level: int) -> str:
     if item_type == "potion":
         from entities.equipment_defs import POTIONS
         return POTIONS.get(item_id, {}).get("name", item_id)
+    if item_type == "box":
+        from config import EQUIPMENT_BOXES, WEAPON_BOXES
+        return {**WEAPON_BOXES, **EQUIPMENT_BOXES}.get(item_id, {}).get("name", item_id)
     return item_id
 
 
@@ -75,6 +78,7 @@ class MailView(ScrollView):
         self._claim_rects: list[tuple[arcade.Rect, int]] = []
         self._claim_hover = -1
         self.back_hover = False
+        self.delete_hover = False
         self._toasts: list[dict] = []
         self._pulse = 0.0
         self._refresh()
@@ -104,6 +108,11 @@ class MailView(ScrollView):
     def content_top(self) -> float:
         """可滚动内容区顶部 y（顶部标题栏下方）"""
         return WINDOW_HEIGHT - 100
+
+    @property
+    def _delete_rect(self) -> arcade.Rect:
+        """「删除已领取」按钮矩形（顶部左侧，与标题/容量提示同排）"""
+        return arcade.XYWH(self.LIST_X + 80, WINDOW_HEIGHT - 42, 160, 32)
 
     def _max_scroll(self) -> float:
         depth = max(0, (len(self._mails) - 1) * self.ROW_STEP + self.ROW_H)
@@ -137,6 +146,19 @@ class MailView(ScrollView):
         self._tc.text("remain", f"仓库剩余容量 {hint} 格",
                       WINDOW_WIDTH - 100, WINDOW_HEIGHT - 42,
                       arcade.color.LIGHT_GRAY, 16, anchor_x="center")
+        # 已领取邮件批量清理（没有可删的邮件时置灰，点击仍给提示）
+        has_claimed = any(m.get("claimed") for m in self._mails)
+        if has_claimed and self.delete_hover:
+            bg = (185, 60, 55)
+        elif has_claimed:
+            bg = (130, 45, 42)
+        else:
+            bg = (58, 60, 70)
+        arcade.draw_rect_filled(self._delete_rect, bg)
+        self._tc.text("delete_claimed", "删除已领取", self._delete_rect.center_x,
+                      self._delete_rect.center_y,
+                      arcade.color.WHITE if has_claimed else arcade.color.GRAY,
+                      13, anchor_x="center", anchor_y="center")
 
     def _draw_rows(self):
         self._claim_rects = []
@@ -231,6 +253,7 @@ class MailView(ScrollView):
         if self._scroll_dragging:
             self.update_scroll_drag(x, y)
         self.back_hover = self.back_rect.point_in_rect((x, y))
+        self.delete_hover = self._delete_rect.point_in_rect((x, y))
         self._claim_hover = -1
         for rect, idx in self._claim_rects:
             if rect.point_in_rect((x, y)):
@@ -245,6 +268,9 @@ class MailView(ScrollView):
             sound_manager.play_ui()
             return
         if self.start_scroll_drag(x, y):
+            return
+        if self._delete_rect.point_in_rect((x, y)):
+            self._delete_claimed()
             return
         for rect, idx in reversed(self._claim_rects):
             if rect.point_in_rect((x, y)):
@@ -278,6 +304,19 @@ class MailView(ScrollView):
         self._grant(pid, mail)
         self._toast("领取成功，奖励已发放", arcade.color.GOLD)
         sound_manager.play_gold_pickup()
+        self._refresh()
+
+    def _delete_claimed(self):
+        """删除全部已领取邮件（奖励已发放，仅清理列表；未领取邮件不动）"""
+        pid = self._player_id()
+        if pid is None:
+            return
+        n = delete_claimed_mails(pid)
+        sound_manager.play_ui()
+        if n > 0:
+            self._toast(f"已删除 {n} 封已领取邮件", arcade.color.LIGHT_GRAY)
+        else:
+            self._toast("没有已领取的邮件", (255, 160, 120))
         self._refresh()
 
     def _grant(self, pid: int, mail: dict):
@@ -318,6 +357,12 @@ class MailView(ScrollView):
                 for _ in range(qty):
                     add_potion(pid, item_id, info["name"], info["effect"],
                                info.get("value", 0), info.get("duration", 0))
+            elif item_type == "box":
+                # 宝箱进仓库（每箱 1 格，容量已由 can_claim_mail 预检），
+                # 玩家到仓库「宝箱」页按数量开启
+                box_type = box_type_of(item_id)
+                if box_type:
+                    add_warehouse_box(pid, box_type, item_id, qty)
 
     def _toast(self, text: str, color):
         self._toasts.append({"text": text, "color": color, "age": 0.0})
